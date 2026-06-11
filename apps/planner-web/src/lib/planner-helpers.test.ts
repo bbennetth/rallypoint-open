@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import {
   clockLabel,
   fmtClock,
+  normalizeDayMode,
   eventDayWindow,
   hasTimeOfDay,
   splitMyDay,
@@ -65,6 +66,20 @@ function eventDay(over: Partial<EventDayDto> = {}): EventDayDto {
     ...over,
   }
 }
+
+describe('normalizeDayMode', () => {
+  it("passes 'upcoming' through", () => {
+    expect(normalizeDayMode('upcoming')).toBe('upcoming')
+  })
+
+  it("defaults 'today' and unknown/empty/null values to 'today'", () => {
+    expect(normalizeDayMode('today')).toBe('today')
+    expect(normalizeDayMode('week')).toBe('today')
+    expect(normalizeDayMode('')).toBe('today')
+    expect(normalizeDayMode(null)).toBe('today')
+    expect(normalizeDayMode(undefined)).toBe('today')
+  })
+})
 
 describe('clockLabel', () => {
   it('formats 12-hour times with AM/PM', () => {

@@ -653,6 +653,9 @@ body {
 
 /* Notes page cards. */
 .pl-note {
+  /* Grid item: without min-width the nowrap title sets the track's auto
+     min-size and pushes the date/View/× controls off-screen. */
+  min-width: 0;
   padding: 10px 14px;
   display: flex;
   align-items: center;

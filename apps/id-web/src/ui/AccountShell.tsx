@@ -5,7 +5,6 @@ import {
   AppChrome as SharedAppChrome,
   AppSwitcher,
   UserMenu,
-  isEmbeddedShell,
   type AppChromeNavItem,
 } from '@rallypoint/ui'
 import { resetAnalytics } from '@rallypoint/web-kit'
@@ -29,9 +28,6 @@ const NAV: readonly AppChromeNavItem[] = [
 
 export function AccountShell({ user, children }: AccountShellProps) {
   const navigate = useNavigate()
-  // Opened from another app's switcher inside the iOS PWA → drop our own
-  // switcher + account icon so this reads as an embedded view.
-  const embedded = isEmbeddedShell()
 
   async function handleSignout() {
     await api.post('/api/v1/ui/signout')
@@ -51,30 +47,22 @@ export function AccountShell({ user, children }: AccountShellProps) {
     <SharedAppChrome
       nav={NAV}
       subLabel="Account"
-      brand={
-        embedded
-          ? undefined
-          : ({ size, showToast }) => (
-              <AppSwitcher
-                current="id"
-                size={size}
-                onToast={showToast}
-                onSignout={handleSignout}
-                appVersion={import.meta.env.VITE_APP_VERSION}
-              />
-            )
-      }
-      userMenu={
-        embedded
-          ? undefined
-          : ({ size }) => (
-              <UserMenu
-                size={size}
-                profile={profile}
-                onSignout={handleSignout}
-              />
-            )
-      }
+      brand={({ size, showToast }) => (
+        <AppSwitcher
+          current="id"
+          size={size}
+          onToast={showToast}
+          onSignout={handleSignout}
+          appVersion={import.meta.env.VITE_APP_VERSION}
+        />
+      )}
+      userMenu={({ size }) => (
+        <UserMenu
+          size={size}
+          profile={profile}
+          onSignout={handleSignout}
+        />
+      )}
     >
       {children}
     </SharedAppChrome>

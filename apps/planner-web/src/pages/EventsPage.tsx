@@ -144,7 +144,7 @@ export function EventsPage() {
       )}
 
       <div className="ev-grid">
-        <nav className="ev-rail" aria-label="Events" style={{ display: 'grid', gap: 7 }}>
+        <nav className="ev-rail" aria-label="Events" data-noswipe style={{ display: 'grid', gap: 7 }}>
           {loadingEvents ? (
             <p className="meta" style={{ color: 'var(--ink-mute)' }}>Loading…</p>
           ) : events.length === 0 ? (

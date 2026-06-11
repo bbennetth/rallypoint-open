@@ -3,7 +3,6 @@ import { RequireSession } from './ui/RequireSession.js'
 import { AppChrome } from './ui/AppChrome.js'
 import { SsoCallbackPage } from './pages/SsoCallbackPage.js'
 import { MyDayPage } from './pages/MyDayPage.js'
-import { UpcomingPage } from './pages/UpcomingPage.js'
 import { TasksPage } from './pages/TasksPage.js'
 import { ShoppingPage } from './pages/ShoppingPage.js'
 import { EventsPage } from './pages/EventsPage.js'
@@ -31,18 +30,8 @@ export function App() {
           </RequireSession>
         }
       />
-      <Route
-        path="/upcoming"
-        element={
-          <RequireSession>
-            {() => (
-              <AppChrome>
-                <UpcomingPage />
-              </AppChrome>
-            )}
-          </RequireSession>
-        }
-      />
+      {/* Upcoming folded into My Day (issue #495); old links land on the toggle. */}
+      <Route path="/upcoming" element={<Navigate to="/me?mode=upcoming" replace />} />
       <Route
         path="/tasks"
         element={

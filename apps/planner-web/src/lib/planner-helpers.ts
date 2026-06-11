@@ -5,6 +5,17 @@
 
 import type { MyDayTask, MyDayEvent, EventDayDto, UpcomingItem } from './api.js'
 
+// ── My Day mode toggle ─────────────────────────────────────────────
+
+// My Day hosts two modes behind a segmented toggle: 'today' (the classic
+// roll-up) and 'upcoming' (the former Upcoming tab, folded in via #495).
+export type DayMode = 'today' | 'upcoming'
+
+// Normalize an untrusted ?mode= URL param value; anything unknown → 'today'.
+export function normalizeDayMode(s: unknown): DayMode {
+  return s === 'upcoming' ? 'upcoming' : 'today'
+}
+
 // ── local date / timezone ──────────────────────────────────────────
 
 // The browser's local calendar date (YYYY-MM-DD) + IANA timezone. Sent to the

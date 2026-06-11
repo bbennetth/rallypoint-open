@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { Icon, type IconName } from './icons.js'
-import { swipeDirection, nextTabIndex } from '../lib/swipe-nav.js'
+import { swipeDirection, nextTabIndex, isSwipeExcluded } from '../lib/swipe-nav.js'
 
 // Rallypoint "Ink" app chrome — the shared shell promoted from planner-web.
 // Desktop: a 220px sidebar (≥1024px). Mobile: a 52px top bar + bottom pill
@@ -102,6 +102,10 @@ export function AppChrome({ nav, subLabel, brand, userMenu, fab, mainRef, mainOv
   function handleTouchStart(e: React.TouchEvent<HTMLElement>) {
     const t = e.touches[0]
     if (!t) return
+    if (isSwipeExcluded(e.target)) {
+      swipeStart.current = null
+      return
+    }
     swipeStart.current = { x: t.clientX, y: t.clientY, t: Date.now() }
   }
 

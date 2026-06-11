@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   addShoppingItemByTitle,
+  completedItemIds,
   groupItemsByCategory,
   isShoppingCategory,
   itemCategory,
@@ -159,6 +160,25 @@ vi.mock('./api.js', async (importOriginal) => {
     getShoppingList: vi.fn(),
     createShoppingItem: vi.fn(),
   }
+})
+
+describe('completedItemIds()', () => {
+  it('returns ids of checked items only, in original order', () => {
+    const items = [
+      makeItem('a', 'Milk', undefined, true),
+      makeItem('b', 'Eggs', undefined, false),
+      makeItem('c', 'Bread', undefined, true),
+    ]
+    expect(completedItemIds(items)).toEqual(['a', 'c'])
+  })
+
+  it('returns [] when nothing is checked', () => {
+    expect(completedItemIds([makeItem('a', 'Milk')])).toEqual([])
+  })
+
+  it('returns [] for an empty list', () => {
+    expect(completedItemIds([])).toEqual([])
+  })
 })
 
 describe('addShoppingItemByTitle()', () => {

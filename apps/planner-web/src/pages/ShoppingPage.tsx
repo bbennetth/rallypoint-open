@@ -13,7 +13,7 @@ import {
   type ShoppingItemDto,
   type ShoppingListDto,
 } from '../lib/api.js'
-import { groupItemsByCategory, isShoppingCategory } from '../lib/shopping-helpers.js'
+import { completedItemIds, groupItemsByCategory, isShoppingCategory } from '../lib/shopping-helpers.js'
 import { onCreated } from '../lib/refresh-bus.js'
 import { Check } from '../ui/bits.js'
 import { Icon } from '../ui/icons.js'
@@ -65,6 +65,7 @@ export function ShoppingPage() {
   const [loadingList, setLoadingList] = useState(true)
   const [loadingItems, setLoadingItems] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [clearing, setClearing] = useState(false)
 
   const refreshList = useCallback(async () => {
     setLoadingList(true)
@@ -157,6 +158,27 @@ export function ShoppingPage() {
     }
   }
 
+  // Delete every checked item. Best-effort per item: failures keep their rows
+  // (refetch reconciles) and surface one error message.
+  async function onClearChecked() {
+    if (!shoppingList) return
+    const ids = completedItemIds(items)
+    if (ids.length === 0) return
+    setError(null)
+    setClearing(true)
+    try {
+      const results = await Promise.allSettled(
+        ids.map((id) => deleteShoppingItem(shoppingList.id, id)),
+      )
+      if (results.some((r) => r.status === 'rejected')) {
+        setError('Some items could not be cleared. Please try again.')
+      }
+      await refreshItems(shoppingList.id)
+    } finally {
+      setClearing(false)
+    }
+  }
+
   const groups = groupItemsByCategory(items)
   const doneCount = items.filter((i) => i.completed).length
 
@@ -197,6 +219,17 @@ export function ShoppingPage() {
             <span className="meta" style={{ color: 'var(--ink-mute)' }}>
               {doneCount} / {items.length} done
             </span>
+            {doneCount > 0 && (
+              <button
+                type="button"
+                className="pl-btn ghost"
+                style={{ padding: '7px 11px', marginLeft: 'auto' }}
+                onClick={() => void onClearChecked()}
+                disabled={clearing}
+              >
+                {clearing ? 'Clearing…' : 'Clear checked'}
+              </button>
+            )}
           </div>
 
           {loadingItems ? (
@@ -259,8 +292,9 @@ export function ShoppingPage() {
                             className="pl-donebtn"
                             onClick={() => void onDelete(item)}
                             aria-label={`Delete ${item.title}`}
+                            title="Delete"
                           >
-                            Delete
+                            ✕
                           </button>
                         </li>
                       )

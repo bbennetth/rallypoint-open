@@ -41,6 +41,12 @@ export async function addShoppingItemByTitle(title: string): Promise<ShoppingIte
   return createShoppingItem(list.id, trimmed)
 }
 
+// Ids of all checked-off items, in original order. Pure — used by the
+// "Clear checked" action to decide what to delete.
+export function completedItemIds(items: ShoppingItemDto[]): string[] {
+  return items.filter((i) => i.completed).map((i) => i.id)
+}
+
 // Group a flat item list by category, in SHOPPING_CATEGORY_ORDER order.
 // Empty categories are omitted. Within each group, items are in their
 // original server order (position-sorted). Pure — does not mutate input.

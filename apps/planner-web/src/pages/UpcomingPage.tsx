@@ -57,13 +57,15 @@ type Selected =
 // Upcoming surface (slice 9 + Ink redesign). Dated items are grouped by local
 // day with relative labels; undated items fill a sticky Backlog card. Tasks
 // can be checked off in place (optimistic); events are read-only here.
+// Rendered inside My Day behind the Today | Upcoming toggle (issue #495) —
+// no longer a standalone tab/route.
 
 function errMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message
   return 'Something went wrong. Please try again.'
 }
 
-export function UpcomingPage() {
+export function UpcomingView() {
   const [data, setData] = useState<Upcoming | null>(null)
   const [recurringData, setRecurringData] = useState<RecurringResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -227,12 +229,8 @@ export function UpcomingPage() {
 
   return (
     <>
-      <div className="pg-head" style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <div>
-          <h1>Upcoming</h1>
-          <div className="sub">Everything on the horizon, soonest first.</div>
-        </div>
-        <div className="seg" style={{ alignSelf: 'flex-end', flexShrink: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
+        <div className="seg" style={{ flexShrink: 0 }}>
           <button
             type="button"
             className={view === 'list' ? 'on' : ''}

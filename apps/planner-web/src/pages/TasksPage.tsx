@@ -59,6 +59,7 @@ export function TasksPage() {
   const [defs, setDefs] = useState<FieldDefDto[]>([])
   const [fieldsOpen, setFieldsOpen] = useState(false)
   const [newListName, setNewListName] = useState('')
+  const [newListOpen, setNewListOpen] = useState(false)
   const [newItemTitle, setNewItemTitle] = useState('')
   const [loadingLists, setLoadingLists] = useState(true)
   const [loadingItems, setLoadingItems] = useState(false)
@@ -202,6 +203,7 @@ export function TasksPage() {
     try {
       const created = await createTaskList(name)
       setNewListName('')
+      setNewListOpen(false)
       setLists((prev) => [...prev, created])
       setActiveListId(created.id)
     } catch (err) {
@@ -331,25 +333,13 @@ export function TasksPage() {
       <div className="tk-grid">
         {/* Lists rail */}
         <section style={{ display: 'grid', gap: 10 }}>
-          <form style={{ display: 'flex', gap: 8 }} onSubmit={onCreateList}>
-            <input
-              className="pl-input"
-              aria-label="New list name"
-              placeholder="New list…"
-              value={newListName}
-              onChange={(e) => setNewListName(e.target.value)}
-            />
-            <button className="pl-btn" style={{ padding: '0 14px' }} type="submit">
-              Add
-            </button>
-          </form>
-
           {loadingLists ? (
             <p className="meta" style={{ color: 'var(--ink-mute)' }}>Loading…</p>
-          ) : lists.length === 0 ? (
-            <p className="meta" style={{ color: 'var(--ink-mute)' }}>No lists yet — create one above.</p>
           ) : (
             <nav className="tk-lists">
+              {lists.length === 0 && (
+                <p className="meta" style={{ color: 'var(--ink-mute)', margin: 0 }}>No lists yet — create one below.</p>
+              )}
               {lists.map((l) => {
                 const sel = l.id === activeListId
                 const isShared = l.shared === true
@@ -408,8 +398,8 @@ export function TasksPage() {
                       </span>
                     </button>
 
-                    {/* Inline confirm chip — shown instead of the overflow trigger while pending. */}
-                    {confirmPending ? (
+                    {/* Settings live on the active list only — inactive rows stay clean. */}
+                    {!sel ? null : confirmPending ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, padding: '0 6px' }}>
                         <button
                           type="button"
@@ -475,6 +465,25 @@ export function TasksPage() {
                   </div>
                 )
               })}
+              <button
+                type="button"
+                className="pl-navlink tk-list-add"
+                onClick={() => setNewListOpen(true)}
+                style={{
+                  borderLeft: '3px solid transparent',
+                  border: '1.5px dashed var(--line)',
+                  padding: '9px 11px',
+                  color: 'var(--ink-dim)',
+                  letterSpacing: 0,
+                  textTransform: 'none',
+                  fontFamily: 'var(--font-body)',
+                  fontWeight: 600,
+                  fontSize: 13,
+                }}
+              >
+                <Icon name="plus" size={12} />
+                <span>New list</span>
+              </button>
             </nav>
           )}
         </section>
@@ -697,8 +706,9 @@ export function TasksPage() {
                           className="pl-donebtn"
                           onClick={() => void onDelete(item)}
                           aria-label={`Delete ${item.title}`}
+                          title="Delete"
                         >
-                          Delete
+                          ✕
                         </button>
                       </li>
                     )
@@ -723,6 +733,28 @@ export function TasksPage() {
             onCustomFieldChange={(fieldId, value) => void onCustomFieldChange(editing, fieldId, value)}
           />
         )}
+      </Drawer>
+
+      <Drawer
+        open={newListOpen}
+        onClose={() => { setNewListOpen(false); setNewListName('') }}
+        title="New list"
+        mobileSheet
+      >
+        <form style={{ display: 'grid', gap: 10, padding: '4px 0' }} onSubmit={onCreateList}>
+          <input
+            className="pl-input"
+            aria-label="New list name"
+            placeholder="List name…"
+            autoFocus
+            value={newListName}
+            onChange={(e) => setNewListName(e.target.value)}
+          />
+          <button className="pl-btn" type="submit" disabled={!newListName.trim()}>
+            <Icon name="plus" size={13} />
+            Create list
+          </button>
+        </form>
       </Drawer>
 
       <Drawer open={fieldsOpen} onClose={() => setFieldsOpen(false)} title="Custom fields" width={420} mobileSheet>

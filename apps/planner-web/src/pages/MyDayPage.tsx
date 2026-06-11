@@ -12,9 +12,11 @@ import {
 import {
   fmtTime,
   localToday,
+  normalizeDayMode,
   pickNext,
   progressPct,
   splitMyDay,
+  type DayMode,
 } from '../lib/planner-helpers.js'
 import { onCreated } from '../lib/refresh-bus.js'
 import { Drawer } from '@rallypoint/ui'
@@ -24,6 +26,25 @@ import { TaskDetail } from '../ui/TaskDetail.js'
 import { PersonalEventEdit } from '../ui/PersonalEventEdit.js'
 import { EventDayDetail } from '../ui/EventDayDetail.js'
 import { openProps, stopRowOpen as stop } from '../ui/row-open.js'
+import { UpcomingView } from './UpcomingPage.js'
+
+// My Day hosts two modes behind a segmented toggle (issue #495): 'today'
+// (the classic My Day roll-up) and 'upcoming' (the former Upcoming tab).
+// Persisted to ?mode= so /upcoming can redirect here and links survive.
+function readModeParam(): DayMode {
+  return normalizeDayMode(new URLSearchParams(window.location.search).get('mode'))
+}
+
+function writeModeParam(m: DayMode) {
+  const url = new URL(window.location.href)
+  if (m === 'today') {
+    url.searchParams.delete('mode')
+    url.searchParams.delete('view') // calendar view param belongs to upcoming mode
+  } else {
+    url.searchParams.set('mode', m)
+  }
+  window.history.replaceState(null, '', url.toString())
+}
 
 type Selected =
   | { kind: 'task'; task: MyDayTask }
@@ -52,6 +73,15 @@ export function MyDayPage() {
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selected | null>(null)
+  const [mode, setMode] = useState<DayMode>(readModeParam)
+
+  function switchMode(m: DayMode) {
+    // The detail Drawer lives in the today branch; clear the selection so a
+    // mode round-trip doesn't re-open a stale drawer.
+    setSelected(null)
+    setMode(m)
+    writeModeParam(m)
+  }
 
   const refresh = useCallback(async () => {
     const { date, tz } = localToday()
@@ -145,17 +175,47 @@ export function MyDayPage() {
 
   return (
     <>
-      <div className="pg-head">
+      <div className="pg-head" style={{ flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h1>My Day</h1>
           <div className="sub">
-            {data ? headingLabel(data.date) : 'Today'}
-            {view ? (view.total > 0 ? ` · ${view.done} of ${view.total} tasks done` : ' · All clear') : ''}
+            {mode === 'upcoming'
+              ? 'Everything on the horizon, soonest first.'
+              : (data ? headingLabel(data.date) : 'Today') +
+                (view ? (view.total > 0 ? ` · ${view.done} of ${view.total} tasks done` : ' · All clear') : '')}
           </div>
         </div>
-        {view && <Ring pct={view.pct} size={62} />}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto' }}>
+          <div className="seg" role="radiogroup" aria-label="My Day mode" style={{ flexShrink: 0 }}>
+            <button
+              type="button"
+              role="radio"
+              className={mode === 'today' ? 'on' : ''}
+              onClick={() => switchMode('today')}
+              aria-checked={mode === 'today'}
+            >
+              <Icon name="myday" size={12} />
+              Today
+            </button>
+            <button
+              type="button"
+              role="radio"
+              className={mode === 'upcoming' ? 'on' : ''}
+              onClick={() => switchMode('upcoming')}
+              aria-checked={mode === 'upcoming'}
+            >
+              <Icon name="upcoming" size={12} />
+              Upcoming
+            </button>
+          </div>
+          {mode === 'today' && view && <Ring pct={view.pct} size={62} />}
+        </div>
       </div>
 
+      {mode === 'upcoming' ? (
+        <UpcomingView />
+      ) : (
+        <>
       {error && (
         <p role="alert" style={{ color: 'var(--hot)', fontSize: 13, marginTop: 0 }}>
           {error}
@@ -428,6 +488,8 @@ export function MyDayPage() {
         )}
         {selected?.kind === 'eventDay' && <EventDayDetail eventDay={selected.eventDay} />}
       </Drawer>
+        </>
+      )}
     </>
   )
 }

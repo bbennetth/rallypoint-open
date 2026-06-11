@@ -148,7 +148,7 @@ export function MonthGrid({
   }
 
   return (
-    <div className="cal-month">
+    <div className="cal-month" data-noswipe>
       <div className="cal-nav">
         <button
           type="button"
@@ -237,7 +237,7 @@ export function WeekStrip({
   const rel = relativeDayLabel(anchorYmd, todayYmd)
 
   return (
-    <div className="cal-week">
+    <div className="cal-week" data-noswipe>
       <div className="cal-nav">
         <button
           type="button"

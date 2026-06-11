@@ -1,7 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
-import { captureEmbeddedShell } from '@rallypoint/ui'
 import { initAnalytics } from '@rallypoint/web-kit'
 import { App } from './App.js'
 import './index.css'
@@ -13,11 +12,6 @@ import './index.css'
 
 // Bootstrap analytics (no-op when VITE_POSTHOG_KEY is unset).
 initAnalytics()
-
-// Capture the embedded-shell marker (set when launched from another app's
-// switcher inside the iOS PWA) into sessionStorage and strip it from the URL,
-// before React/router mount.
-captureEmbeddedShell()
 
 const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('Root element #root missing from index.html')

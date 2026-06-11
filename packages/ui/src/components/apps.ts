@@ -27,9 +27,13 @@ export const DEFAULT_APPS: readonly AppSwitcherApp[] = [
   // never used in its own switcher. Each app falls back to its localhost dev
   // port when the VITE_* var is unset, so dev switching works. Only Money
   // (no origin) toasts.
+  //
+  // Rallypoint ID is intentionally absent: it's the identity/account app, not a
+  // peer surface you switch between. It's reached via the user menu's "Account"
+  // link, not the app grid. (RPID's own pages still render the switcher to jump
+  // OUT to these apps; `current="id"` simply matches no row.)
   { key: 'planner', name: 'Planner', icon: 'myday', origin: ENV.VITE_PLANNER_WEB_URL ?? 'http://localhost:5177', home: '/me' },
   { key: 'events', name: 'Events', icon: 'events', origin: ENV.VITE_EVENTS_WEB_URL ?? 'http://localhost:5174', home: '/me/events' },
   { key: 'lists', name: 'Lists', icon: 'tasks', origin: ENV.VITE_LISTS_WEB_URL ?? 'http://localhost:5175', home: '/me/lists' },
-  { key: 'id', name: 'Rallypoint ID', icon: 'grid', origin: ENV.VITE_ID_WEB_URL ?? 'http://localhost:5173' },
   { key: 'money', name: 'Money', icon: 'money', tag: 'SOON' },
 ]
