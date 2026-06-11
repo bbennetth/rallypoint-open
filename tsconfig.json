@@ -1,0 +1,80 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/id-api"
+    },
+    {
+      "path": "./apps/events-api"
+    },
+    {
+      "path": "./apps/lists-api"
+    },
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./packages/crypto"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
+      "path": "./packages/id-client"
+    },
+    {
+      "path": "./packages/events-db"
+    },
+    {
+      "path": "./packages/events-shared"
+    },
+    {
+      "path": "./packages/events-client"
+    },
+    {
+      "path": "./packages/realtime"
+    },
+    {
+      "path": "./packages/object-store"
+    },
+    {
+      "path": "./packages/lists-db"
+    },
+    {
+      "path": "./packages/lists-shared"
+    },
+    {
+      "path": "./packages/lists-client"
+    },
+    {
+      "path": "./apps/money-api"
+    },
+    {
+      "path": "./packages/money-db"
+    },
+    {
+      "path": "./apps/planner-api"
+    },
+    {
+      "path": "./packages/planner-db"
+    },
+    {
+      "path": "./packages/money-shared"
+    },
+    {
+      "path": "./packages/money-client"
+    },
+    {
+      "path": "./packages/ui"
+    },
+    {
+      "path": "./packages/web-kit"
+    },
+    {
+      "path": "./packages/logger"
+    },
+    {
+      "path": "./packages/rate-limit"
+    }
+  ]
+}

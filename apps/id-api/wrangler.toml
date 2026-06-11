@@ -1,0 +1,100 @@
+# id-api as a Cloudflare Worker (#313, Phase 2). `wrangler deploy --env qa`
+# -> id.rallypt.dev, `--env prod` -> id.rallypt.app. Entry is src/worker.ts
+# ({ fetch, scheduled }). The Node server.ts is retired.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
+# wrangler >=4.45 (bootstrap step creates rp-id-{qa,prod} if absent).
+# Real secrets (ARGON2_PEPPER, SESSION_HMAC_KEY, SIGNIN_CODE_HMAC_KEY,
+# *_API_KEY, *_SESSION_KEY_V1, ADMIN_TOKEN, RESEND_API_KEY, TURNSTILE_SECRET)
+# via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step).
+# Avatar object storage is a native R2 binding (OBJECT_STORE), not keys (#409).
+
+name = "rallypoint-id"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the id-web SPA from the assets dir; run the Worker first only for
+# the API + the one server-rendered HTML route, so /api/* and
+# /verify-email hit the Worker while the SPA serves first-party from the
+# same origin (the verified __Host- cookie config). The deploy build
+# populates ./public from `npm run build -w @rallypoint/id-web`; a
+# committed placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/verify-email"]
+
+# TTL pruner — the Cron Trigger that replaces the Node setInterval driver
+# (worker.ts `scheduled`). Every 5 minutes.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for everything else; these toggles make the local
+# auth flow exercisable without external providers.
+[vars]
+NODE_ENV = "development"
+MAILER = "log"
+CAPTCHA = "allow"
+BREACHED_PASSWORD_CHECK = "stub"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-id-local"
+# Ignored by `wrangler dev --local` (which uses a local SQLite store);
+# a real id is only needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/db/migrations"
+
+# Avatar object storage (#409). `wrangler dev` backs this with a local
+# (Miniflare) R2 bucket; the per-env blocks below bind the real buckets.
+[[r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-id-dev"
+
+# ---- QA: id.rallypt.dev ---------------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.dev", PUBLIC_BASE_URL = "https://id.rallypt.dev", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.dev", SSO_LISTS_HOST = "lists.rallypt.dev", SSO_MONEY_HOST = "money.rallypt.dev", SSO_PLANNER_HOST = "planner.rallypt.dev" }
+
+[[env.qa.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-id-qa"
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-id-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-id-qa || true`).
+migrations_dir = "../../packages/db/migrations"
+
+[env.qa.triggers]
+crons = ["*/5 * * * *"]
+
+[[env.qa.routes]]
+pattern = "id.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: id.rallypt.app -------------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.app", PUBLIC_BASE_URL = "https://id.rallypt.app", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.app", SSO_LISTS_HOST = "lists.rallypt.app", SSO_MONEY_HOST = "money.rallypt.app", SSO_PLANNER_HOST = "planner.rallypt.app" }
+
+[[env.prod.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-id-prod"
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-id-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-id-prod || true`).
+migrations_dir = "../../packages/db/migrations"
+
+[env.prod.triggers]
+crons = ["*/5 * * * *"]
+
+[[env.prod.routes]]
+pattern = "id.rallypt.app"
+custom_domain = true

@@ -1,0 +1,75 @@
+/* @rallypoint/ui — "Ink" brand fonts (self-hosted woff2).
+ *
+ * The Ink type stack:
+ *   --font-display : Archivo Black  (heavy geometric display / headings)
+ *   --font-body    : Space Grotesk  (UI body, weights 400/500/700)
+ *   --font-mono    : Space Mono     (eyebrows, labels, code; 400/700)
+ *
+ * Self-hosted from Google Fonts under `./fonts/` (Vite fingerprints each
+ * as an asset) rather than the CDN: works offline (PWA), no @import
+ * ordering warnings, no third-party request on first paint. Only the
+ * latin subset (U+0000-00FF …) is shipped per face to keep payloads
+ * small; extend the subsets if non-latin coverage is ever needed.
+ *
+ * Inter is retained below as a back-compat face: nothing in the Ink
+ * token set references it, but any sibling-app call-site that still
+ * hardcodes `font-family: 'Inter'` keeps rendering instead of falling
+ * back to system-ui.
+ *
+ * Licenses: Archivo Black, Space Grotesk, Space Mono — SIL OFL 1.1.
+ * Inter — SIL OFL 1.1 (see ./fonts/Inter-OFL.txt). */
+
+@font-face {
+  font-family: 'Archivo Black';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/archivo-black-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/space-grotesk-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/space-grotesk-500.woff2') format('woff2');
+}
+/* 600 reuses the 700 cut — Space Grotesk ships no dedicated semibold in
+   this subset; the weight gap is visually negligible at UI sizes. */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 600 700;
+  font-display: swap;
+  src: url('./fonts/space-grotesk-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Space Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/space-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Space Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/space-mono-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-latin.woff2') format('woff2');
+}

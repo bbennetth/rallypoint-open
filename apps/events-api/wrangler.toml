@@ -1,0 +1,158 @@
+# events-api as a Cloudflare Worker (#313, Phase 4). `wrangler deploy --env qa`
+# -> events.rallypt.dev, `--env prod` -> events.rallypt.app. Entry is
+# src/worker.ts (`{ fetch, scheduled }`); the Node server.ts was retired.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases and R2 buckets are auto-provisioned by
+# wrangler >=4.45 / the bootstrap step. Real secrets via
+# `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
+#   EVENTS_API_KEY
+#   EVENTS_SESSION_KEY_V1
+#   REALTIME_TOKEN_HMAC_KEY
+#   OPEN_METEO_COMMERCIAL_API_KEY  (only if using commercial Open-Meteo tier)
+# Map image + ticket object storage is a native R2 binding (OBJECT_STORE),
+# not keys (#409). The old EVENTS_OBJECT_STORE_* vars are retired.
+
+name = "rallypoint-events"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the events-web SPA from the assets dir; run the Worker first for
+# the API and the public OG-templated event page, so /api/* and /e/* hit
+# the Worker (the latter server-injects og:* tags into the SPA shell for
+# crawler unfurls — see routes/public-html.ts) while everything else serves
+# first-party from the same origin (the __Host- cookie config). The deploy
+# build populates ./public from `npm run build -w @rallypoint/events-web`; a
+# committed placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/e/*"]
+
+# RealtimeHub Durable Object. The class is exported from src/worker.ts
+# (re-exported from @rallypoint/realtime). Migrations are script-global
+# (shared across environments); the binding is redeclared per environment
+# below (wrangler does not inherit bindings into named envs).
+[[migrations]]
+tag = "v1"
+new_classes = ["RealtimeHub"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# Cron Trigger — runs the events pruner + weather refresher once per hour.
+# The pruner grace period is 30 days so hourly is plenty; the weather
+# refresher staleness gate is 3 hours (EVENTS_WEATHER_FRESHNESS_MS default)
+# so an hourly tick stays well within it.
+[triggers]
+crons = ["0 * * * *"]
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for the secrets.
+[vars]
+NODE_ENV = "development"
+EVENTS_UI_ORIGIN = "http://localhost:5174"
+RPID_API_URL = "http://localhost:8080"
+LISTS_API_URL = "http://localhost:8082"
+MONEY_API_URL = "http://localhost:8083"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-events-local"
+# Ignored by `wrangler dev --local` (local SQLite store); a real id is only
+# needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/events-db/migrations"
+
+# Map image + ticket object storage (#409). `wrangler dev` backs this with a
+# local (Miniflare) R2 bucket; the per-env blocks below bind the real buckets.
+[[r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-events-dev"
+
+# ---- QA: events.rallypt.dev -----------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", EVENTS_UI_ORIGIN = "https://events.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", LISTS_API_URL = "https://lists.rallypt.dev", MONEY_API_URL = "https://money.rallypt.dev", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality" }
+
+[[env.qa.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-events-qa"
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-events-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-events-qa || true`).
+migrations_dir = "../../packages/events-db/migrations"
+
+[[env.qa.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# Service bindings: same-account cross-Worker calls to id/lists/money
+# dispatch in-process via these bindings (the CF edge drops same-account
+# loopback fetches to public hostnames). Path-matched against the bound
+# Worker, so the existing ${*_API_URL}/api/v1/... URLs work unchanged. No
+# top-level [[services]] block — local `wrangler dev` falls back to the
+# public-fetch path so single-app dev keeps working.
+[[env.qa.services]]
+binding = "RPID"
+service = "rallypoint-id-qa"
+
+[[env.qa.services]]
+binding = "LISTS"
+service = "rallypoint-lists-qa"
+
+[[env.qa.services]]
+binding = "MONEY"
+service = "rallypoint-money-qa"
+
+[env.qa.triggers]
+crons = ["0 * * * *"]
+
+[[env.qa.routes]]
+pattern = "events.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: events.rallypt.app ---------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", EVENTS_UI_ORIGIN = "https://events.rallypt.app", RPID_API_URL = "https://id.rallypt.app", LISTS_API_URL = "https://lists.rallypt.app", MONEY_API_URL = "https://money.rallypt.app", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality" }
+
+[[env.prod.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-events-prod"
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-events-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-events-prod || true`).
+migrations_dir = "../../packages/events-db/migrations"
+
+[[env.prod.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+[[env.prod.services]]
+binding = "RPID"
+service = "rallypoint-id-prod"
+
+[[env.prod.services]]
+binding = "LISTS"
+service = "rallypoint-lists-prod"
+
+[[env.prod.services]]
+binding = "MONEY"
+service = "rallypoint-money-prod"
+
+[env.prod.triggers]
+crons = ["0 * * * *"]
+
+[[env.prod.routes]]
+pattern = "events.rallypt.app"
+custom_domain = true

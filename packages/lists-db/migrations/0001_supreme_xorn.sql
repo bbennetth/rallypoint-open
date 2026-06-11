@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `list_groups_created_by_name_uq` ON `list_groups` (`created_by`,`name`) WHERE "list_groups"."deleted_at" is null;

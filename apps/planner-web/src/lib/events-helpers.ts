@@ -1,0 +1,39 @@
+// Pure helpers for the Events surface. Extracted from EventsPage.tsx so they
+// can be unit-tested without a DOM.
+
+/** Short status chip from an event's start instant. Returns null when undated. */
+export function deriveStatus(startAt: string | null): 'PAST' | 'TODAY' | 'SOON' | 'UPCOMING' | null {
+  if (!startAt) return null
+  const ms = Date.parse(startAt)
+  if (!Number.isFinite(ms)) return null
+  const diff = ms - Date.now()
+  if (diff < 0) return 'PAST'
+  if (diff < 24 * 60 * 60 * 1000) return 'TODAY'
+  if (diff < 7 * 24 * 60 * 60 * 1000) return 'SOON'
+  return 'UPCOMING'
+}
+
+/**
+ * Full date+time range label for the event detail card.
+ * e.g. "Jun 12, 2026, 9:30 AM – 11:00 AM" or "Jun 12, 2026, 9:30 AM"
+ */
+export function formatWhen(startAt: string | null, endAt: string | null): string {
+  if (!startAt) return 'No date set'
+  const start = new Date(startAt)
+  const startStr = start.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+  if (!endAt) return startStr
+  const end = new Date(endAt)
+  const endStr = end.toLocaleString([], { timeStyle: 'short' })
+  return `${startStr} – ${endStr}`
+}
+
+/**
+ * Short date+time label for rail cards.
+ * e.g. "Jun 12, 9:30 AM" or "No date"
+ */
+export function formatWhenShort(startAt: string | null): string {
+  if (!startAt) return 'No date'
+  const d = new Date(startAt)
+  if (Number.isNaN(d.getTime())) return 'No date'
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}

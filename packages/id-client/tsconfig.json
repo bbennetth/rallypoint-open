@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "dist"],
+  "references": [{ "path": "../shared" }]
+}

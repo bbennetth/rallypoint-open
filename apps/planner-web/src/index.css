@@ -1,0 +1,723 @@
+@import 'tailwindcss';
+@import '@rallypoint/ui/theme.css';
+@import '@rallypoint/ui/fonts.css';
+@import '@rallypoint/ui/shell.css';
+
+/* ============================================================
+   Rallypoint Planner — "Ink" surfaces.
+
+   The dual-axis Ink tokens (--bg/--surface/--ink/--acid/--accent-soft …),
+   the font stack, and the light/dark + 6-accent chassis all live in
+   @rallypoint/ui/theme.css (written to <html data-mode/data-color> by the
+   shared theme store). This file only ports the Planner-specific component
+   classes + responsive shell from the design handoff (planner.css/app.css).
+   ============================================================ */
+
+/* The html/body/#root viewport reset now lives in @rallypoint/ui/shell.css
+   (imported above) so every AppChrome consumer shares it. */
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+/* ============================================================
+   MY DAY
+   ============================================================ */
+.md-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.pl-stat {
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  padding: 13px 14px;
+}
+.pl-stat .v {
+  font-family: var(--font-display);
+  font-size: 26px;
+  color: var(--ink);
+  line-height: 1;
+}
+.pl-stat .k {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 600px) {
+  .md-stats {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .md-stats .pl-stat:last-child {
+    grid-column: 1 / -1;
+  }
+  .pl-stat {
+    padding: 10px 12px;
+  }
+  .pl-stat .v {
+    font-size: 18px;
+  }
+}
+.md-allday {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+@media (max-width: 1023px) {
+  .md-allday {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* progress ring */
+.pl-ring {
+  position: relative;
+}
+.pl-ring svg {
+  transform: rotate(-90deg);
+}
+.pl-ring .num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.pl-ring .num b {
+  font-family: var(--font-display);
+  font-size: 17px;
+  color: var(--ink);
+  line-height: 1;
+}
+.pl-ring .num span {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--ink-mute);
+  letter-spacing: 0.1em;
+}
+
+/* schedule timeline */
+.pl-timeline {
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px 1fr;
+}
+.pl-tl-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+  transform: translateY(-6px);
+}
+.pl-tl-rail {
+  position: relative;
+  border-left: 1.5px solid var(--line);
+  padding: 0 0 0 16px;
+}
+.pl-tl-tick {
+  position: absolute;
+  left: -1.5px;
+  top: 0;
+  width: 9px;
+  height: 1.5px;
+  background: var(--line);
+}
+.pl-ev {
+  border: 1.5px solid var(--line);
+  border-left: 3px solid var(--acid);
+  background: var(--surface);
+  padding: 9px 12px;
+  margin-bottom: 8px;
+}
+.pl-ev.task {
+  border-left-color: var(--ink-mute);
+}
+.pl-ev.done .t {
+  opacity: 0.55;
+}
+.pl-ev .t {
+  font-size: 13.5px;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* ============================================================
+   UPCOMING
+   ============================================================ */
+.up-grid {
+  display: grid;
+  grid-template-columns: 1fr 272px;
+  gap: 22px;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .up-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.up-backlog {
+  position: sticky;
+  top: 0;
+}
+@media (max-width: 1023px) {
+  .up-backlog {
+    position: static;
+  }
+}
+.pl-dategroup {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 0 9px;
+}
+.pl-dategroup .d {
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--ink);
+}
+.pl-dategroup .rel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.pl-dategroup .ln {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ============================================================
+   CALENDAR VIEWS (week strip + month grid)
+   ============================================================ */
+
+/* Wrapper that lays out the calendar + backlog aside side-by-side on wide
+   viewports, stacked on mobile (matches up-grid proportions). */
+.up-cal-wrap {
+  display: grid;
+  grid-template-columns: 1fr 272px;
+  gap: 22px;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .up-cal-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+/* The backlog aside in calendar view doesn't need sticky (calendar is tall). */
+.up-cal-backlog {
+  position: static;
+}
+
+/* Navigation bar shared by month grid and week strip. */
+.cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.cal-nav-title {
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--ink);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cal-nav-rel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.cal-nav-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid var(--line);
+  color: var(--ink-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cal-nav-btn:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+/* 7-column grid used by both month and week views. */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+/* In week mode the cells can be taller since there's only one row. */
+.cal-grid--week .cal-cell {
+  min-height: 120px;
+}
+
+/* Day-of-week header cells (Sun/Mon/Tue…). */
+.cal-dow-hdr {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  text-align: center;
+  padding: 4px 0 6px;
+}
+
+/* Individual day cell. */
+.cal-cell {
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+  padding: 6px 7px;
+  min-height: 80px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.1s ease;
+}
+.cal-cell:hover {
+  border-color: var(--ink-dim);
+}
+.cal-cell:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: -2px;
+}
+/* Cells from adjacent months are greyed out. */
+.cal-cell.out-month {
+  background: var(--bg);
+  opacity: 0.5;
+}
+/* Today's cell has an accent border. */
+.cal-cell.is-today {
+  border-color: var(--acid);
+}
+.cal-cell.is-today .cal-day-num {
+  color: var(--acid);
+  font-weight: 700;
+}
+
+/* Day number label in the top-left of a cell. */
+.cal-day-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Container for item chips + overflow badge inside a cell. */
+.cal-items {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+}
+
+/* Compact item chip inside a cell. */
+.cal-chip {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  padding: 2px 5px;
+  border-left: 2px solid var(--line);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  line-height: 1.35;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-chip:hover {
+  color: var(--ink);
+  border-left-color: var(--ink-dim);
+}
+.cal-chip[data-kind="event"],
+.cal-chip[data-kind="eventDay"] {
+  border-left-color: color-mix(in srgb, var(--acid) 60%, var(--line));
+  color: var(--acid);
+}
+.cal-chip[data-completed] {
+  text-decoration: line-through;
+  color: var(--ink-mute);
+}
+
+/* "+N more" overflow badge. */
+.cal-overflow {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-mute);
+  padding: 1px 4px;
+  cursor: default;
+}
+
+/* Mobile: compress the calendar to single-column. */
+@media (max-width: 600px) {
+  .cal-grid {
+    gap: 1px;
+  }
+  .cal-cell {
+    padding: 4px 3px;
+    min-height: 56px;
+  }
+  .cal-chip {
+    font-size: 9px;
+  }
+  .cal-dow-hdr {
+    font-size: 8px;
+  }
+}
+
+/* ============================================================
+   TASKS
+   ============================================================ */
+/* Focus rings for planner content controls (events rail + tasks-list menu).
+   The generic shell focus ring lives in @rallypoint/ui/shell.css; these
+   content selectors stay here with their classes (#397). */
+.ev-rail-item:focus-visible,
+.tk-list-more-btn:focus-visible,
+.tk-list-menu-item:focus-visible,
+.tk-list-confirm-chip:focus-visible,
+.tk-list-confirm-cancel:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.tk-grid {
+  display: grid;
+  grid-template-columns: 212px 1fr;
+  gap: 26px;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .tk-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+}
+.tk-lists {
+  display: grid;
+  gap: 4px;
+}
+@media (max-width: 1023px) {
+  .tk-lists {
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .tk-lists .pl-navlink {
+    border: 1.5px solid var(--line);
+    border-radius: 999px;
+    white-space: nowrap;
+    padding: 9px 14px;
+  }
+  .tk-lists .pl-navlink.is-sel {
+    border-color: var(--acid);
+    background: var(--accent-soft);
+    color: var(--ink);
+  }
+  .tk-lists .pl-navlink .meta {
+    display: none;
+  }
+}
+
+/* ··· overflow trigger for list rows */
+.tk-list-overflow {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.tk-list-more-btn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  color: var(--ink-mute);
+  border-radius: 2px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.tk-list-more-btn:hover {
+  color: var(--ink);
+  background: var(--surface-2, var(--line));
+}
+/* Flyout menu items inside the list-row overflow menu */
+.tk-list-menu-item {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+  padding: 9px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: transparent;
+  transition: color 0.1s ease, background 0.1s ease;
+}
+.tk-list-menu-item:hover {
+  color: var(--ink);
+  background: var(--surface-2, rgba(0,0,0,0.06));
+}
+.tk-list-menu-item.is-destructive {
+  color: var(--hot, #d4504e);
+}
+.tk-list-menu-item.is-destructive:hover {
+  background: color-mix(in srgb, var(--hot, #d4504e) 8%, transparent);
+}
+/* Inline confirm chip shown in place of the ··· trigger */
+.tk-list-confirm-chip {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border: 1.5px solid var(--hot, #d4504e);
+  color: var(--hot, #d4504e);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transition: background 0.12s ease;
+}
+.tk-list-confirm-chip:hover {
+  background: color-mix(in srgb, var(--hot, #d4504e) 10%, transparent);
+}
+.tk-list-confirm-cancel {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--ink-mute);
+  font-size: 11px;
+  transition: color 0.1s ease;
+}
+.tk-list-confirm-cancel:hover {
+  color: var(--ink);
+}
+/* Touch-target enforcement on mobile */
+@media (max-width: 1023px) {
+  .tk-list-more-btn {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .tk-list-confirm-chip {
+    min-height: 36px;
+  }
+}
+
+/* ============================================================
+   EVENTS
+   ============================================================ */
+.ev-grid {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 26px;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .ev-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .ev-rail {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 78%;
+    gap: 10px;
+    overflow-x: auto;
+  }
+}
+/* ── Events rail items (#418) ── */
+/* CSS class for rail buttons replacing inline styles. The .is-active variant
+   mirrors .pl-navlink.is-active pattern. Also the hook for #415 focus ring. */
+.ev-rail-item {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  padding: 12px 13px;
+  border: 1.5px solid var(--line);
+  border-left: 1.5px solid var(--line);
+  background: var(--surface);
+  min-height: 60px;
+  width: 100%;
+  text-align: left;
+}
+.ev-rail-item:hover {
+  border-color: var(--ink-mute);
+}
+.ev-rail-item.is-active {
+  border-left: 3px solid var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ev-rail-name {
+  font-size: 13.5px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 600;
+}
+.ev-rail-tickets {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--ink-dim);
+}
+
+.pl-ticket {
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+}
+.pl-ticket .stub {
+  width: 70px;
+  flex: 0 0 70px;
+  border-right: 1.5px dashed var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.pl-ticket .body {
+  padding: 10px 13px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* scrollbars */
+.tk-lists::-webkit-scrollbar,
+.ev-rail::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+/* ============================================================
+   STANDALONE PAGES (landing / SSO callback) — no app chrome
+   ============================================================ */
+.page-pad {
+  padding: 24px;
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+.content-cap {
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+/* Notes page cards. */
+.pl-note {
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* One-line preview in the list row — full text lives in the View drawer. */
+.pl-note-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14.5px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pl-btn.ghost.pl-note-view {
+  padding: 5px 11px;
+  font-size: 10px;
+}
+/* Full-note view (drawer). */
+.pl-note-view-title {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--ink);
+  word-break: break-word;
+}
+.pl-note-text {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pl-note-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pl-note-date {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.pl-note-del {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 16px;
+  line-height: 1;
+}
+.pl-note-del:hover {
+  border-color: var(--acid);
+  color: var(--acid);
+}

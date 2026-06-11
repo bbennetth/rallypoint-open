@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1780793114138,
+      "tag": "0000_lean_network",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1749513600000,
+      "tag": "0001_rate_limits",
+      "breakpoints": true
+    }
+  ]
+}

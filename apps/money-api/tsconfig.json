@@ -1,0 +1,43 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "dist"
+  ],
+  "references": [
+    {
+      "path": "../../packages/crypto"
+    },
+    {
+      "path": "../../packages/money-db"
+    },
+    {
+      "path": "../../packages/money-shared"
+    },
+    {
+      "path": "../../packages/object-store"
+    },
+    {
+      "path": "../../packages/id-client"
+    },
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/realtime"
+    },
+    {
+      "path": "../../packages/logger"
+    }
+  ]
+}

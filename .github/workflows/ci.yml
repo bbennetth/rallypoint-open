@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  # PRs against main (or dev) are the merge gate — the only place
+  # lint + typecheck + test changes the merge decision.
+  #
+  # Deliberately NOT triggered on `push: main`: pre-merge CI already
+  # verified the merged tree, merges are sequential (single-dev
+  # workflow), and `cf-deploy.yml` handles main pushes by deploying
+  # the Workers to qa. Re-running the test suite on main would
+  # just duplicate work and slow the merge-to-deploy hop.
+  pull_request:
+    branches: [main, dev, feat/cf-migration]
+  workflow_dispatch:
+
+env:
+  GITLEAKS_VERSION: 8.18.4
+
+jobs:
+  gitleaks:
+    name: secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Full history so gitleaks can scan all reachable commits, not just HEAD.
+          fetch-depth: 0
+
+      - name: Download and verify gitleaks
+        run: |
+          BASE="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          F="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "$BASE/$F" -o "/tmp/$F"
+          curl -sSfL "$BASE/gitleaks_${GITLEAKS_VERSION}_checksums.txt" -o /tmp/gitleaks_checksums.txt
+          ( cd /tmp && grep " $F\$" gitleaks_checksums.txt | sha256sum -c - )
+          tar -xzf "/tmp/$F" -C /tmp gitleaks
+
+      - name: Secret scan (working tree)
+        run: |
+          /tmp/gitleaks detect \
+            --source=. \
+            --config=scripts/mirror/gitleaks.toml \
+            --redact \
+            --verbose
+
+  check:
+    name: lint + typecheck + test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # No Postgres `services:` block. Integration tests run against
+    # Cloudflare D1 under @cloudflare/vitest-pool-workers (Miniflare),
+    # not Postgres — the old testcontainers-Postgres suites were removed
+    # in the D1 port (#313).
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Fetch enough history to diff against the PR base for migration lint.
+          fetch-depth: 0
+
+      - name: Migration safety lint
+        # Greps newly added migration files for destructive SQL statements.
+        # Uses github.base_ref when available (PRs), falls back to origin/main.
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          bash scripts/check-migrations.sh "${BASE_REF:+origin/$BASE_REF}"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # Match CI's npm major to the one that authors package-lock.json (npm 11).
+      # node 22 bundles npm 10, which idealizes the workspace tree differently
+      # and rejects the npm-11 lockfile as out of sync, breaking `npm ci` (#426).
+      - run: npm install -g npm@11
+
+      # Use `npm ci` (not `npm install`) so a package.json/lock drift fails
+      # CI here rather than slipping through to the `npm ci` in cf-deploy.yml
+      # and breaking the qa deploy (a green CI must guarantee a deployable tree).
+      - run: npm ci --no-audit --no-fund
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run test
+
+      # Cloudflare-runtime tests run in a workerd isolate (Miniflare), a
+      # separate pool from the node-pool `npm run test` above:
+      #   test:d1      — id-api D1 repo contract tests (#313 Phase 2)
+      #   test:workers — RealtimeHub Durable Object tests (#313 Phase 3)
+      - run: npm run test:d1
+
+      # lists-api D1 integration tests (route-level, Miniflare D1 pool)
+      - run: npm run test:d1:lists
+
+      # events-api D1 integration tests (route-level, Miniflare D1 pool)
+      - run: npm run test:d1:events
+
+      # money-api D1 integration tests (route-level, Miniflare D1 pool)
+      - run: npm run test:d1:money
+
+      # planner-api D1 integration tests (route-level, Miniflare D1 pool)
+      - run: npm run test:d1:planner
+
+      - run: npm run test:workers
+
+      # object-store R2 binding tests (real Miniflare R2 bucket, #409)
+      - run: npm run test:objstore

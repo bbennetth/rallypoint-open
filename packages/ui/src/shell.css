@@ -1,0 +1,830 @@
+/* Rallypoint "Ink" shell — generic chrome + primitives shared across all web
+   apps. Extracted from planner-web's index.css (the reference look). Depends on
+   the dual-axis tokens in theme.css; import this AFTER theme.css. Planner
+   CONTENT classes (My Day, Timeline, Calendar, Tasks, Events rail, Notes) stay
+   in apps/planner-web/src/index.css. */
+
+/* ---- viewport reset ----
+   The .plapp shell is height:100%, so its ancestor chain needs a definite
+   height. Apps that adopt AppChrome get this wiring for free by importing
+   shell.css; keep it here (not per-app) so the chrome can't render into a
+   zero-height container. */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#root {
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* ---- type roles ---- */
+.display { font-family: var(--font-display); letter-spacing: -0.02em; line-height: 1; }
+.mono { font-family: var(--font-mono); }
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+
+/* ============================================================
+   RESPONSIVE SHELL — desktop sidebar ≥1024, mobile top bar + bottom pill tabs
+   ============================================================ */
+.plapp {
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+.plapp,
+.plapp * {
+  box-sizing: border-box;
+}
+.plapp-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.plapp-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 30px 36px 56px;
+}
+.plapp-content {
+  max-width: 880px;
+  margin: 0 auto;
+}
+.plapp .pl-topbar,
+.plapp .pl-tabbar {
+  display: none;
+}
+@media (max-width: 1023px) {
+  .plapp .pl-side {
+    display: none;
+  }
+  .plapp .pl-topbar {
+    display: flex;
+  }
+  .plapp .pl-tabbar {
+    display: flex;
+  }
+  .plapp-main {
+    padding: 18px 16px 22px;
+  }
+}
+
+/* ============================================================
+   ACCESSIBILITY — focus rings for every shell control
+   (#415: restore visible outline stripped by `all: unset`)
+   ============================================================ */
+.pl-navlink:focus-visible,
+.pl-tab:focus-visible,
+.pl-switch-trigger:focus-visible,
+.pl-app-row:focus-visible,
+.pl-shortcut:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   DESKTOP SIDEBAR
+   ============================================================ */
+.pl-side {
+  width: 220px;
+  flex: 0 0 220px;
+  height: 100%;
+  background: var(--surface);
+  border-right: 1.5px solid var(--line);
+  display: flex;
+  flex-direction: column;
+}
+.pl-brand {
+  padding: 20px 16px 16px;
+  border-bottom: 1.5px solid var(--line);
+}
+.pl-wordmark {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.04em;
+  color: var(--ink);
+}
+.pl-wordmark b {
+  color: var(--acid);
+  font-weight: 700;
+}
+.pl-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 8px;
+}
+.pl-nav {
+  display: flex;
+  flex-direction: column;
+  padding-top: 8px;
+  flex: 1;
+  gap: 1px;
+}
+.pl-navlink {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+}
+.pl-navlink .ic {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  opacity: 0.75;
+}
+.pl-navlink:hover {
+  color: var(--ink);
+}
+.pl-navlink.is-active {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-left-color: var(--ink);
+}
+.pl-navlink.is-active:hover {
+  color: var(--accent-ink);
+}
+.pl-navlink.is-active .ic {
+  opacity: 1;
+}
+.pl-side-foot {
+  padding: 14px 16px;
+  border-top: 1.5px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pl-avatar {
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid var(--line);
+  flex: 0 0 30px;
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+/* ============================================================
+   APP SWITCHER (brand-lockup trigger → fly-out)
+   ============================================================ */
+.pl-switch {
+  position: relative;
+  z-index: 30;
+}
+.pl-switch-trigger {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.pl-flyout {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 244px;
+  /* Never exceed the viewport, so a flyout from an edge-anchored trigger can't
+     overflow off-screen on narrow mobile widths. */
+  max-width: calc(100vw - 32px);
+  z-index: 40;
+  background: var(--bg);
+  border: 1.5px solid var(--line);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+/* Foot-anchored menus open upward so they don't fall off the viewport. */
+.pl-flyout.is-up {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+/* Right-edge triggers (mobile top bar) align the menu to their right. */
+.pl-flyout.is-right {
+  left: auto;
+  right: 0;
+}
+/* User-bar trigger: a full-width row (desktop) or bare avatar (mobile). */
+.pl-user-trigger {
+  all: unset;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.pl-app-row {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  padding: 8px 10px;
+  border: 1.5px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.pl-app-row .ag {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  opacity: 0.8;
+}
+.pl-app-row .tag {
+  margin-left: auto;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  opacity: 0.7;
+}
+/* SOON tag retains its own opacity — don't dim it. */
+.pl-app-row .tag.tag-soon {
+  opacity: 1;
+}
+.pl-app-row[disabled],
+.pl-app-row[aria-disabled="true"] {
+  cursor: default;
+}
+/* Hover feedback for inactive rows. */
+.pl-app-row:not(.is-active):hover {
+  border-color: var(--ink-mute);
+  color: var(--ink);
+}
+/* Use --accent (not --acid) for active row — consistent with sidebar active state. */
+.pl-app-row.is-active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.pl-app-row.is-active .ag,
+.pl-app-row.is-active .tag {
+  opacity: 1;
+}
+.pl-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1.5px solid var(--line);
+}
+.pl-theme-row .lbl {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.tt-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tt-chip {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  padding: 5px 8px;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-dim);
+}
+.tt-chip .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.pl-shortcut {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 8px 10px;
+  border: 1.5px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.pl-shortcut:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+/* ============================================================
+   PAGE HEAD + SECTION EYEBROW
+   ============================================================ */
+.pg-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+.pg-head h1 {
+  font-family: var(--font-display);
+  font-size: 30px;
+  margin: 0;
+  color: var(--ink);
+  line-height: 1;
+}
+.pg-head .sub {
+  color: var(--ink-dim);
+  font-size: 13.5px;
+  margin-top: 8px;
+}
+@media (max-width: 1023px) {
+  .pg-head h1 {
+    font-size: 25px;
+  }
+}
+.pl-eyerow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 11px;
+}
+.pl-eyerow .ln {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ============================================================
+   CARDS / ROWS / CONTROLS
+   ============================================================ */
+.pl-card {
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+}
+.pl-row {
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.pl-check {
+  all: unset;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border: 1.5px solid var(--line);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.pl-check.done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.pl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1.5px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.pl-chip.accent {
+  border-color: var(--acid);
+  color: var(--acid);
+}
+.pl-chip.repeat {
+  border-color: color-mix(in srgb, var(--acid) 45%, var(--line));
+  color: var(--ink-dim);
+}
+.pl-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 15px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.06s ease;
+}
+.pl-btn:hover {
+  filter: brightness(1.08);
+}
+.pl-btn:active {
+  transform: translateY(1px);
+}
+.pl-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: none;
+}
+.pl-btn.ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1.5px solid var(--line);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 9px 13px;
+  filter: none;
+}
+.pl-btn.ghost:hover {
+  border-color: var(--ink-dim);
+  filter: none;
+}
+.pl-btn.hot {
+  background: var(--hot, #d4504e);
+  color: var(--bg);
+}
+.pl-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1.5px solid var(--line);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  padding: 11px 13px;
+  letter-spacing: 0.02em;
+}
+.pl-input::placeholder {
+  color: var(--ink-mute);
+}
+.pl-div {
+  height: 1px;
+  background: var(--line);
+}
+
+/* priority tag (HIGH/MED/LOW text) + explicit done button */
+.pl-pritag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border: 1.5px solid var(--line);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.pl-donebtn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  min-height: 30px;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--line);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pl-donebtn:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+.pl-donebtn.is-done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* segmented control */
+.seg {
+  display: inline-flex;
+  border: 1.5px solid var(--line);
+}
+.seg button {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 7px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.seg button + button {
+  border-left: 1.5px solid var(--line);
+}
+.seg button.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ============================================================
+   MOBILE — top bar + bottom pill tab-bar
+   ============================================================ */
+.pl-topbar {
+  height: 52px;
+  flex: 0 0 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1.5px solid var(--line);
+  background: var(--bg);
+  position: relative;
+  z-index: 3;
+}
+.pl-tabbar {
+  flex: 0 0 auto;
+  /* Float clear of the iPhone home-indicator / app-switcher zone (bottom) and
+     the screen's rounded corners (sides, incl. landscape) — base buffer plus
+     the safe-area insets. */
+  margin: 0 calc(12px + env(safe-area-inset-right, 0px))
+    calc(14px + env(safe-area-inset-bottom, 0px))
+    calc(12px + env(safe-area-inset-left, 0px));
+  padding: 7px 8px;
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  border-radius: 22px;
+  border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, #fff 16%, transparent);
+  overflow: hidden;
+}
+.pl-tab {
+  all: unset;
+  box-sizing: border-box;
+  min-height: 52px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 4px;
+  border-radius: 16px;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.pl-tab.is-active {
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 92%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent);
+}
+.pl-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.pl-tab-label {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+/* ============================================================
+   TOAST
+   ============================================================ */
+.pl-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 11px 18px;
+  z-index: 80;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+@media (max-width: 1023px) {
+  .pl-toast {
+    bottom: 90px;
+  }
+}
+
+/* scrollbars */
+.plapp-main::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.plapp-main::-webkit-scrollbar-thumb {
+  background: var(--line);
+}
+
+/* ============================================================
+   QUICK-ADD FAB (floating pill, bottom-right, all authed screens)
+   ============================================================ */
+.pl-fab-wrap {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 50;
+}
+/* Clear the floating mobile tab-bar capsule (≈66px tall + its 14px bottom
+   buffer + safe-area). */
+@media (max-width: 1023px) {
+  .pl-fab-wrap {
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    right: 16px;
+  }
+}
+.pl-fab {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.12s ease;
+}
+.pl-fab:hover {
+  filter: brightness(1.08);
+}
+.pl-fab:active {
+  transform: translateY(1px);
+}
+.pl-fab.is-open {
+  transform: rotate(45deg);
+}
+.pl-fab-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  min-width: 188px;
+  z-index: 55;
+  background: var(--bg);
+  border: 1.5px solid var(--line);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pl-fab-item {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  padding: 9px 11px;
+  border: 1.5px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.pl-fab-item:hover {
+  border-color: var(--acid);
+  color: var(--acid);
+}
+/* Drawer form scaffolding (shared by the task/event/note quick-add forms). */
+.pl-fab-form {
+  display: grid;
+  gap: 12px;
+}
+.pl-fab-label {
+  display: grid;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.pl-fab-form textarea.pl-input {
+  resize: vertical;
+  min-height: 120px;
+  line-height: 1.5;
+}
+.pl-fab-hint {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-dim);
+}
+.pl-fab-empty {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+.pl-fab-error {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--hot, #d4504e);
+}
+
+@media (max-width: 1023px) {
+  .pl-fab-form .pl-input,
+  .pl-fab-form select.pl-input {
+    min-height: 44px;
+  }
+  .pl-fab-form button,
+  .pl-donebtn {
+    min-height: 44px;
+  }
+  .pl-check {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+  }
+}

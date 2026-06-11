@@ -1,0 +1,30 @@
+# Rallypoint apex marketing/home site (issue #419). A static-assets-only
+# Cloudflare Worker — no `main` script, no D1/R2/Durable Objects/cron/secrets.
+# It serves the www SPA on the zone apex:
+#   `wrangler deploy --env qa`   -> rallypt.dev
+#   `wrangler deploy --env prod` -> rallypt.app
+#
+# The deploy build populates ./public from `npm run build -w
+# @rallypoint/www-web`; a committed placeholder index.html keeps
+# `wrangler dev` working pre-build. Because this app has no D1, it is NOT
+# part of the cf-deploy.yml matrix (which assumes a D1 per app) — it has its
+# own `deploy-www` job there instead.
+
+name = "rallypoint-www"
+compatibility_date = "2026-01-01"
+
+# Serve the www SPA. SPA fallback so client-routed paths (/planner,
+# /events) resolve to index.html. No `run_worker_first` — there is no API.
+[assets]
+directory = "./public"
+not_found_handling = "single-page-application"
+
+# ---- QA: rallypt.dev ------------------------------------------------
+[[env.qa.routes]]
+pattern = "rallypt.dev"
+custom_domain = true
+
+# ---- Prod: rallypt.app ----------------------------------------------
+[[env.prod.routes]]
+pattern = "rallypt.app"
+custom_domain = true

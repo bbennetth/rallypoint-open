@@ -1,0 +1,124 @@
+# money-api as a Cloudflare Worker (#313, Phase 4). `wrangler deploy --env qa`
+# -> money.rallypt.dev, `--env prod` -> money.rallypt.app. Entry is
+# src/worker.ts (`{ fetch }`); the Node server.ts is retired.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases and R2 buckets are auto-provisioned by
+# wrangler / the bootstrap step (rp-money-{qa,prod} created if absent;
+# database_id injected by cf-deploy.yml at deploy time). Real secrets via
+# `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
+#   MONEY_API_KEY
+#   MONEY_SESSION_KEY_V1
+#   REALTIME_TOKEN_HMAC_KEY
+# Receipt object storage is a native R2 binding (OBJECT_STORE), not keys (#409).
+
+name = "rallypoint-money"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the money-web SPA from the assets dir; run the Worker first only for
+# the API, so /api/* hits the Worker while the SPA serves first-party from
+# the same origin (the __Host- cookie config). The deploy build populates
+# ./public from `npm run build -w @rallypoint/money-web`; a committed
+# placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# RealtimeHub Durable Object (#313, Phase 3/4). The class is exported from
+# src/worker.ts (re-exported from @rallypoint/realtime). Migrations are
+# script-global (shared across environments); the binding is redeclared per
+# environment below (wrangler does not inherit bindings into named envs).
+[[migrations]]
+tag = "v1"
+new_classes = ["RealtimeHub"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# money has no scheduled handler (no pruner/cron), so NO [triggers] block.
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for the secrets.
+[vars]
+NODE_ENV = "development"
+MONEY_UI_ORIGIN = "http://localhost:5176"
+RPID_API_URL = "http://localhost:8080"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-money-local"
+# Ignored by `wrangler dev --local` (local SQLite store); a real id is only
+# needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/money-db/migrations"
+
+# Receipt object storage (#409). `wrangler dev` backs this with a local
+# (Miniflare) R2 bucket; the per-env blocks below bind the real buckets.
+[[r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-money-dev"
+
+# ---- QA: money.rallypt.dev ------------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", MONEY_UI_ORIGIN = "https://money.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev" }
+
+[[env.qa.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-money-qa"
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-money-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-money-qa || true`).
+migrations_dir = "../../packages/money-db/migrations"
+
+[[env.qa.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# Service binding: same-account cross-Worker calls to id-api dispatch
+# in-process via this binding (the CF edge drops same-account loopback
+# fetches to public hostnames). Path-matched against the bound Worker, so
+# the existing ${RPID_API_URL}/api/v1/... URLs work unchanged. No top-level
+# [[services]] block — local `wrangler dev` falls back to the public-fetch
+# path so single-app dev keeps working.
+[[env.qa.services]]
+binding = "RPID"
+service = "rallypoint-id-qa"
+
+[[env.qa.routes]]
+pattern = "money.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: money.rallypt.app ----------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", MONEY_UI_ORIGIN = "https://money.rallypt.app", RPID_API_URL = "https://id.rallypt.app" }
+
+[[env.prod.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-money-prod"
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-money-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-money-prod || true`).
+migrations_dir = "../../packages/money-db/migrations"
+
+[[env.prod.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+[[env.prod.services]]
+binding = "RPID"
+service = "rallypoint-id-prod"
+
+[[env.prod.routes]]
+pattern = "money.rallypt.app"
+custom_domain = true

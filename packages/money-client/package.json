@@ -1,0 +1,39 @@
+{
+  "name": "@rallypoint/money-client",
+  "version": "0.0.0",
+  "description": "Typed client SDK for the Rallypoint Money SDK API (/api/v1/sdk/money/**). Consumed by events-web and third parties.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bbennetth/rallypoint-core.git",
+    "directory": "packages/money-client"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rallypoint/money-shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

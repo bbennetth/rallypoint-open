@@ -1,0 +1,103 @@
+# lists-api as a Cloudflare Worker (#313, Phase 4). `wrangler deploy --env qa`
+# -> lists.rallypt.dev, `--env prod` -> lists.rallypt.app. Entry is
+# src/worker.ts (`{ fetch }`); the Node server.ts is retired.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
+# wrangler >=4.45 (bootstrap step creates rp-lists-{qa,prod} if absent).
+# Real secrets (LISTS_API_KEY, LISTS_SESSION_KEY_V1, REALTIME_TOKEN_HMAC_KEY,
+# EVENTS_API_KEY, PLANNER_API_KEY)
+# via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step).
+
+name = "rallypoint-lists"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the lists-web SPA from the assets dir; run the Worker first only for
+# the API, so /api/* hits the Worker while the SPA serves first-party from
+# the same origin (the __Host- cookie config). The deploy build populates
+# ./public from `npm run build -w @rallypoint/lists-web`; a committed
+# placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# RealtimeHub Durable Object (#313, Phase 3/4). The class is exported from
+# src/worker.ts (re-exported from @rallypoint/realtime). Migrations are
+# script-global (shared across environments); the binding is redeclared per
+# environment below (wrangler does not inherit bindings into named envs).
+[[migrations]]
+tag = "v1"
+new_classes = ["RealtimeHub"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for the secrets.
+[vars]
+NODE_ENV = "development"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-lists-local"
+# Ignored by `wrangler dev --local` (local SQLite store); a real id is only
+# needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/lists-db/migrations"
+
+# ---- QA: lists.rallypt.dev ------------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", LISTS_UI_ORIGIN = "https://lists.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev" }
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-lists-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-lists-qa || true`).
+migrations_dir = "../../packages/lists-db/migrations"
+
+[[env.qa.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+# Service binding: same-account cross-Worker calls to id-api dispatch
+# in-process via this binding (the CF edge drops same-account loopback
+# fetches to public hostnames). Path-matched against the bound Worker, so
+# the existing ${RPID_API_URL}/api/v1/... URLs work unchanged. No top-level
+# [[services]] block — local `wrangler dev` falls back to the public-fetch
+# path so single-app dev keeps working.
+[[env.qa.services]]
+binding = "RPID"
+service = "rallypoint-id-qa"
+
+[[env.qa.routes]]
+pattern = "lists.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: lists.rallypt.app ----------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", LISTS_UI_ORIGIN = "https://lists.rallypt.app", RPID_API_URL = "https://id.rallypt.app" }
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-lists-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-lists-prod || true`).
+migrations_dir = "../../packages/lists-db/migrations"
+
+[[env.prod.durable_objects.bindings]]
+name = "HUB"
+class_name = "RealtimeHub"
+
+[[env.prod.services]]
+binding = "RPID"
+service = "rallypoint-id-prod"
+
+[[env.prod.routes]]
+pattern = "lists.rallypt.app"
+custom_domain = true

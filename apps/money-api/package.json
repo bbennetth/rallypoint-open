@@ -1,0 +1,35 @@
+{
+  "name": "@rallypoint/money-api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rallypoint/crypto": "*",
+    "@rallypoint/rate-limit": "*",
+    "@rallypoint/id-client": "*",
+    "@rallypoint/logger": "*",
+    "@rallypoint/money-db": "*",
+    "@rallypoint/money-shared": "*",
+    "@rallypoint/object-store": "*",
+    "@rallypoint/realtime": "*",
+    "@rallypoint/shared": "*",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.6.0",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260606.1",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

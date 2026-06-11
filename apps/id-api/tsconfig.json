@@ -1,0 +1,37 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "dist"
+  ],
+  "references": [
+    {
+      "path": "../../packages/crypto"
+    },
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/db"
+    },
+    {
+      "path": "../../packages/object-store"
+    },
+    {
+      "path": "../../packages/logger"
+    },
+    {
+      "path": "../../packages/rate-limit"
+    }
+  ]
+}

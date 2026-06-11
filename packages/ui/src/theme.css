@@ -1,0 +1,485 @@
+/* @rallypoint/ui — "Ink" theme.
+ *
+ * Cyber-brutalist design system promoted from the Rallypoint Planner
+ * design handoff. Dual-axis theming: `data-mode` (dark default / light)
+ * selects the chassis (bg/surface/ink), and `data-color` (blue / orange
+ * / purple / pink / red / green) selects the accent. Both attributes are
+ * written to <html> by `applyThemeToDom` in the shared theme store.
+ *
+ * Back-compat: the legacy single-axis `data-theme` attribute still
+ * works — `:root[data-theme='dark']` maps to the dark chassis and
+ * `:root[data-theme='light']` to the light chassis — so the four sibling
+ * apps (events-web/lists-web/money-web/id-web) keep rendering correctly
+ * whether they emit `data-mode` (new store) or only `data-theme`.
+ * Token NAMES are unchanged so existing component CSS keeps resolving.
+ *
+ * Default (no attribute) = dark Ink chassis + blue accent.
+ *
+ * Apps `@import "tailwindcss"` themselves; this file deliberately does
+ * NOT pull Tailwind in, and avoids redefining any Tailwind utility
+ * (e.g. `.border-b`) so importing it alongside Tailwind is side-effect
+ * free. */
+
+:root {
+  /* Type stack (mode/color-independent). */
+  --font-display: 'Archivo Black', system-ui, -apple-system, sans-serif;
+  --font-body: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Space Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  /* Festival-map highlight: theme-agnostic neon green for the
+     direction line + nearest-POI halo. */
+  --map-highlight: #39ff14;
+  --hot: #ef4444;
+  --focus-ring: var(--acid);
+}
+
+/* ─── CHASSIS (data-mode) ───────────────────────────────────
+   Dark is the default; applied to bare `:root` so apps that have not
+   yet written any theme attribute render the Ink dark chassis. */
+:root,
+[data-mode='dark'],
+:root[data-theme='dark'] {
+  --bg: #0b1b2b;
+  --surface: #152638;
+  --surface-2: #1d2f45;
+  --line: #2b3d56;
+  --ink: #ffffff;
+  --ink-dim: #a8bcd4;
+  --ink-mute: #7a8fa6;
+  color-scheme: dark;
+}
+
+[data-mode='light'],
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --surface: #f5f7fa;
+  --surface-2: #eaf0f7;
+  --line: #d7dfe8;
+  --ink: #0b1b2b;
+  --ink-dim: #4a5a70;
+  --ink-mute: #7d8ca1;
+  color-scheme: light;
+}
+
+/* ─── ACCENTS (data-color) ──────────────────────────────────
+   `:root` carries the default (blue) so `--acid`/`--accent` resolve when
+   no data-color is set. `--accent` always aliases `--acid`. */
+:root,
+[data-color='blue'] {
+  --acid: #0ea5e9;
+  --accent: var(--acid);
+  --accent-ink: #ffffff;
+}
+[data-color='orange'] { --acid: #fb923c; --accent: var(--acid); --accent-ink: #0b1b2b; }
+[data-color='purple'] { --acid: #a855f7; --accent: var(--acid); --accent-ink: #000000; }
+[data-color='pink']   { --acid: #ff2d7a; --accent: var(--acid); --accent-ink: #ffffff; }
+[data-color='red']    { --acid: #ef4444; --accent: var(--acid); --accent-ink: #ffffff; }
+[data-color='green']  { --acid: #22c55e; --accent: var(--acid); --accent-ink: #0b1b2b; }
+
+/* Light-mode accents run a touch darker for contrast on white, and all
+   use white accent-ink. */
+[data-mode='light'][data-color='blue']   { --acid: #0284c7; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='orange'] { --acid: #c2410c; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='purple'] { --acid: #7c3aed; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='pink']   { --acid: #db2777; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='red']    { --acid: #dc2626; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='green']  { --acid: #15803d; --accent-ink: #ffffff; }
+
+/* Soft accent washes derived from the live accent. */
+:root,
+[data-mode] {
+  --accent-soft: color-mix(in srgb, var(--acid) 14%, transparent);
+  --accent-soft-2: color-mix(in srgb, var(--acid) 8%, transparent);
+  /* Dimmed accent at 60% opacity — used for secondary accent text/borders. */
+  --acid-dim: color-mix(in srgb, var(--acid) 60%, transparent);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  box-sizing: border-box;
+}
+
+html {
+  /* Prevent iOS Safari from auto-enlarging text on orientation change */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* Fill the visual viewport even when the address bar collapses */
+  height: 100%;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  overscroll-behavior: none;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-touch-callout: none;
+  min-height: 100%;
+}
+
+/* Normalize form controls — iOS applies heavy default styling that
+   Android doesn't. Strip it so both platforms use our styles. Exclude
+   checkbox/radio: stripping `appearance` there removes the native
+   glyph entirely. */
+button,
+input:not([type='checkbox']):not([type='radio']),
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 0;
+  background-clip: padding-box;
+}
+
+/* Inputs ≥ 16px prevents iOS Safari from auto-zooming on focus. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* Safe area helpers. `safe-x` covers the side notch / Dynamic Island
+   in landscape; top/bottom cover the portrait status bar + home
+   indicator. */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.safe-top    { padding-top: env(safe-area-inset-top, 0px); }
+.safe-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* ─── LIGHT-MODE DARK-TAILWIND REMAPS ──────────────────────
+   Pages authored dark-only bake Tailwind utilities that assume
+   white-on-dark (`text-white/40`, `bg-white/5`, …) plus a baked-in
+   indigo accent. In LIGHT mode these white-over-white opacities collapse
+   toward invisible and indigo clashes with the Ink palette. Remap to
+   theme vars here rather than rewriting all call sites. Dark mode (the
+   Ink default) is unaffected — these selectors are scoped to
+   `[data-mode='light']`. */
+[data-mode='light'] .text-white\/20,
+[data-mode='light'] .text-white\/25,
+[data-mode='light'] .text-white\/30,
+[data-mode='light'] .text-white\/40,
+[data-mode='light'] .text-white\/50 {
+  color: var(--ink-mute);
+}
+[data-mode='light'] .text-white\/60,
+[data-mode='light'] .text-white\/70,
+[data-mode='light'] .text-white\/80 {
+  color: var(--ink-dim);
+}
+[data-mode='light'] .bg-white\/3,
+[data-mode='light'] .bg-white\/5 {
+  background-color: var(--surface);
+}
+[data-mode='light'] .bg-white\/8,
+[data-mode='light'] .bg-white\/10,
+[data-mode='light'] .hover\:bg-white\/8:hover,
+[data-mode='light'] .hover\:bg-white\/10:hover,
+[data-mode='light'] .hover\:bg-white\/15:hover {
+  background-color: var(--surface-2);
+}
+[data-mode='light'] .border-white\/5,
+[data-mode='light'] .border-white\/8,
+[data-mode='light'] .border-white\/10,
+[data-mode='light'] .border-white\/15,
+[data-mode='light'] .border-white\/20,
+[data-mode='light'] .border-white\/30 {
+  border-color: var(--line);
+}
+[data-mode='light'] .bg-indigo-500\/10 { background-color: rgba(99, 91, 255, 0.10); }
+[data-mode='light'] .bg-indigo-500\/20 { background-color: rgba(99, 91, 255, 0.18); }
+[data-mode='light'] .bg-indigo-500\/30 { background-color: rgba(99, 91, 255, 0.26); }
+[data-mode='light'] .bg-indigo-500     { background-color: var(--acid); }
+[data-mode='light'] .hover\:bg-indigo-600:hover { background-color: #4d44e0; }
+[data-mode='light'] .text-indigo-300,
+[data-mode='light'] .text-indigo-400 { color: var(--acid); }
+[data-mode='light'] .border-indigo-500 { border-color: var(--acid); }
+
+/* Android tends to render mobile text smaller than iOS at equivalent
+   CSS widths. Scale up only on Android (set via `[data-platform]` on
+   <html> from the app's main.tsx) so iOS stays unaffected. */
+html[data-platform='android'] { font-size: 17.5px; }
+html[data-platform='android'] .app-root { font-size: 1.08em; }
+html[data-platform='android'] .tabbar-link { font-size: 12px; }
+
+/* ─── UTILITY CLASSES ───────────────────────────────────── */
+
+/* `.mono` is intentionally a no-op. The Ink theme used it as a
+   pervasive monospace label/eyebrow primitive; Rallypoint Minimal
+   doesn't. The class is kept (without a body) so the ~45 existing
+   `className="mono"` call-sites compile and render at body font.
+   Code/ID/timestamp displays that genuinely need monospace use the
+   `font-mono` Tailwind utility instead. */
+.mono    {}
+.display { font-family: var(--font-display); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--surface-2); color: var(--ink);
+  font-family: var(--font-body); font-size: 12px; font-weight: 500;
+  white-space: nowrap;
+}
+
+.chip-solid {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--acid); color: var(--accent-ink);
+  font-family: var(--font-body); font-size: 12px; font-weight: 500;
+  white-space: nowrap;
+}
+.chip-solid:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-brutal {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 16px; background: var(--acid); color: var(--accent-ink);
+  font-family: var(--font-body); font-size: 14px; font-weight: 600;
+  border: none; border-radius: 8px; cursor: pointer;
+  width: 100%;
+}
+.btn-brutal:hover { opacity: 0.9; }
+.btn-brutal:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-brutal:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 16px; background: transparent; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  font-family: var(--font-body); font-size: 14px; font-weight: 500;
+  cursor: pointer;
+}
+.btn-ghost:hover { background: var(--accent-soft); }
+.btn-ghost:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-hot {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 16px; background: var(--hot); color: #ffffff;
+  font-family: var(--font-body); font-size: 14px; font-weight: 600;
+  border: none; border-radius: 8px; cursor: pointer;
+  width: 100%;
+}
+.btn-hot:hover { opacity: 0.9; }
+.btn-hot:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-hot:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.progress { height: 4px; background: var(--surface-2); position: relative; overflow: hidden; }
+.progress > div { position: absolute; inset: 0; background: var(--accent); transform-origin: left; }
+
+/* Cyber input. `font-size: 16px` is the threshold below which iOS
+   Safari auto-zooms on focus — do not undercut it. */
+.cyber-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 120ms ease-out;
+}
+.cyber-input:focus { border-color: var(--acid); outline: 2px solid var(--focus-ring); outline-offset: -1px; }
+.cyber-input::placeholder { color: var(--ink-mute); }
+
+.divider { height: 1px; background: var(--line); }
+
+/* Priority star clip-path */
+.star-clip {
+  clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  display: inline-block;
+}
+
+/* Scrollbar hide */
+.scroll-hide::-webkit-scrollbar { display: none; }
+.scroll-hide { scrollbar-width: none; }
+
+/* ─── RESPONSIVE LAYOUT ─────────────────────────────────── */
+
+/* Mobile: full-width flex column (default). `.app-root` is locked to
+   the live visible viewport via the JS-tracked `--app-vh` custom
+   property (set by `useViewportHeight`). Falls back to `100dvh` until
+   the hook's first effect runs. `.app-main` is the only scroll
+   container; the tab bar anchors to the visible bottom via plain flex
+   layout. */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: var(--app-vh, 100dvh);
+  overflow: hidden;
+  background: var(--bg);
+}
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+/* Mobile global top bar — pinned with `position: fixed` so it can
+   never drift during page scroll (iOS URL-bar reveal, rubber-band,
+   momentum scroll). `.app-main` reserves the header height via
+   `padding-top` below — the two numbers MUST stay in sync (52px
+   content + safe-area-inset-top from `.safe-top` on the header). */
+.app-header {
+  display: flex;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+}
+.app-sidebar { display: none; } /* hidden on mobile */
+/* `min-height: 0` is required for `flex: 1 + overflow-y: auto` to
+   actually engage scrolling inside a flex column. */
+.app-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Reserve space for the fixed `.app-header` (52px content + iOS
+     safe-area-inset-top from the header's `safe-top` class). Desktop
+     overrides this to 0 (header is `display: none` there). */
+  padding-top: calc(52px + env(safe-area-inset-top, 0px));
+  /* Horizontal gutters clearing the landscape Dynamic Island / notch. */
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.app-tabbar {
+  display: grid;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+.tabbar-link {
+  min-height: 44px;
+  padding: 0 4px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ink-dim);
+  text-decoration: none;
+}
+.tabbar-link.is-active { color: var(--acid); }
+
+/* Sidebar nav link — used by react-router NavLink in
+   apps/events-web/src/ui/{AppChrome,AttendeeChrome}.tsx and the
+   lists-web/id-web equivalents. The `.is-active` modifier comes
+   from NavLink's isActive flag; styling here so the chrome shows
+   feedback when a route matches (without it, active items render
+   identically to inactive — a real bug pre-accent rollout). */
+.sidebar-link {
+  display: block;
+  padding: 8px 14px;
+  margin: 1px 8px;
+  border-radius: 6px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-dim);
+  text-decoration: none;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+  position: relative;
+}
+.sidebar-link:hover { background: var(--accent-soft); color: var(--ink); }
+.sidebar-link.is-active {
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-weight: 500;
+}
+.sidebar-link.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 2px; border-radius: 2px;
+  background: var(--acid);
+}
+
+/* iOS / Android PWA standalone: anchor the TabBar via `position: fixed`
+   instead of the JS-tracked `--app-vh` flex chain. On PWA cold-launch
+   both `visualViewport.height` and `window.innerHeight` report
+   stale-low values for the entire pre-interaction window, dragging a
+   flex tab bar short by ~60-80px. In standalone there's no URL bar, so
+   `position: fixed; bottom: 0` anchors to the visual viewport bottom,
+   landing flush with the home indicator on first paint. `bottom` reads
+   `--keyboard-inset` (set by `useViewportHeight`) so the bar sits above
+   the soft keyboard instead of behind it. */
+html[data-pwa-standalone='true'] .app-tabbar {
+  position: fixed;
+  bottom: var(--keyboard-inset, 0px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+}
+@media (max-width: 1023.98px) {
+  /* Decouple `.app-root` height from `--app-vh` in standalone PWA.
+     `100lvh` is the largest viewport — on standalone (no URL bar)
+     lvh = dvh = svh = full screen. The fixed TabBar above still lands
+     flush; this just makes `.app-main` extend down to it with no dead
+     band of `var(--bg)`. */
+  html[data-pwa-standalone='true'] .app-root { height: 100lvh; }
+  /* Reserve TabBar height + safe-area + keyboard inset. 60px is the
+     TabBar's intrinsic height (8 top + 44 button + 8 bottom). */
+  html[data-pwa-standalone='true'] .app-main {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
+  }
+}
+
+/* Desktop: sidebar + content. 1024px keeps phones (incl. landscape +
+   foldables) on the mobile layout. */
+@media (min-width: 1024px) {
+  .app-root { height: 100dvh; overflow: hidden; }
+  .app-shell { flex-direction: row; flex: 1; height: auto; overflow: hidden; }
+  .app-header { display: none; } /* sidebar takes over */
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 220px;
+    min-width: 220px;
+    height: 100dvh;
+    position: sticky;
+    top: 0;
+    border-right: 1px solid var(--line);
+    background: var(--bg);
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  .app-main {
+    flex: 1;
+    height: 100dvh;
+    overflow-y: auto;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .app-tabbar { display: none; }
+  .content-cap { max-width: 860px; }
+}
+
+/* Content padding helper */
+.page-pad { padding: 20px 16px; }
+@media (min-width: 1024px) {
+  .page-pad { padding: 28px 32px; }
+}
+
+/* Group cards: 1-col mobile, 2-col tablet+ */
+.group-grid { grid-template-columns: 1fr; }
+@media (min-width: 640px) {
+  .group-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Mobile-vs-desktop show/hide swaps at 1024px. */
+.plan-desktop-only { display: none; }
+.plan-mobile-only { display: block; }
+.only-desktop-inline { display: none; }
+.only-mobile-inline { display: inline; }
+@media (min-width: 1024px) {
+  .plan-desktop-only { display: block; }
+  .plan-mobile-only { display: none; }
+  .only-desktop-inline { display: inline; }
+  .only-mobile-inline { display: none; }
+}

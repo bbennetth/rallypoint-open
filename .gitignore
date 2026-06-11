@@ -1,0 +1,47 @@
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+.cache/
+coverage/
+
+# env files (never commit)
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# claude-local workflow scratch (gitignored per CLAUDE.md)
+CHANGELOG_PENDING.md
+# machine-local Claude Code runtime state (process lock + agent worktrees)
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# build artifacts
+*.tsbuildinfo
+
+# wrangler / miniflare local state (local D1, caches) — never commit
+.wrangler/
+# wrangler local dev secrets — never commit
+.dev.vars
+**/.dev.vars
+# generated CF_WORKER_SECRETS JSON (scripts/gen-cf-secrets.sh) — never commit
+cf-worker-secrets.json
+
+# playwright (we never want browsers committed; ad-hoc tests are dev-time only)
+.playwright-cache/
+test-results/
+playwright-report/
+# saved E2E auth sessions contain real session cookies — never commit
+e2e/.auth/

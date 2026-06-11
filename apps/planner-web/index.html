@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Pre-hydration theme boot: set the Ink dual-axis (data-mode/data-color)
+         + legacy data-theme + meta theme-color from the persisted
+         `rallypt-theme` blob before first paint (#287, #379). Script body
+         is the single source of truth exported as THEME_BOOT_SOURCE from
+         @rallypoint/ui — the parity test asserts this matches exactly (#380).
+         DO NOT edit this script here; change THEME_BOOT_SOURCE instead. -->
+    <script>
+      ;(function () {
+        try {
+          var s = JSON.parse(localStorage.getItem('rallypt-theme') || '{}').state || {}
+          var m = s.mode || s.theme
+          m = m === 'light' || m === 'dark' ? m : 'dark'
+          var c =
+            ['blue', 'orange', 'purple', 'pink', 'red', 'green'].indexOf(s.color) >= 0
+              ? s.color
+              : 'blue'
+          var el = document.documentElement
+          el.dataset.mode = m
+          el.dataset.color = c
+          el.dataset.theme = m
+          var meta = document.getElementById('theme-color')
+          if (meta) meta.setAttribute('content', m === 'light' ? '#ffffff' : '#0b1b2b')
+        } catch (e) {}
+      })()
+    </script>
+    <meta name="color-scheme" content="dark light" />
+    <!-- theme-color id lets the boot script and applyThemeToDom update the
+         Android Chrome address-bar tint to match the active chassis (#379).
+         Default is the dark chassis bg; the boot script overrides for light. -->
+    <meta name="theme-color" id="theme-color" content="#0b1b2b" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Planner" />
+    <title>Rallypoint Planner</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

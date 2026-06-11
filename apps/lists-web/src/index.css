@@ -1,0 +1,20 @@
+@import 'tailwindcss';
+@import '@rallypoint/ui/theme.css';
+@import '@rallypoint/ui/fonts.css';
+@import '@rallypoint/ui/shell.css';
+
+/* Rallypoint Minimal: design tokens live in @rallypoint/ui/theme.css.
+   Set document defaults off those tokens. */
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-body);
+}
+
+code {
+  font-family: var(--font-mono);
+}

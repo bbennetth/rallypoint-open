@@ -1,0 +1,33 @@
+{
+  "name": "@rallypoint/ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Rallypoint \"Ink\" design system — dual-axis (mode×accent) theme, self-hosted fonts, responsive AppShell, and Clerk-free UI primitives. Consumed by id-web, events-web, lists-web, money-web, planner-web.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./theme.css": "./src/theme.css",
+    "./shell.css": "./src/shell.css",
+    "./fonts.css": "./src/fonts.css"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zustand": "^5.0.0"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-router-dom": ">=6"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^19.0.0",
+    "jsdom": "^25.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

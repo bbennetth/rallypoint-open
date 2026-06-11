@@ -1,0 +1,27 @@
+{
+  "name": "@rallypoint/web-kit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Shared browser session + CSRF transport for the Rallypoint web apps (events-web, lists-web). React-version-agnostic (peer dep >=18).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^19.0.0",
+    "jsdom": "^25.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.3.0",
+    "vitest": "^4.1.0"
+  }
+}

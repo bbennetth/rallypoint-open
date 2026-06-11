@@ -1,0 +1,51 @@
+{
+  "name": "@rallypoint/id-client",
+  "version": "0.0.0",
+  "description": "Server-side SDK for verifying Rallypoint ID sessions and pointing browsers at the hosted UI.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bbennetth/rallypoint-core.git",
+    "directory": "packages/id-client"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "react": "^18.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

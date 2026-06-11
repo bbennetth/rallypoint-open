@@ -1,0 +1,46 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "dist"
+  ],
+  "references": [
+    {
+      "path": "../../packages/crypto"
+    },
+    {
+      "path": "../../packages/planner-db"
+    },
+    {
+      "path": "../../packages/id-client"
+    },
+    {
+      "path": "../../packages/lists-client"
+    },
+    {
+      "path": "../../packages/lists-shared"
+    },
+    {
+      "path": "../../packages/events-client"
+    },
+    {
+      "path": "../../packages/events-shared"
+    },
+    {
+      "path": "../../packages/logger"
+    },
+    {
+      "path": "../../packages/shared"
+    }
+  ]
+}
