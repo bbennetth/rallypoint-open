@@ -39,6 +39,23 @@ export const listItems = sqliteTable(
     completed: integer('completed', { mode: 'boolean' }).notNull().default(false),
     completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
     status: text('status'),
+    // Custom-status linkage (RPL v1.0.0 slice 1). References a
+    // list_statuses.id (`lst_…`); nullable for non-task items and for
+    // pre-migration rows not yet resolved. Kept in lockstep with the
+    // legacy `status` text column (which now holds the status's category
+    // slug) — the app dual-writes both and reads status_id first. No DB
+    // FK: status deletes reassign items in the app layer, and a set-null
+    // cascade would fight that re-pointing (matches the FK-less
+    // assigned_to / custom_fields-key precedent).
+    statusId: text('status_id'),
+    // Sub-item hierarchy (RPL v1.0.0 slice 4). References another
+    // list_items.id in the SAME list; nullable for top-level items. No DB
+    // self-FK: soft-deleting a parent orphans its children (the app clears
+    // their parent_id), which a set-null/cascade FK on a soft-delete column
+    // would never fire for anyway — matches the FK-less assigned_to /
+    // status_id precedent. One level is rendered in the UI; the API caps
+    // nesting depth and rejects cycles + cross-list parents.
+    parentId: text('parent_id'),
     priority: text('priority'),
     dueDate: integer('due_date', { mode: 'timestamp_ms' }),
     // Recurrence linkage (slice 1). A generated occurrence carries the
@@ -77,6 +94,7 @@ export const listItems = sqliteTable(
     listIdx: index('list_items_list_idx').on(t.listId, t.position),
     assignedIdx: index('list_items_assigned_idx').on(t.assignedTo),
     statusIdx: index('list_items_status_idx').on(t.listId, t.status),
+    parentIdx: index('list_items_parent_idx').on(t.listId, t.parentId),
     seriesIdx: index('list_items_series_idx').on(t.seriesId, t.occurrenceDate),
   }),
 )

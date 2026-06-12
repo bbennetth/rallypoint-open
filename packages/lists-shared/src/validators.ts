@@ -140,6 +140,94 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'done'] as const
 export const taskStatusField = z.enum(TASK_STATUSES)
 export type TaskStatus = (typeof TASK_STATUSES)[number]
 
+// --- Custom statuses (RPL v1.0.0 slice 1) ----------------------------
+
+// A status's category is the load-bearing classifier: completion
+// (done ⟺ completed), kanban grouping, and GitHub auto-close all key off
+// it, never the renameable name. The three categories are exactly the
+// legacy task-status values, so the legacy `list_items.status` text
+// column can be dual-written with the category slug for back-compat.
+export const STATUS_CATEGORIES = TASK_STATUSES
+export const statusCategoryField = z.enum(STATUS_CATEGORIES)
+export type StatusCategory = (typeof STATUS_CATEGORIES)[number]
+
+// A status id (`lst_…`) referenced by an item. Bounded like other ids;
+// referential integrity (belongs to the list, not deleted) is checked
+// app-side.
+export const statusIdField = z
+  .string()
+  .trim()
+  .min(1, 'Status id is required.')
+  .max(64, 'Status id must be at most 64 characters.')
+
+export const statusNameField = z
+  .string()
+  .trim()
+  .min(1, 'Status name is required.')
+  .max(80, 'Status name must be at most 80 characters.')
+
+// --- Sub-item hierarchy (RPL v1.0.0 slice 4) -------------------------
+
+// A parent item id (`lit_…`) for sub-item nesting. Bounded like other
+// ids; the route checks it belongs to the same list, isn't the item
+// itself, doesn't form a cycle, and doesn't exceed the depth cap.
+export const parentIdField = z
+  .string()
+  .trim()
+  .min(1, 'Parent id is required.')
+  .max(64, 'Parent id must be at most 64 characters.')
+
+// Free-form color token (hex or palette key), bounded. Mirrors the
+// custom-field choice color (no strict regex) so the UI owns the palette.
+export const statusColorField = z
+  .string()
+  .trim()
+  .max(32, 'Status color must be at most 32 characters.')
+  .nullable()
+  .optional()
+
+// POST /api/v1/ui/lists/:listId/statuses — define a status. position is
+// optional (the app appends when omitted).
+export const CreateStatusSchema = z.object({
+  name: statusNameField,
+  category: statusCategoryField,
+  color: statusColorField,
+  position: positionField.optional(),
+})
+export type CreateStatusInput = z.infer<typeof CreateStatusSchema>
+
+// PATCH /api/v1/ui/lists/:listId/statuses/:statusId — sparse update.
+// At least one field must be present.
+export const UpdateStatusSchema = z
+  .object({
+    name: statusNameField.optional(),
+    category: statusCategoryField.optional(),
+    color: statusColorField,
+    position: positionField.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (Object.values(v).every((x) => x === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
+    }
+  })
+export type UpdateStatusInput = z.infer<typeof UpdateStatusSchema>
+
+// PUT /api/v1/ui/lists/:listId/statuses/order — reorder the full set in
+// one call. orderedIds is the complete list of status ids in the desired
+// order; ids outside the list are ignored app-side.
+export const ReorderStatusesSchema = z.object({
+  orderedIds: z
+    .array(statusIdField)
+    .min(1, 'At least one status id is required.')
+    .max(50, 'At most 50 statuses are supported.')
+    .transform((ids) => [...new Set(ids)]),
+})
+export type ReorderStatusesInput = z.infer<typeof ReorderStatusesSchema>
+
 // Task priority (festival-planner port). Defaults to 'medium' server-side.
 export const TASK_PRIORITIES = ['low', 'medium', 'high'] as const
 export const taskPriorityField = z.enum(TASK_PRIORITIES)
@@ -177,18 +265,46 @@ export const dueDateField = z
 // `null` value clears that key on PATCH.
 export const customFieldsField = z.record(z.unknown())
 
+// A label id (`lbl_…`) referenced by an item. Bounded like other ids;
+// referential integrity (belongs to the list, not deleted) is checked
+// app-side.
+export const labelIdField = z
+  .string()
+  .trim()
+  .min(1, 'Label id is required.')
+  .max(64, 'Label id must be at most 64 characters.')
+
+// Deduplicate an array, first-occurrence wins.
+function dedupe<T>(arr: T[]): T[] {
+  return [...new Set(arr)]
+}
+
+// An item's full label set: up to 50 label ids, deduped. Used on item
+// create and PATCH (full replace — not additive).
+export const labelIdsField = z.array(labelIdField).max(50).transform(dedupe)
+
 export const CreateListItemSchema = z.object({
   title: itemTitleField,
   notes: itemNotesField,
   assignedTo: assignedToField,
   position: positionField.optional(),
   status: taskStatusField.optional(),
+  // Custom status (RPL v1.0.0). When given, the route resolves it to a
+  // list_statuses row and mirrors the legacy `status` text + completed off
+  // its category. Takes precedence over the legacy `status` field.
+  statusId: statusIdField.optional(),
+  // Sub-item parent (RPL v1.0.0). Must belong to the same list; the route
+  // rejects cross-list parents, self-parenting, cycles, and over-deep nesting.
+  parentId: parentIdField.optional(),
   // priority on create: omitted → 'medium' (backward-compat server default);
   // explicit null → no-priority (null stored); any enum value → that value.
   // .default() fills only undefined, so null passes through unchanged.
   priority: taskPriorityField.nullable().optional().default('medium'),
   dueDate: dueDateField,
   customFields: customFieldsField.optional(),
+  // Labels (RPL v1.0.0 slice 12). Full set of label ids to attach on
+  // create; omit to create with no labels.
+  labelIds: labelIdsField.optional(),
 })
 export type CreateListItemInput = z.infer<typeof CreateListItemSchema>
 
@@ -212,10 +328,17 @@ export const UpdateListItemSchema = z
     completed: z.boolean().optional(),
     position: positionField.optional(),
     status: taskStatusField.optional(),
+    // Custom status (RPL v1.0.0). null clears the status_id linkage.
+    statusId: statusIdField.nullable().optional(),
+    // Sub-item parent (RPL v1.0.0). null detaches (promotes to top-level).
+    parentId: parentIdField.nullable().optional(),
     priority: taskPriorityField.nullable().optional(),
     dueDate: dueDateField,
     listId: moveTargetListIdField.optional(),
     customFields: customFieldsField.optional(),
+    // Labels (RPL v1.0.0 slice 12). Full replacement of the item's label
+    // set; omit to leave labels unchanged on PATCH.
+    labelIds: labelIdsField.optional(),
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {
@@ -255,6 +378,11 @@ const bulkItemPatchSchema = z.object({
   completed: z.boolean().optional(),
   assignedTo: assignedToField,
   status: taskStatusField.optional(),
+  // Bulk custom-status change (RPL v1.0.0 slice 6 wires the UI; the
+  // schema accepts it here so the bulk endpoint is status-aware from S1).
+  // Non-nullable on purpose: bulk can SET a status but not clear it to null
+  // (the single-item PATCH allows null; a bulk-clear has no use case yet).
+  statusId: statusIdField.optional(),
   priority: taskPriorityField.nullable().optional(),
   dueDate: dueDateField,
   customFields: customFieldsField.optional(),
@@ -501,6 +629,15 @@ export const CreateGroupSchema = z.object({
 })
 export type CreateGroupInput = z.infer<typeof CreateGroupSchema>
 
+// POST /api/v1/sdk/groups — peer apps may stamp provenance on groups
+// they provision. 'planner' marks Planner-BFF personal groups, which the
+// Lists UI surface serves read-only. Deliberately NOT on the UI schema —
+// end users can't mark their own groups app-managed.
+export const SdkCreateGroupSchema = CreateGroupSchema.extend({
+  origin: z.enum(['planner']).optional(),
+})
+export type SdkCreateGroupInput = z.infer<typeof SdkCreateGroupSchema>
+
 // PATCH /api/v1/ui/groups/:groupId — sparse update. Every field
 // optional; at least one must be present.
 export const UpdateGroupSchema = z
@@ -518,3 +655,102 @@ export const UpdateGroupSchema = z
     }
   })
 export type UpdateGroupInput = z.infer<typeof UpdateGroupSchema>
+
+// --- Labels (RPL v1.0.0 slice 12) — CRUD schemas --------------------
+
+// Label display name — 1–60 chars after trimming.
+export const labelNameField = z
+  .string()
+  .trim()
+  .min(1, 'Label name is required.')
+  .max(60, 'Label name must be at most 60 characters.')
+
+// Free-form color token (hex or palette key), bounded. Mirrors
+// statusColorField — no strict regex, the UI owns the palette.
+export const labelColorField = z
+  .string()
+  .trim()
+  .max(32, 'Label color must be at most 32 characters.')
+  .nullable()
+  .optional()
+
+// POST /api/v1/ui/lists/:listId/labels — define a label. position is
+// optional (the app appends when omitted).
+export const CreateLabelSchema = z.object({
+  name: labelNameField,
+  color: labelColorField,
+  position: positionField.optional(),
+})
+export type CreateLabelInput = z.infer<typeof CreateLabelSchema>
+
+// PATCH /api/v1/ui/lists/:listId/labels/:labelId — sparse update.
+// At least one field must be present.
+export const UpdateLabelSchema = z
+  .object({
+    name: labelNameField.optional(),
+    color: labelColorField,
+    position: positionField.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (Object.values(v).every((x) => x === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
+    }
+  })
+export type UpdateLabelInput = z.infer<typeof UpdateLabelSchema>
+
+// --- MCP tokens (RPL v1.0.0 slice 11) --------------------------------
+
+// POST /api/v1/ui/mcp-tokens — mint a personal access token for the Lists
+// MCP server. `label` names it; `expiresInDays` optionally bounds its life
+// (omitted = non-expiring).
+export const CreateMcpTokenSchema = z.object({
+  label: z
+    .string()
+    .trim()
+    .min(1, 'Label is required.')
+    .max(80, 'Label must be at most 80 characters.'),
+  expiresInDays: z
+    .number()
+    .int('expiresInDays must be an integer.')
+    .min(1, 'expiresInDays must be at least 1.')
+    .max(3650, 'expiresInDays must be at most 3650.')
+    .optional(),
+})
+export type CreateMcpTokenInput = z.infer<typeof CreateMcpTokenSchema>
+
+// --- Comments (RPL v1.0.0 slice 7) -----------------------------------
+
+// Comment body — 1–4000 chars after trimming. Matches list_item_comments.body.
+export const commentBodyField = z
+  .string()
+  .trim()
+  .min(1, 'Comment body is required.')
+  .max(4000, 'Comment body must be at most 4000 characters.')
+
+// POST /api/v1/ui/lists/:listId/items/:itemId/comments
+export const CreateCommentSchema = z.object({
+  body: commentBodyField,
+})
+export type CreateCommentInput = z.infer<typeof CreateCommentSchema>
+
+// PATCH /api/v1/ui/lists/:listId/items/:itemId/comments/:commentId — sparse
+// patch (body is the only editable field today; at least one must be present),
+// matching the UpdateGroup/UpdateStatus sparse-patch convention.
+export const UpdateCommentSchema = z
+  .object({
+    body: commentBodyField.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (Object.values(v).every((x) => x === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
+    }
+  })
+export type UpdateCommentInput = z.infer<typeof UpdateCommentSchema>

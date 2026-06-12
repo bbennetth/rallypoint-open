@@ -11,6 +11,7 @@
 import type {
   CreateFieldDefInput,
   CreateGroupInput,
+  SdkCreateGroupInput,
   CreateListInput,
   CreateListItemInput,
   CreateSeriesInput,
@@ -20,6 +21,7 @@ import type {
   ListType,
   RecurrenceFreq,
   ScopeType,
+  StatusCategory,
   TaskPriority,
   TaskStatus,
   UpdateFieldDefInput,
@@ -31,6 +33,7 @@ import type {
 export type {
   CreateFieldDefInput,
   CreateGroupInput,
+  SdkCreateGroupInput,
   CreateListInput,
   CreateListItemInput,
   CreateSeriesInput,
@@ -40,6 +43,7 @@ export type {
   ListType,
   RecurrenceFreq,
   ScopeType,
+  StatusCategory,
   TaskPriority,
   TaskStatus,
   UpdateFieldDefInput,
@@ -78,6 +82,11 @@ export interface ListItemDto {
   completed: boolean
   completedAt: string | null
   status: TaskStatus | null
+  // Custom-status linkage (`lst_…`); pair with listStatuses to resolve
+  // name/category/color. RPL v1.0.0.
+  statusId: string | null
+  // Sub-item parent (`lit_…`) in the same list; null for top-level. RPL v1.0.0.
+  parentId: string | null
   priority: TaskPriority | null
   dueDate: string | null
   position: number
@@ -129,6 +138,44 @@ export interface FieldDefDto {
   updatedAt: string
 }
 
+// Wire shape of a per-list custom status (mirrors the api's
+// serializeListStatusDto). `category` is the load-bearing classifier;
+// resolve an item's statusId against this set. RPL v1.0.0.
+export interface ListStatusDto {
+  id: string
+  listId: string
+  name: string
+  color: string | null
+  category: StatusCategory
+  position: number
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
+
+// Wire shape of a per-list label (mirrors the api's serializeLabelDto in
+// routes/sdk-lists.ts). camelCase, no deletedAt. RPL v1.0.0.
+export interface LabelDto {
+  id: string
+  listId: string
+  name: string
+  color: string | null
+  position: number
+  createdAt: string
+  updatedAt: string
+}
+
+// Wire shape of a comment on a list item (mirrors the api's
+// serializeCommentDto in routes/sdk-lists.ts). camelCase, no deletedAt.
+export interface CommentDto {
+  id: string
+  itemId: string
+  authorId: string
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
 // Wire shape of a list_group row returned by the SDK write surface
 // (mirrors the api's serializeGroupDto). A `list_group` is a multi-user
 // container; Planner provisions one per user as a personal task-list
@@ -137,6 +184,9 @@ export interface GroupDto {
   id: string
   name: string
   description: string | null
+  // Provenance: 'planner' for Planner-BFF-provisioned groups (served
+  // read-only on the Lists UI surface); null for Lists-app groups.
+  origin: string | null
   createdBy: string
   createdAt: string
   updatedAt: string
@@ -181,6 +231,12 @@ export interface ListsClient {
   // Custom field definitions for a list — the schema needed to interpret
   // each item's `customFields`.
   listFieldDefs(listId: string): Promise<FieldDefDto[]>
+  // Per-list custom statuses — the set needed to interpret each item's
+  // `statusId` (id → name/category/color). Lazily seeds defaults. RPL v1.0.0.
+  listStatuses(listId: string): Promise<ListStatusDto[]>
+  // Per-list labels — the set needed to interpret each item's `label_ids`.
+  // RPL v1.0.0.
+  listLabels(listId: string): Promise<LabelDto[]>
   // --- field defs (writes) ------------------------------------------
   // Define / update / remove a list's custom-field schema. `actor` must be
   // a member of the list's scope (sent as x-actor); fieldType is immutable
@@ -198,7 +254,9 @@ export interface ListsClient {
   // the user's existing personal group before creating one.
   listGroups(actor: string): Promise<GroupDto[]>
   // Create a list_group; the actor is auto-enrolled as its owner member.
-  createGroup(input: CreateGroupInput, actor: string): Promise<GroupDto>
+  // `origin: 'planner'` stamps provenance so the Lists UI serves the
+  // group read-only.
+  createGroup(input: SdkCreateGroupInput, actor: string): Promise<GroupDto>
   // --- lists / items (writes) ---------------------------------------
   // Create a list in a scope. For a `list_group` scope the actor must be
   // a member (404 otherwise); opaque scopes are trusted to the caller.
@@ -227,13 +285,17 @@ export interface ListsClient {
   updateSeries(seriesId: string, patch: UpdateSeriesInput, actor: string): Promise<ListItemSeriesDto>
   // Soft-delete a series + its future non-exception occurrences.
   deleteSeries(seriesId: string, actor: string): Promise<void>
-  // --- planner prefs -----------------------------------------------
-  // Set the actor's "show in planner" flag for a list they can access.
-  // `show=false` removes the list from the actor's planner view.
-  setListPlannerPref(listId: string, show: boolean, actor: string): Promise<void>
-  // Returns all lists the actor has flagged show_in_planner=true that
-  // they still have access to (inaccessible/deleted lists drop out silently).
-  listPlannerLists(actor: string): Promise<ListDto[]>
+  // --- comments -----------------------------------------------------
+  // Live comments for a list item, oldest-first (PLANNER_API_KEY-gated).
+  listComments(listId: string, itemId: string): Promise<CommentDto[]>
+  // Create a comment on a list item. `actor` is the user_<ulid> the
+  // calling peer app has already authenticated.
+  createComment(
+    listId: string,
+    itemId: string,
+    input: { body: string },
+    actor: string,
+  ): Promise<CommentDto>
 }
 
 export function createListsClient(config: ListsClientConfig): ListsClient {
@@ -291,6 +353,18 @@ export function createListsClient(config: ListsClientConfig): ListsClient {
       return request<FieldDefDto[]>(
         'GET',
         `/api/v1/sdk/lists/${encodeURIComponent(listId)}/fields`,
+      )
+    },
+    listStatuses(listId) {
+      return request<ListStatusDto[]>(
+        'GET',
+        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/statuses`,
+      )
+    },
+    listLabels(listId) {
+      return request<LabelDto[]>(
+        'GET',
+        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/labels`,
       )
     },
     createFieldDef(listId, input, actor) {
@@ -394,18 +468,19 @@ export function createListsClient(config: ListsClientConfig): ListsClient {
         { 'x-actor': actor },
       )
     },
-    setListPlannerPref(listId, show, actor) {
-      return request<void>(
-        'PUT',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/planner-pref`,
-        { show },
-        { 'x-actor': actor },
+    listComments(listId, itemId) {
+      return request<CommentDto[]>(
+        'GET',
+        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/comments`,
       )
     },
-    listPlannerLists(actor) {
-      return request<ListDto[]>('GET', '/api/v1/sdk/planner-lists', undefined, {
-        'x-actor': actor,
-      })
+    createComment(listId, itemId, input, actor) {
+      return request<CommentDto>(
+        'POST',
+        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/comments`,
+        input,
+        { 'x-actor': actor },
+      )
     },
   }
 }

@@ -98,6 +98,33 @@ export async function loadListForRead(
   return list
 }
 
+// Planner-origin scopes are read-only on the Lists UI surface (#531):
+// the Planner BFF owns their lifecycle via the SDK surface, and RPL-only
+// features (custom statuses, kanban, recurrence views) must never be
+// attached to a Planner-managed list from here. 403, not 404 — the
+// caller legitimately reads the list; only mutation is denied.
+export async function assertScopeMutable(
+  c: Context<HonoApp>,
+  scopeId: string,
+): Promise<void> {
+  const group = await c.var.repos.groups.findById(scopeId)
+  if (group?.origin === 'planner') {
+    throw errors.forbidden('This list is managed in Planner and is read-only in Lists.')
+  }
+}
+
+// Load + authorize a list for an item-level mutation (create / edit /
+// delete items, comments). Read access is the floor; planner-origin
+// scopes are additionally denied (read-only on this surface).
+export async function loadListForItemWrite(
+  c: Context<HonoApp>,
+  listId: string,
+): Promise<ListRecord> {
+  const list = await loadListForRead(c, listId)
+  await assertScopeMutable(c, list.scopeId)
+  return list
+}
+
 // Load + authorize a list for a structural mutation (custom-field defs,
 // saved views — Lists v2). Read access is the floor (404 leaks nothing);
 // on top of it only the list creator may reshape the list, so a plain
@@ -109,6 +136,7 @@ export async function loadListForWrite(
   listId: string,
 ): Promise<ListRecord> {
   const list = await loadListForRead(c, listId)
+  await assertScopeMutable(c, list.scopeId)
   if (list.createdBy !== c.var.session!.userId) {
     throw errors.forbidden('Only the list creator can change its fields.')
   }

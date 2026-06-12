@@ -16,6 +16,8 @@ import {
   type ListItemDto,
 } from '../lib/api.js'
 import { GroupMembersEditor } from '../ui/GroupMembersEditor.js'
+import { WhoIsGoingCard } from '../ui/WhoIsGoingCard.js'
+import { GroupInviteCard } from '../ui/GroupInviteCard.js'
 import { useRefreshBus } from '../lib/refresh-bus.js'
 import { useAttendeeOutlet } from '../ui/AttendeeChrome.js'
 
@@ -102,12 +104,19 @@ export function GroupDetailPage() {
 
         <ActionRail groupId={group.id} />
 
+        <GroupInviteCard groupName={group.name} shortCode={group.short_code} />
+
         <GroupMembersEditor
           group={group}
           currentUserId={userId}
           onReload={load}
           onDeleted={() => void navigate('/me/events')}
         />
+
+        {/* Mounted unconditionally: the group payload has no event
+            features, so the card relies on the endpoint 404ing (and
+            rendering nothing) when the attendees toggle is off. */}
+        <WhoIsGoingCard groupId={group.id} />
 
         <GroupLists groupId={group.id} />
 

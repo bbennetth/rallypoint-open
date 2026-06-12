@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import { sqliteTable, index, text, integer } from 'drizzle-orm/sqlite-core'
 import { events } from './events.js'
 import { eventDays } from './event-days.js'
+import { eventStages } from './event-stages.js'
 import { groups } from './groups.js'
 
 // event_sessions — schedulable activities within an event (design §5.3).
@@ -33,6 +34,10 @@ export const eventSessions = sqliteTable(
     description: text('description'),
     location: text('location'),
     dayId: text('day_id').references(() => eventDays.id, { onDelete: 'set null' }),
+    // Sessions can be held at a stage (#215, lineup parity). SET NULL on
+    // stage deletion so a session survives losing its stage, same as
+    // event_artists.stage_id.
+    stageId: text('stage_id').references(() => eventStages.id, { onDelete: 'set null' }),
     // time('start_time')/time('end_time') → text; HH:MM:SS string.
     startTime: text('start_time'),
     endTime: text('end_time'),

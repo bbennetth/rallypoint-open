@@ -1,62 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { ListItemDto } from '@rallypoint/lists-client'
 import type { UserEventDto } from '@rallypoint/events-client'
-import { mergeSharedTaskItems, sharedListIdSet, mergeSharedGroupEvents, sharedEventIdSet } from './shared-merge.js'
-
-function item(id: string, listId: string): ListItemDto {
-  return {
-    id,
-    listId,
-    title: id,
-    notes: null,
-    assignedTo: null,
-    completed: false,
-    completedAt: null,
-    status: 'todo',
-    priority: null,
-    dueDate: null,
-    position: 0,
-    customFields: {},
-    seriesId: null,
-    createdBy: 'user_test',
-    createdAt: '2026-06-08T00:00:00.000Z',
-    updatedAt: '2026-06-08T00:00:00.000Z',
-  }
-}
-
-describe('mergeSharedTaskItems', () => {
-  it('concatenates personal then shared', () => {
-    const merged = mergeSharedTaskItems([item('a', 'l1')], [item('b', 'l2')])
-    expect(merged.map((i) => i.id)).toEqual(['a', 'b'])
-  })
-  it('de-dups by item id (personal wins)', () => {
-    const personal = [item('a', 'l1')]
-    const shared = [item('a', 'lX'), item('b', 'l2')]
-    const merged = mergeSharedTaskItems(personal, shared)
-    expect(merged.map((i) => i.id)).toEqual(['a', 'b'])
-    // the surviving 'a' is the personal one (listId l1, not lX)
-    expect(merged.find((i) => i.id === 'a')?.listId).toBe('l1')
-  })
-  it('handles empty inputs', () => {
-    expect(mergeSharedTaskItems([], [])).toEqual([])
-    expect(mergeSharedTaskItems([item('a', 'l1')], [])).toHaveLength(1)
-    expect(mergeSharedTaskItems([], [item('b', 'l2')])).toHaveLength(1)
-  })
-})
-
-describe('sharedListIdSet', () => {
-  it('marks flagged shared lists as shared', () => {
-    const set = sharedListIdSet(['s1', 's2'], ['p1'])
-    expect([...set].sort()).toEqual(['s1', 's2'])
-  })
-  it('excludes any flagged list that is also personal (personal wins)', () => {
-    const set = sharedListIdSet(['s1', 'p1'], ['p1', 'p2'])
-    expect([...set]).toEqual(['s1'])
-  })
-  it('empty when nothing flagged', () => {
-    expect(sharedListIdSet([], ['p1']).size).toBe(0)
-  })
-})
+import { mergeSharedGroupEvents, sharedEventIdSet } from './shared-merge.js'
 
 // --- group event helpers ---------------------------------------------------
 

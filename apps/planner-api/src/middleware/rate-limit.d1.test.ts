@@ -46,7 +46,6 @@ function makeNullLists(): ListsClient {
     listGroups: async () => [],
     listLists: async () => [],
     listItems: async () => [],
-    listPlannerLists: async () => [],
     listPersonalTaskLists: async () => [],
   } as unknown as ListsClient
 }

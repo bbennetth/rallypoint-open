@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { eventDateField, userIdField } from './validators.js'
+import { normalizeShortCode } from './join-codes.js'
 
 // Cross-target validators for the group layer (design §5.5). Same
 // field-builder style as validators.ts; apps/events-api validates
@@ -37,18 +38,20 @@ export const assignableGroupRoleField = z.enum(ASSIGNABLE_GROUP_ROLES, {
 })
 
 // Raw join/invite code as handed to the joiner: 'rpj_' + base64url.
-// One code grammar covers both a group's standing join code and a
-// single-use invite code (the resolver disambiguates by lookup).
-// Real codes are `rpj_` + base64url(256 bits) = 47 chars; min 20
-// rejects obviously-truncated paste-errors client-side without ever
-// tripping on a legitimate code (the server still authoritatively
-// resolves by hash lookup).
+// One code grammar covers a group's standing rpj_ join code, a
+// single-use invite code (the resolver disambiguates by lookup), and
+// — since #440 — the human 6-char short code (any casing/spacing;
+// normalizeShortCode in join-codes.ts is the authority on that
+// shape). Long codes are `rpj_` + base64url(256 bits) = 47 chars.
 export const joinCodeField = z
   .string()
   .trim()
-  .min(20, 'Join code is too short.')
+  .min(1, 'Join code is required.')
   .max(256, 'Join code is too long.')
-  .regex(/^rpj_[A-Za-z0-9_-]+$/, 'That is not a valid join code.')
+  .refine(
+    (s) => /^rpj_[A-Za-z0-9_-]{16,}$/.test(s) || normalizeShortCode(s) !== null,
+    'That is not a valid join code.',
+  )
 
 // Optional invited email — RFC-ish bounds + lowercasing.
 function emailFieldOptional() {

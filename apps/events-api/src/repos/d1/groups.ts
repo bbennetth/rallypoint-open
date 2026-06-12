@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { eventAttendees, groupInvites, groupMembers, groups } from '@rallypoint/events-db'
 import type { CreateGroupInput, GroupRecord, GroupRepo, PatchGroupInput } from '../types.js'
@@ -15,6 +15,7 @@ function rowToGroup(row: typeof groups.$inferSelect): GroupRecord {
     startDate: row.startDate ?? null,
     endDate: row.endDate ?? null,
     joinCodeHash: row.joinCodeHash,
+    shortCode: row.shortCode ?? null,
     ownerUserId: row.ownerUserId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -36,6 +37,7 @@ export class D1GroupRepo implements GroupRepo {
           startDate: input.startDate ?? null,
           endDate: input.endDate ?? null,
           joinCodeHash: input.joinCodeHash,
+          shortCode: input.shortCode ?? null,
           ownerUserId: input.ownerUserId,
         })
         .returning()
@@ -57,6 +59,47 @@ export class D1GroupRepo implements GroupRepo {
       .where(eq(groups.joinCodeHash, joinCodeHash))
       .limit(1)
     return rows[0] ? rowToGroup(rows[0]) : null
+  }
+
+  async findByShortCode(shortCode: string): Promise<GroupRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(groups)
+      .where(eq(groups.shortCode, shortCode))
+      .limit(1)
+    return rows[0] ? rowToGroup(rows[0]) : null
+  }
+
+  async setShortCode(id: string, shortCode: string): Promise<GroupRecord | null> {
+    try {
+      const [row] = await this.db
+        .update(groups)
+        .set({ shortCode, updatedAt: new Date() })
+        .where(eq(groups.id, id))
+        .returning()
+      return row ? rowToGroup(row) : null
+    } catch (err) {
+      throw mapUniqueViolation(err)
+    }
+  }
+
+  async listUserGroupIdsByEvent(userId: string, eventIds: string[]): Promise<Map<string, string>> {
+    if (eventIds.length === 0) return new Map()
+    const rows = await this.db
+      .select({
+        eventId: groups.eventId,
+        groupId: groups.id,
+        joinedAt: groupMembers.joinedAt,
+      })
+      .from(groupMembers)
+      .innerJoin(groups, eq(groupMembers.groupId, groups.id))
+      .where(and(eq(groupMembers.userId, userId), inArray(groups.eventId, eventIds)))
+      .orderBy(asc(groupMembers.joinedAt))
+    const out = new Map<string, string>()
+    for (const r of rows) {
+      if (!out.has(r.eventId)) out.set(r.eventId, r.groupId)
+    }
+    return out
   }
 
   async listForEvent(eventId: string): Promise<GroupRecord[]> {
@@ -111,6 +154,7 @@ export class D1GroupRepo implements GroupRepo {
             startDate: input.group.startDate ?? null,
             endDate: input.group.endDate ?? null,
             joinCodeHash: input.group.joinCodeHash,
+            shortCode: input.group.shortCode ?? null,
             ownerUserId: input.group.ownerUserId,
           })
           .returning(),

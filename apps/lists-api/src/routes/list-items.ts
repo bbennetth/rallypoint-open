@@ -11,6 +11,7 @@ import {
   categorize,
   isCategory,
   CATEGORY_KEY,
+  childRollup,
 } from '@rallypoint/lists-shared'
 import type { Context } from 'hono'
 import type { HonoApp } from '../context.js'
@@ -19,7 +20,9 @@ import type { ListItemRecord, ListRecord, UpdateListItemInput } from '../repos/t
 import { readJsonBody } from './_body.js'
 import { envelope, listChannel } from '../realtime/channels.js'
 import { publish } from '../realtime/publish.js'
-import { loadListForRead } from './_list-access.js'
+import { loadListForItemWrite, loadListForRead } from './_list-access.js'
+import { ensureStatuses, resolveStatus } from './_statuses.js'
+import { assertValidParent } from './_hierarchy.js'
 import { ITEM_SCAN_CAP, applyScanCap } from '../lib/scan-cap.js'
 
 const TENANT = 'rallypoint'
@@ -28,7 +31,10 @@ const TENANT = 'rallypoint'
 // hard-purges the row at the boundary).
 const RESTORE_GRACE_MS = 30 * 24 * 60 * 60 * 1000
 
-function serializeItem(i: ListItemRecord): Record<string, unknown> {
+function serializeItem(
+  i: ListItemRecord,
+  labelIds: string[] = [],
+): Record<string, unknown> {
   return {
     id: i.id,
     list_id: i.listId,
@@ -38,9 +44,12 @@ function serializeItem(i: ListItemRecord): Record<string, unknown> {
     completed: i.completed,
     completed_at: i.completedAt ? i.completedAt.toISOString() : null,
     status: i.status,
+    status_id: i.statusId,
+    parent_id: i.parentId,
     priority: i.priority,
     due_date: i.dueDate ? i.dueDate.toISOString() : null,
     custom_fields: i.customFields,
+    label_ids: labelIds,
     position: i.position,
     created_by: i.createdBy,
     created_at: i.createdAt.toISOString(),
@@ -55,6 +64,12 @@ function serializeItem(i: ListItemRecord): Record<string, unknown> {
 // are only reachable through a readable parent.
 async function loadList(c: Context<HonoApp>, listId: string): Promise<ListRecord> {
   return loadListForRead(c, listId)
+}
+
+// Mutation variant: additionally rejects planner-origin scopes, which
+// are read-only on the UI surface (#531).
+async function loadListMutable(c: Context<HonoApp>, listId: string): Promise<ListRecord> {
+  return loadListForItemWrite(c, listId)
 }
 
 // Load an item and confirm it belongs to the parent list (Events
@@ -72,11 +87,35 @@ async function loadItem(
   return item
 }
 
+// Validate that every id in `labelIds` belongs to the list's live labels.
+// Returns a 400 validation error if any unknown/deleted label id is found.
+async function validateLabelIds(
+  c: Context<HonoApp>,
+  listId: string,
+  labelIds: string[],
+): Promise<void> {
+  if (labelIds.length === 0) return
+  const liveLabels = await c.var.repos.listLabels.listForList(listId)
+  const liveIds = new Set(liveLabels.map((l) => l.id))
+  const unknown = labelIds.filter((id) => !liveIds.has(id))
+  if (unknown.length > 0) {
+    throw errors.validation({
+      issues: [
+        {
+          code: 'custom',
+          path: ['labelIds'],
+          message: `Unknown or deleted label ids: ${unknown.join(', ')}`,
+        },
+      ],
+    })
+  }
+}
+
 export const listItemsRoutes = new Hono<HonoApp>()
   // --- create ------------------------------------------------------
   .post('/api/v1/ui/lists/:listId/items', async (c) => {
     const userId = c.var.session!.userId
-    const list = await loadList(c, c.req.param('listId'))
+    const list = await loadListMutable(c, c.req.param('listId'))
     const parsed = CreateListItemSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
@@ -117,6 +156,34 @@ export const listItemsRoutes = new Hono<HonoApp>()
       }
     }
 
+    // Custom statuses (RPL v1.0.0): resolve the item's status against the
+    // list's status set (lazily seeded on first use). An explicit
+    // status_id wins; else the legacy `status` category maps to that
+    // category's default status; else a task item defaults to `todo`. The
+    // resolved category is dual-written to the legacy `status` text for the
+    // completed mirror. Non-task lists ignore status entirely.
+    const resolved = isTasks
+      ? resolveStatus(await ensureStatuses(c, list.id, list.createdBy), {
+          statusId: body.statusId,
+          category: body.status,
+          fallbackCategory: 'todo',
+        })
+      : { statusId: null, status: null }
+
+    // Sub-item parent (RPL v1.0.0): validate it belongs to this list and
+    // doesn't exceed the depth cap before creating. A new item has no
+    // descendants, so self/cycle can't apply — only existence + depth.
+    if (body.parentId !== undefined) {
+      await assertValidParent(c, list.id, null, body.parentId)
+    }
+
+    // Validate label ids BEFORE creating the item so we don't create an
+    // orphaned item if a label id is invalid.
+    const labelIds = body.labelIds ?? []
+    if (labelIds.length > 0) {
+      await validateLabelIds(c, list.id, labelIds)
+    }
+
     const item = await c.var.repos.listItems.create({
       id: `lit_${ulid()}`,
       tenantId: TENANT,
@@ -124,7 +191,9 @@ export const listItemsRoutes = new Hono<HonoApp>()
       title: body.title,
       notes: body.notes ?? null,
       assignedTo: body.assignedTo ?? null,
-      status: isTasks ? (body.status ?? 'todo') : null,
+      status: resolved.status,
+      statusId: resolved.statusId,
+      parentId: body.parentId ?? null,
       // body.priority is already resolved: schema default('medium') fills
       // undefined → 'medium'; explicit null passes through as null (no-priority).
       // The old `body.priority ?? 'medium'` would coerce null→'medium', so use
@@ -135,8 +204,15 @@ export const listItemsRoutes = new Hono<HonoApp>()
       position: body.position,
       createdBy: userId,
     })
+
+    // Apply the label set AFTER item creation (labels are many-to-many via
+    // the join table; the item row must exist first).
+    if (labelIds.length > 0) {
+      await c.var.repos.listLabels.setItemLabels(item.id, labelIds)
+    }
+
     publish(c, listChannel(list.id), envelope('list_items', 'create', item.id, userId))
-    return c.json(serializeItem(item), 201)
+    return c.json(serializeItem(item, labelIds), 201)
   })
 
   // --- bulk action (Lists v2 slice 6) ------------------------------
@@ -149,7 +225,7 @@ export const listItemsRoutes = new Hono<HonoApp>()
   // affected so the client can reconcile its selection.
   .post('/api/v1/ui/lists/:listId/items/bulk', async (c) => {
     const userId = c.var.session!.userId
-    const list = await loadList(c, c.req.param('listId'))
+    const list = await loadListMutable(c, c.req.param('listId'))
     const parsed = BulkItemActionSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
@@ -157,6 +233,10 @@ export const listItemsRoutes = new Hono<HonoApp>()
     if (body.action === 'delete') {
       const ids = await c.var.repos.listItems.bulkSoftDelete(list.id, body.itemIds, new Date())
       if (ids.length > 0) {
+        // Orphan children of every deleted parent to top-level (RPL v1.0.0),
+        // parity with the single-item delete — a bulk delete must not leave
+        // a child dangling on a soft-deleted parent.
+        await c.var.repos.listItems.bulkClearChildParent(list.id, ids)
         publish(c, listChannel(list.id), envelope('list_items', 'delete', list.id, userId))
       }
       return c.json({ count: ids.length, ids })
@@ -168,7 +248,16 @@ export const listItemsRoutes = new Hono<HonoApp>()
     const base: UpdateListItemInput = {}
     if (body.patch.completed !== undefined) base.completed = body.patch.completed
     if (body.patch.assignedTo !== undefined) base.assignedTo = body.patch.assignedTo
-    if (isTasks && body.patch.status !== undefined) base.status = body.patch.status
+    // Custom statuses (RPL v1.0.0): one shared status resolution for the
+    // whole batch (statuses are list-level, identical for every item).
+    if (isTasks && (body.patch.statusId !== undefined || body.patch.status !== undefined)) {
+      const resolved = resolveStatus(await ensureStatuses(c, list.id, list.createdBy), {
+        statusId: body.patch.statusId,
+        category: body.patch.status,
+      })
+      base.statusId = resolved.statusId
+      base.status = resolved.status
+    }
     if (isTasks && body.patch.priority !== undefined) base.priority = body.patch.priority
     if (isTasks && body.patch.dueDate !== undefined)
       base.dueDate = body.patch.dueDate === null ? null : new Date(body.patch.dueDate)
@@ -284,12 +373,31 @@ export const listItemsRoutes = new Hono<HonoApp>()
         'list items scan hit the cap; results truncated',
       )
     }
-    return c.json({ items: items.map(serializeItem), filter_truncated: truncated })
+    // Parent progress rollup (RPL v1.0.0): count direct children + done
+    // children per parent in one pass so the UI can render sub-item
+    // progress without N extra reads. Computed over the (capped) returned
+    // set — children beyond the scan cap aren't counted, same bound as the
+    // list itself.
+    const roll = childRollup(items)
+    // Label ids (RPL v1.0.0 slice 12): one batch query for all items so
+    // the list GET doesn't fan out per item.
+    const labelMap = await c.var.repos.listLabels.labelsForItems(items.map((i) => i.id))
+    return c.json({
+      items: items.map((it) => {
+        const child = roll.get(it.id)
+        return {
+          ...serializeItem(it, labelMap.get(it.id) ?? []),
+          child_count: child?.total ?? 0,
+          child_done_count: child?.done ?? 0,
+        }
+      }),
+      filter_truncated: truncated,
+    })
   })
 
   // --- update (check-off / edit / reorder / assign / move) ---------
   .patch('/api/v1/ui/lists/:listId/items/:itemId', async (c) => {
-    const list = await loadList(c, c.req.param('listId'))
+    const list = await loadListMutable(c, c.req.param('listId'))
     const item = await loadItem(c, list.id, c.req.param('itemId'))
     const parsed = UpdateListItemSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
@@ -308,10 +416,31 @@ export const listItemsRoutes = new Hono<HonoApp>()
     if (data.notes !== undefined) patch.notes = data.notes
     if (data.assignedTo !== undefined) patch.assignedTo = data.assignedTo
     if (data.completed !== undefined) patch.completed = data.completed
-    if (isTasks && data.status !== undefined) patch.status = data.status
+    // Custom statuses (RPL v1.0.0): a status_id or legacy category change
+    // resolves against the list's status set and dual-writes both columns.
+    if (isTasks && (data.statusId !== undefined || data.status !== undefined)) {
+      const resolved = resolveStatus(await ensureStatuses(c, list.id, list.createdBy), {
+        statusId: data.statusId,
+        category: data.status,
+      })
+      patch.statusId = resolved.statusId
+      patch.status = resolved.status
+    }
     if (isTasks && data.priority !== undefined) patch.priority = data.priority
     if (isTasks && data.dueDate !== undefined)
       patch.dueDate = data.dueDate === null ? null : new Date(data.dueDate)
+    // Sub-item parent (RPL v1.0.0). null detaches to top-level. A real
+    // parent is validated (same-list, no self/cycle, within depth). On a
+    // cross-list move the source-list parent is meaningless — the move
+    // branch below forces parentId to null, so skip the client value here.
+    if (data.parentId !== undefined && !isMove) {
+      if (data.parentId === null) {
+        patch.parentId = null
+      } else {
+        await assertValidParent(c, list.id, item.id, data.parentId)
+        patch.parentId = data.parentId
+      }
+    }
     // A position is honoured only when staying put; a move always
     // re-appends at the target's end (the repo computes max+1).
     if (data.position !== undefined && !isMove) patch.position = data.position
@@ -377,7 +506,7 @@ export const listItemsRoutes = new Hono<HonoApp>()
     // Cross-list move: validate the target list, then port ownership-on-
     // move (move to a private list reassigns created_by to its owner).
     if (isMove) {
-      const target = await loadList(c, data.listId!)
+      const target = await loadListMutable(c, data.listId!)
       patch.listId = target.id
       const newOwner = ownerTransferForMove({
         visibility: target.visibility,
@@ -388,6 +517,7 @@ export const listItemsRoutes = new Hono<HonoApp>()
       // them so the "other types leave them NULL" invariant holds.
       if (target.listType !== 'tasks') {
         patch.status = null
+        patch.statusId = null
         patch.priority = null
         patch.dueDate = null
       }
@@ -395,29 +525,71 @@ export const listItemsRoutes = new Hono<HonoApp>()
       // reference defs absent in the target — clear them (same precedent
       // as the task-column clearing above).
       patch.customFields = {}
+      // The item's old parent lives in the source list; it joins the
+      // target as a top-level item. Its own children stay in the source
+      // list and are orphaned below (after the update commits).
+      patch.parentId = null
+    }
+
+    // Labels (RPL v1.0.0 slice 12): validate before writing the item so an
+    // invalid label doesn't partially succeed. On a cross-list move, drop
+    // the labels (they reference defs from the source list).
+    const labelIds = isMove ? undefined : data.labelIds
+    if (labelIds !== undefined && labelIds.length > 0) {
+      await validateLabelIds(c, list.id, labelIds)
     }
 
     // Nothing survived mapping (e.g. a self-move, or task-only fields sent
-    // to a non-task list): return the item untouched rather than bumping
-    // updated_at on a no-op write.
-    if (Object.keys(patch).length === 0) return c.json(serializeItem(item))
+    // to a non-task list): handle label-only updates and return. A label
+    // change is still a real change, so publish so viewers live-update.
+    if (Object.keys(patch).length === 0) {
+      if (labelIds !== undefined) {
+        await c.var.repos.listLabels.setItemLabels(item.id, labelIds)
+        publish(
+          c,
+          listChannel(list.id),
+          envelope('list_items', 'update', item.id, c.var.session!.userId),
+        )
+      }
+      const currentLabels = await c.var.repos.listLabels.labelsForItems([item.id])
+      return c.json(serializeItem(item, currentLabels.get(item.id) ?? []))
+    }
 
     const updated = await c.var.repos.listItems.update(c.req.param('itemId'), patch)
     if (!updated) throw errors.itemNotFound()
     const userId = c.var.session!.userId
+    // A moved item's children stay behind in the source list pointing at a
+    // now-cross-list parent — orphan them to top-level so no item dangles.
+    if (isMove) {
+      await c.var.repos.listItems.clearChildParent(list.id, updated.id)
+    }
+    // Apply label set AFTER item update so the item row exists and the
+    // join write is consistent.
+    if (labelIds !== undefined) {
+      await c.var.repos.listLabels.setItemLabels(updated.id, labelIds)
+    }
+    // On a cross-list move, clear any labels (they belonged to the source list).
+    if (isMove) {
+      await c.var.repos.listLabels.setItemLabels(updated.id, [])
+    }
+    const itemLabelMap = await c.var.repos.listLabels.labelsForItems([updated.id])
     publish(c, listChannel(list.id), envelope('list_items', 'update', updated.id, userId))
     // A move leaves the source list and joins the target; the target's
     // viewers need the new item, the source's need it gone.
     if (isMove) {
       publish(c, listChannel(patch.listId!), envelope('list_items', 'update', updated.id, userId))
     }
-    return c.json(serializeItem(updated))
+    return c.json(serializeItem(updated, itemLabelMap.get(updated.id) ?? []))
   })
 
   // --- soft-delete -------------------------------------------------
   .delete('/api/v1/ui/lists/:listId/items/:itemId', async (c) => {
-    const list = await loadList(c, c.req.param('listId'))
+    const list = await loadListMutable(c, c.req.param('listId'))
     const item = await loadItem(c, list.id, c.req.param('itemId'))
+    // Orphan any children to top-level FIRST so a soft-deleted parent
+    // never leaves a child pointing at it (RPL v1.0.0). Children survive
+    // the parent's deletion; only the link is cleared.
+    await c.var.repos.listItems.clearChildParent(list.id, item.id)
     await c.var.repos.listItems.softDelete(item.id, new Date())
     publish(c, listChannel(list.id), envelope('list_items', 'delete', item.id, c.var.session!.userId))
     return c.body(null, 204)
@@ -425,7 +597,7 @@ export const listItemsRoutes = new Hono<HonoApp>()
 
   // --- restore (within the 30-day grace window) --------------------
   .post('/api/v1/ui/lists/:listId/items/:itemId/restore', async (c) => {
-    const list = await loadList(c, c.req.param('listId'))
+    const list = await loadListMutable(c, c.req.param('listId'))
     const item = await loadItem(c, list.id, c.req.param('itemId'), true)
     if (!item.deletedAt) {
       throw errors.conflict('item_not_deleted', 'Item is not deleted.')
@@ -435,6 +607,8 @@ export const listItemsRoutes = new Hono<HonoApp>()
     }
     await c.var.repos.listItems.restore(item.id)
     const fresh = await c.var.repos.listItems.findById(item.id)
+    const restoredItem = fresh ?? item
+    const restoreLabelMap = await c.var.repos.listLabels.labelsForItems([restoredItem.id])
     publish(c, listChannel(list.id), envelope('list_items', 'create', item.id, c.var.session!.userId))
-    return c.json(serializeItem(fresh ?? item))
+    return c.json(serializeItem(restoredItem, restoreLabelMap.get(restoredItem.id) ?? []))
   })

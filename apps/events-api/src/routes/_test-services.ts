@@ -50,6 +50,8 @@ export function makeNoopListsClient(): ListsClient {
     listLists: async () => [],
     listItems: fail('listItems') as unknown as ListsClient['listItems'],
     listFieldDefs: fail('listFieldDefs') as unknown as ListsClient['listFieldDefs'],
+    listStatuses: fail('listStatuses') as unknown as ListsClient['listStatuses'],
+    listLabels: fail('listLabels') as unknown as ListsClient['listLabels'],
     listGroups: fail('listGroups') as unknown as ListsClient['listGroups'],
     createGroup: fail('createGroup') as unknown as ListsClient['createGroup'],
     createList: fail('createList') as unknown as ListsClient['createList'],
@@ -64,8 +66,8 @@ export function makeNoopListsClient(): ListsClient {
     createFieldDef: fail('createFieldDef') as unknown as ListsClient['createFieldDef'],
     updateFieldDef: fail('updateFieldDef') as unknown as ListsClient['updateFieldDef'],
     deleteFieldDef: fail('deleteFieldDef') as unknown as ListsClient['deleteFieldDef'],
-    setListPlannerPref: fail('setListPlannerPref') as unknown as ListsClient['setListPlannerPref'],
-    listPlannerLists: fail('listPlannerLists') as unknown as ListsClient['listPlannerLists'],
+    listComments: fail('listComments') as unknown as ListsClient['listComments'],
+    createComment: fail('createComment') as unknown as ListsClient['createComment'],
   }
 }
 

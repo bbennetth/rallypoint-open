@@ -30,8 +30,8 @@ export function App() {
           </RequireSession>
         }
       />
-      {/* Upcoming folded into My Day (issue #495); old links land on the toggle. */}
-      <Route path="/upcoming" element={<Navigate to="/me?mode=upcoming" replace />} />
+      {/* Upcoming folded into the single My Day agenda; old links land there. */}
+      <Route path="/upcoming" element={<Navigate to="/me" replace />} />
       <Route
         path="/tasks"
         element={

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { safeReturnTo } from './return-to.js'
+import { returnToLabel, safeReturnTo } from './return-to.js'
 
 const ORIGIN = 'https://id.rallypt.app'
 
@@ -51,5 +51,30 @@ describe('safeReturnTo', () => {
 
   it('rejects malformed URLs', () => {
     expect(safeReturnTo('http://[malformed', '/safe')).toBe('/safe')
+  })
+})
+
+describe('returnToLabel', () => {
+  it("maps the root fallback to 'your account'", () => {
+    expect(returnToLabel('/')).toBe('your account')
+  })
+
+  it('strips the query string from relative paths', () => {
+    expect(returnToLabel('/account/email-change/confirm?token=vrf_abcdef0123456789')).toBe(
+      '/account/email-change/confirm',
+    )
+    expect(returnToLabel('/dashboard')).toBe('/dashboard')
+  })
+
+  it('collapses absolute URLs to their host', () => {
+    expect(
+      returnToLabel(
+        'https://planner.rallypt.app/sso/callback?code=ssoc_0123456789abcdef&state=verylongopaquestate',
+      ),
+    ).toBe('planner.rallypt.app')
+  })
+
+  it('returns unparseable input verbatim (display-only fallback)', () => {
+    expect(returnToLabel('not a url')).toBe('not a url')
   })
 })

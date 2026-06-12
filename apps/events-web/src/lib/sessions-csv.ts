@@ -12,6 +12,7 @@ import type {
   DayDto,
   SessionDtoFull,
   SessionVisibility,
+  StageDto,
 } from './api.js'
 
 export const SESSIONS_CSV_HEADERS = [
@@ -20,6 +21,7 @@ export const SESSIONS_CSV_HEADERS = [
   'day',
   'start',
   'end',
+  'stage',
   'location',
   'category',
   'host',
@@ -52,13 +54,14 @@ export interface SessionsImportPlan {
   summary: { create: number; update: number; delete: number; error: number }
 }
 
-export function sessionsTemplateCsv(days: DayDto[] = []): string {
+export function sessionsTemplateCsv(days: DayDto[] = [], stages: StageDto[] = []): string {
   const example = [
     '', // id blank → create
     'Sunrise Yoga',
     days[0]?.day_label ?? 'Day 1',
     '07:00',
     '08:00',
+    stages[0]?.name ?? '',
     'Wellness Tent',
     'wellness',
     'Jane Doe',
@@ -78,10 +81,11 @@ function normTime(raw: string): string | null | undefined {
 export function planSessionsImport(input: {
   text: string
   days: DayDto[]
+  stages?: StageDto[]
   currentSessions: SessionDtoFull[]
   replace?: boolean
 }): SessionsImportPlan {
-  const { text, days, currentSessions, replace = false } = input
+  const { text, days, stages = [], currentSessions, replace = false } = input
   const errors: ImportError[] = []
   const rows: PlannedSessionRow[] = []
   const creates: BulkSessionCreate[] = []
@@ -100,6 +104,7 @@ export function planSessionsImport(input: {
 
   const dayByLabel = new Map(days.map((d) => [d.day_label.trim().toLowerCase(), d]))
   const dayByDate = new Map(days.map((d) => [d.date, d]))
+  const stageByName = new Map(stages.map((st) => [st.name.trim().toLowerCase(), st]))
   const byId = new Map(currentSessions.map((s) => [s.id, s]))
 
   const cell = (r: string[], col: string) => {
@@ -159,6 +164,18 @@ export function planSessionsImport(input: {
       continue
     }
 
+    // Resolve stage by name (blank = no change / no stage).
+    const stageToken = cell(r, 'stage').trim()
+    let stageId: string | null | undefined
+    if (stageToken) {
+      const stage = stageByName.get(stageToken.toLowerCase())
+      if (!stage) {
+        errors.push({ line, message: `Unknown stage "${stageToken}".` })
+        continue
+      }
+      stageId = stage.id
+    }
+
     const visToken = cell(r, 'visibility').trim().toLowerCase()
     let visibility: SessionVisibility | undefined
     if (visToken) {
@@ -198,6 +215,10 @@ export function planSessionsImport(input: {
       if (dayToken) patch.dayId = dayId ?? null
       if (cell(r, 'start').trim()) patch.startTime = startTime
       if (cell(r, 'end').trim()) patch.endTime = endTime
+      // Patch writes stageId whenever the cell is non-empty; the create
+      // path below intentionally skips a null stageId (undefined and null
+      // both mean "no stage" on create, but only null clears on patch).
+      if (stageToken) patch.stageId = stageId ?? null
       if (location) patch.location = location
       if (category) patch.category = category
       if (host) patch.host = host
@@ -217,6 +238,7 @@ export function planSessionsImport(input: {
       if (dayId) create.dayId = dayId
       if (startTime) create.startTime = startTime
       if (endTime) create.endTime = endTime
+      if (stageId) create.stageId = stageId
       if (location) create.location = location
       if (category) create.category = category
       if (host) create.host = host

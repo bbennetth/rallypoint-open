@@ -17,6 +17,7 @@ import { useSession, RPID_UI_URL } from '../lib/session.js'
 
 const NAV: readonly AppChromeNavItem[] = [
   { to: '/me/lists', label: 'My Lists', icon: 'tasks', end: true },
+  { to: '/me/tokens', label: 'MCP Tokens', icon: 'sliders' },
 ]
 
 export function AppChrome({ children }: { children: ReactNode }) {

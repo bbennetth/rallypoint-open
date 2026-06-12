@@ -12,6 +12,7 @@ import { ApiError, errors } from '../errors.js'
 import type { CreateSessionInput, SessionRecord } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity } from './_access.js'
+import { assertFeatureEnabled } from './_features.js'
 import { captureSnapshot } from './_snapshots.js'
 
 function serializeSession(s: SessionRecord): Record<string, unknown> {
@@ -22,6 +23,7 @@ function serializeSession(s: SessionRecord): Record<string, unknown> {
     description: s.description,
     location: s.location,
     day_id: s.dayId,
+    stage_id: s.stageId,
     start_time: s.startTime,
     end_time: s.endTime,
     category: s.category,
@@ -79,6 +81,24 @@ async function assertDayInEvent(
   }
 }
 
+// Reject a stageId that doesn't belong to this event (same probing
+// concern as assertDayInEvent; mirrors the lineup bulk-apply check).
+async function assertStageInEvent(
+  c: Context<HonoApp>,
+  eventId: string,
+  stageId: string | null | undefined,
+): Promise<void> {
+  if (stageId == null) return
+  const stage = await c.var.repos.stages.findById(stageId)
+  if (!stage || stage.eventId !== eventId) {
+    throw new ApiError({
+      code: 'stage_not_in_event',
+      message: 'Referenced stage does not belong to this event.',
+      status: 400,
+    })
+  }
+}
+
 // Reject a groupId that doesn't belong to this event (the FK only proves
 // the group exists somewhere, not that it's THIS event's group — without
 // this an editor could attach a session to a group under another event).
@@ -100,7 +120,8 @@ async function assertGroupInEvent(
 
 export const sessionsRoutes = new Hono<HonoApp>()
   .get('/api/v1/ui/events/:id/sessions', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'sessions')
     const status = c.req.query('approval_status')
     const dayId = c.req.query('day_id')
     const items = await c.var.repos.eventSessions.listForEvent(event.id, {
@@ -113,10 +134,12 @@ export const sessionsRoutes = new Hono<HonoApp>()
   })
   .post('/api/v1/ui/events/:id/sessions', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     const parsed = CreateSessionSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body: CreateSessionBody = parsed.data
     await assertDayInEvent(c, event.id, body.dayId)
+    await assertStageInEvent(c, event.id, body.stageId)
     await assertGroupInEvent(c, event.id, body.groupId)
 
     const userId = c.var.session!.userId
@@ -131,6 +154,7 @@ export const sessionsRoutes = new Hono<HonoApp>()
       description: body.description ?? null,
       location: body.location ?? null,
       dayId: body.dayId ?? null,
+      stageId: body.stageId ?? null,
       startTime: body.startTime ?? null,
       endTime: body.endTime ?? null,
       category: body.category ?? null,
@@ -151,23 +175,27 @@ export const sessionsRoutes = new Hono<HonoApp>()
     return c.json(serializeSession(saved), 201)
   })
   .get('/api/v1/ui/events/:id/sessions/:sessionId', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'sessions')
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     return c.json(serializeSession(session))
   })
   .patch('/api/v1/ui/events/:id/sessions/:sessionId', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     const parsed = PatchSessionSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     if (parsed.data.dayId !== undefined) await assertDayInEvent(c, event.id, parsed.data.dayId)
+    if (parsed.data.stageId !== undefined) await assertStageInEvent(c, event.id, parsed.data.stageId)
     if (parsed.data.groupId !== undefined) await assertGroupInEvent(c, event.id, parsed.data.groupId)
     const updated = await c.var.repos.eventSessions.patch(session.id, parsed.data)
     await recordActivity(c, event.id, 'event.session_updated', { session_id: session.id })
     return c.json(serializeSession(updated!))
   })
   .delete('/api/v1/ui/events/:id/sessions/:sessionId', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     await c.var.repos.eventSessions.softDelete(session.id, new Date())
     await recordActivity(c, event.id, 'event.session_deleted', { session_id: session.id })
@@ -178,7 +206,8 @@ export const sessionsRoutes = new Hono<HonoApp>()
   // be used to unilaterally revert an owner's 'approved' decision. Clears
   // the stale approver stamp and records the (re)submitter.
   .post('/api/v1/ui/events/:id/sessions/:sessionId/submit', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     if (session.approvalStatus !== 'rejected') {
       throw errors.conflict(
@@ -197,6 +226,7 @@ export const sessionsRoutes = new Hono<HonoApp>()
   })
   .post('/api/v1/ui/events/:id/sessions/:sessionId/approve', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     if (role !== 'owner') throw approvalRequired()
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     const updated = await c.var.repos.eventSessions.setApproval(session.id, {
@@ -209,6 +239,7 @@ export const sessionsRoutes = new Hono<HonoApp>()
   })
   .post('/api/v1/ui/events/:id/sessions/:sessionId/reject', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     if (role !== 'owner') throw approvalRequired()
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
     const updated = await c.var.repos.eventSessions.setApproval(session.id, {
@@ -225,6 +256,7 @@ export const sessionsRoutes = new Hono<HonoApp>()
   // Cross-event day references are rejected (assertDayInEvent).
   .post('/api/v1/ui/events/:id/sessions/bulk', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'sessions')
     const parsed = BulkSessionsSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
@@ -239,11 +271,13 @@ export const sessionsRoutes = new Hono<HonoApp>()
     // so a session under another event can't be mutated by id here.
     for (const cr of body.creates ?? []) {
       await assertDayInEvent(c, event.id, cr.dayId)
+      await assertStageInEvent(c, event.id, cr.stageId)
       await assertGroupInEvent(c, event.id, cr.groupId)
     }
     for (const up of body.updates ?? []) {
       await loadSession(c, event.id, up.id)
       if (up.patch.dayId !== undefined) await assertDayInEvent(c, event.id, up.patch.dayId)
+      if (up.patch.stageId !== undefined) await assertStageInEvent(c, event.id, up.patch.stageId)
       if (up.patch.groupId !== undefined) await assertGroupInEvent(c, event.id, up.patch.groupId)
     }
     for (const id of body.deletes ?? []) {
@@ -260,6 +294,7 @@ export const sessionsRoutes = new Hono<HonoApp>()
       description: cr.description ?? null,
       location: cr.location ?? null,
       dayId: cr.dayId ?? null,
+      stageId: cr.stageId ?? null,
       startTime: cr.startTime ?? null,
       endTime: cr.endTime ?? null,
       category: cr.category ?? null,

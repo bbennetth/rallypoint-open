@@ -96,12 +96,14 @@ export function AttendingLandingPage() {
         <section className="space-y-3">
           <h2 className="text-sm text-white/80">What's next?</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Link to="/groups/join" style={{ textDecoration: 'none' }}>
-              <DecisionCard
-                title="Join or create a group →"
-                body="Groups are how friends plan together at events — shared chat, rallies, lists, and a ledger."
-              />
-            </Link>
+            {event.features.groups && (
+              <Link to="/groups/join" style={{ textDecoration: 'none' }}>
+                <DecisionCard
+                  title="Join or create a group →"
+                  body="Groups are how friends plan together at events — shared chat, rallies, lists, and a ledger."
+                />
+              </Link>
+            )}
             <Link
               to={`/events/${encodeURIComponent(event.slug)}/attending/now`}
               style={{ textDecoration: 'none' }}

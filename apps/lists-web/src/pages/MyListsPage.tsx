@@ -7,14 +7,14 @@ import {
   createList,
   listGroups,
   listLists,
-  listPlannerPrefs,
   listSharedWithMe,
-  setListPlannerPref,
   signout,
   type GroupDto,
   type ListDto,
 } from '../lib/api.js'
 import { shouldRefetch, subscribeScopeStream } from '../lib/realtime.js'
+import { partitionByOrigin } from '../lib/list-origin.js'
+import { DEFAULT_GROUP_NAME, needsDefaultGroup, selectDefaultGroupId } from '../lib/default-group.js'
 
 // Slice-2 "My Lists": pick a list_group you belong to, create lists
 // in it, and open one to manage items. Lists are list_group-scoped
@@ -55,20 +55,34 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
   // share-by-email flow. They live in someone else's list_group, so
   // they don't surface in the scope listing above.
   const [sharedItems, setSharedItems] = useState<ListDto[]>([])
-  // Per-user "show in Planner" flags — a Set of list ids the current
-  // user has toggled on. Loaded once on mount; updated optimistically.
-  const [plannerSet, setPlannerSet] = useState<Set<string>>(new Set())
-  const [plannerError, setPlannerError] = useState<string | null>(null)
 
   async function loadGroups() {
     try {
       const page = await listGroups()
-      setGroups(page.items)
-      // Auto-select the first group if no selection yet, so the UI lands
-      // on a usable scope without forcing the user to pick from a
-      // single-option dropdown.
-      if (page.items.length > 0) {
-        setScopeId((prev) => prev ?? page.items[0]!.id)
+      let items = page.items
+      // A user shouldn't have to create a group before making a list, so
+      // auto-provision a writable "home" group when they have none. The
+      // Planner "My Tasks" group is read-only here (#531), so it doesn't
+      // count — a user with only that group still needs a Lists default.
+      // createGroup is conflict-tolerant on (created_by, name), so this is
+      // idempotent across tabs / reloads.
+      if (needsDefaultGroup(items)) {
+        try {
+          const created = await createGroup({ name: DEFAULT_GROUP_NAME })
+          items = [created, ...items]
+        } catch {
+          // Non-fatal: the manual "create group" form is still available.
+        }
+      }
+      setGroups(items)
+      // Default-select the first writable group so the create form lands on
+      // a scope the user can actually write to, without forcing a pick from
+      // a single-option dropdown. Falls back to the first group only if
+      // provisioning failed and the user is left with just a read-only
+      // Planner group (the #531 read-only banner then covers that case).
+      const defaultId = selectDefaultGroupId(items) ?? items[0]?.id ?? null
+      if (defaultId !== null) {
+        setScopeId((prev) => prev ?? defaultId)
       }
     } catch {
       setGroups([])
@@ -100,49 +114,9 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
     }
   }
 
-  async function loadPlannerPrefs() {
-    try {
-      const ids = await listPlannerPrefs()
-      setPlannerSet(new Set(ids))
-    } catch {
-      // Non-fatal: prefs simply appear unset on error.
-      setPlannerSet(new Set())
-    }
-  }
-
-  async function handlePlannerToggle(listId: string, e: React.MouseEvent | React.ChangeEvent) {
-    // Prevent the parent <Link> from navigating.
-    e.stopPropagation()
-    if ('preventDefault' in e) e.preventDefault()
-
-    const next = !plannerSet.has(listId)
-    // Optimistic update.
-    setPlannerSet((prev) => {
-      const copy = new Set(prev)
-      if (next) copy.add(listId)
-      else copy.delete(listId)
-      return copy
-    })
-    setPlannerError(null)
-
-    try {
-      await setListPlannerPref(listId, next)
-    } catch (err) {
-      // Revert on failure.
-      setPlannerSet((prev) => {
-        const copy = new Set(prev)
-        if (next) copy.delete(listId)
-        else copy.add(listId)
-        return copy
-      })
-      setPlannerError(err instanceof ApiError ? err.message : 'Could not update Planner preference.')
-    }
-  }
-
   useEffect(() => {
     void loadGroups()
     void loadShared()
-    void loadPlannerPrefs()
   }, [])
 
   useEffect(() => {
@@ -216,7 +190,14 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
       ? 'No group'
       : (groups.find((g) => g.id === scopeId)?.name ?? scopeId)
 
+  // The whole scope is Planner-managed when its group was provisioned by
+  // the Planner BFF — every list in it is read-only here (#531).
+  const scopeIsPlanner = groups.find((g) => g.id === scopeId)?.origin === 'planner'
+
   const visibleLists = state.status === 'ready' ? state.items : []
+  // Your own lists vs. the lists Planner creates and manages — rendered
+  // as separate sections below.
+  const { own: ownLists, plannerManaged } = partitionByOrigin(visibleLists, scopeIsPlanner)
 
   return (
     <main className="page-pad">
@@ -284,6 +265,21 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
           )}
         </section>
 
+        {scopeIsPlanner && (
+          <div
+            className="p-4 text-sm"
+            style={{
+              border: '1.5px solid var(--line)',
+              background: 'var(--surface)',
+              color: 'var(--ink-dim)',
+            }}
+          >
+            This group is managed by Rallypoint Planner. Its lists are
+            read-only here — open Planner to add or edit tasks.
+          </div>
+        )}
+
+        {!scopeIsPlanner && (
         <section
           className="p-4 space-y-3"
           style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
@@ -329,6 +325,7 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
             </p>
           )}
         </section>
+        )}
 
         {state.status === 'loading' && <p className="text-[color:var(--ink-dim)] text-sm">Loading…</p>}
 
@@ -365,47 +362,57 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
           </div>
         )}
 
-        {plannerError && (
-          <p className="text-sm" style={{ color: 'var(--hot)' }}>
-            {plannerError}
-          </p>
-        )}
-
-        {state.status === 'ready' && visibleLists.length > 0 && (
+        {state.status === 'ready' && ownLists.length > 0 && (
           <ul className="space-y-3">
-            {visibleLists.map((list) => (
+            {ownLists.map((list) => (
               <li key={list.id}>
-                <div
-                  className="flex items-stretch transition-colors"
+                <Link
+                  to={`/me/lists/${list.id}`}
+                  className="block p-4 transition-colors"
                   style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
                 >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium">{list.name}</span>
+                    <span className="chip capitalize">{list.list_type}</span>
+                  </div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Lists Planner creates and manages (task lists in its personal
+            group plus the Shopping / Notes tabs). Read-only in this app —
+            open Planner to edit them (#531). */}
+        {state.status === 'ready' && plannerManaged.length > 0 && (
+          <section className="space-y-3">
+            <h2 style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
+              Managed by Planner ({plannerManaged.length})
+            </h2>
+            <p className="text-xs" style={{ color: 'var(--ink-mute)' }}>
+              Created by Rallypoint Planner. Read-only here — open Planner
+              to add or edit items.
+            </p>
+            <ul className="space-y-3">
+              {plannerManaged.map((list) => (
+                <li key={list.id}>
                   <Link
                     to={`/me/lists/${list.id}`}
-                    className="flex-1 block p-4"
+                    className="block p-4 transition-colors"
+                    style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
                   >
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium">{list.name}</span>
                       <span className="chip capitalize">{list.list_type}</span>
+                      <span className="chip" style={{ fontSize: 10, color: 'var(--ink-dim)' }}>
+                        Planner
+                      </span>
                     </div>
                   </Link>
-                  <label
-                    className="flex items-center gap-1.5 px-3 cursor-pointer text-xs"
-                    style={{ color: 'var(--ink-dim)', borderLeft: '1px solid var(--line)' }}
-                    title={plannerSet.has(list.id) ? 'Remove from Planner' : 'Show in Planner'}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={plannerSet.has(list.id)}
-                      onChange={(e) => void handlePlannerToggle(list.id, e)}
-                      aria-label={`Show "${list.name}" in Planner`}
-                      className="cyber-checkbox"
-                    />
-                    <span className="whitespace-nowrap">Planner</span>
-                  </label>
-                </div>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+          </section>
         )}
 
         {/* Shared with me: private lists you've been added to but

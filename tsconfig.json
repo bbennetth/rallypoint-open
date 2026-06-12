@@ -75,6 +75,9 @@
     },
     {
       "path": "./packages/rate-limit"
+    },
+    {
+      "path": "./apps/lists-mcp"
     }
   ]
 }

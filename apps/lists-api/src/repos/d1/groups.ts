@@ -22,6 +22,7 @@ function rowToGroup(row: typeof listGroups.$inferSelect): GroupRecord {
     tenantId: row.tenantId,
     name: row.name,
     description: row.description,
+    origin: row.origin,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -53,6 +54,7 @@ export class D1GroupRepo implements GroupRepo {
         tenantId: input.tenantId,
         name: input.name,
         description: input.description ?? null,
+        origin: input.origin ?? null,
         createdBy: input.createdBy,
       })
       .returning() as Stmt

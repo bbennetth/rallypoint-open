@@ -26,6 +26,7 @@
 #   http://localhost:8082   — Lists API; /api/v1/health is unauthenticated
 #   http://localhost:8083   — Money API; /api/v1/health is unauthenticated
 #   http://localhost:8084   — Planner API; /api/v1/health is unauthenticated
+#   http://localhost:8085   — Lists MCP server; /health unauthenticated, POST / is the MCP endpoint
 #
 # There is no automatic demo/admin seed (the old seed runner was retired in
 # #313). Create an account via the signup flow at http://localhost:5173 — under
@@ -152,6 +153,10 @@ start_api events-api  8081 events-api
 start_api lists-api   8082 lists-api
 start_api money-api   8083 money-api
 start_api planner-api 8084 planner-api
+# lists-mcp: the Lists MCP server Worker (RPL v1.0.0 slice 11). No D1, no
+# web UI. Self-defaults LISTS_MCP_API_KEY in dev (matches lists-api's
+# DEV_MCP_API_KEY) and reaches lists-api at :8082 via its wrangler [vars].
+start_api lists-mcp   8085 lists-mcp
 
 start_web id-web      5173 id-web
 start_web events-web  5174 events-web
@@ -169,6 +174,8 @@ all_apis_healthy() {
   for port in 8080 8081 8082 8083 8084; do
     curl -fsS "http://localhost:$port/api/v1/health" >/dev/null 2>&1 || return 1
   done
+  # lists-mcp exposes /health (not /api/v1/health — it's not a /api/v1 app).
+  curl -fsS "http://localhost:8085/health" >/dev/null 2>&1 || return 1
   return 0
 }
 health_tries=0
@@ -191,6 +198,7 @@ cat <<'BANNER'
    Lists    http://localhost:5175   (API :8082)
    Money    http://localhost:5176   (API :8083)
    Planner  http://localhost:5177   (API :8084)
+   Lists MCP  http://localhost:8085   (MCP server; /health, POST / )
   ------------------------------------------------------------
    Mail -> MAILER=log: verify/reset links print in the [id-api]
    log. No demo/admin seed -- sign up at :5173 to create a user.

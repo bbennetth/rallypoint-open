@@ -20,16 +20,23 @@ import type {
   CreateListItemInput,
   FieldDefOptions,
   FieldType,
+  CreateLabelInput,
+  CreateMcpTokenInput,
+  CreateStatusInput,
   FilterSpec,
   GroupRole,
   ListType,
+  ReorderStatusesInput,
   ScopeType,
+  UpdateLabelInput,
   SortSpec,
+  StatusCategory,
   TaskPriority,
   TaskStatus,
   UpdateFieldDefInput,
   UpdateGroupInput,
   UpdateListItemInput,
+  UpdateStatusInput,
   ViewConfig,
   Visibility,
 } from '@rallypoint/lists-shared'
@@ -67,6 +74,19 @@ export interface ListItemDto {
   completed: boolean
   completed_at: string | null
   status: TaskStatus | null
+  // Custom-status id (`lst_…`) the item sits on (RPL v1.0.0). Null on a
+  // standard list, or on a tasks-list row that predates S1 and hasn't been
+  // re-touched (the board falls back to the legacy `status` category).
+  status_id: string | null
+  // Sub-item parent (`lit_…`) or null for a top-level item (RPL v1.0.0).
+  parent_id: string | null
+  // Direct-child rollup — present on the list GET only (single-item
+  // create/PATCH responses omit them); treat absent as 0.
+  child_count?: number
+  child_done_count?: number
+  // Attached label ids (`lbl_…`), RPL v1.0.0. Resolve against the list's
+  // labels for chip name/color; `[]` when none.
+  label_ids: string[]
   priority: TaskPriority | null
   due_date: string | null
   // Lists v2 typed values keyed by field-def id (`lfd_…`). `{}` on a list
@@ -91,6 +111,8 @@ export interface GroupDto {
   id: string
   name: string
   description: string | null
+  // 'planner' for Planner-provisioned groups — read-only in this app.
+  origin: string | null
   created_by: string
   created_at: string
   updated_at: string
@@ -282,6 +304,9 @@ export interface BulkItemPatch {
   completed?: boolean
   assignedTo?: string | null
   status?: TaskStatus
+  // Bulk custom-status change (RPL v1.0.0 S6). Resolved + dual-written
+  // server-side like the single-item PATCH; honored on tasks lists only.
+  statusId?: string
   priority?: TaskPriority
   dueDate?: string | null
   customFields?: Record<string, unknown>
@@ -323,6 +348,189 @@ export async function updateFieldDef(
 
 export async function deleteFieldDef(listId: string, fieldId: string): Promise<void> {
   await request<void>('DELETE', `/api/v1/ui/lists/${listId}/fields/${fieldId}`)
+}
+
+// --- custom statuses (RPL v1.0.0) -----------------------------------
+// Per-list kanban statuses. `category` (todo|in_progress|done) is the
+// load-bearing classifier — completion, board grouping, and GitHub
+// auto-close key off it, never the renameable `name`. Reads lazily seed
+// the three defaults server-side, so a tasks list always has ≥1 status.
+
+// Server DTO (snake_case) — mirrors lists-api's serializeStatus.
+export interface ListStatusDto {
+  id: string
+  list_id: string
+  name: string
+  color: string | null
+  category: StatusCategory
+  position: number
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ListStatusPage {
+  items: ListStatusDto[]
+}
+
+export async function listStatuses(listId: string): Promise<ListStatusPage> {
+  return request<ListStatusPage>('GET', `/api/v1/ui/lists/${listId}/statuses`)
+}
+
+export async function createStatus(
+  listId: string,
+  input: CreateStatusInput,
+): Promise<ListStatusDto> {
+  return request<ListStatusDto>('POST', `/api/v1/ui/lists/${listId}/statuses`, input)
+}
+
+export async function updateStatus(
+  listId: string,
+  statusId: string,
+  patch: UpdateStatusInput,
+): Promise<ListStatusDto> {
+  return request<ListStatusDto>(
+    'PATCH',
+    `/api/v1/ui/lists/${listId}/statuses/${statusId}`,
+    patch,
+  )
+}
+
+export async function reorderStatuses(
+  listId: string,
+  input: ReorderStatusesInput,
+): Promise<ListStatusPage> {
+  return request<ListStatusPage>('PUT', `/api/v1/ui/lists/${listId}/statuses/order`, input)
+}
+
+export async function deleteStatus(listId: string, statusId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/lists/${listId}/statuses/${statusId}`)
+}
+
+// --- MCP personal access tokens (RPL v1.0.0) ------------------------
+// Tokens authenticate the Lists MCP server as the user. The raw secret
+// (`rplmcp_…`) is returned exactly once, on create; only its metadata is
+// ever listed. A user manages only their own tokens (session-gated).
+
+export interface McpTokenDto {
+  id: string
+  label: string
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null
+  revoked_at: string | null
+}
+
+export interface McpTokenPage {
+  items: McpTokenDto[]
+}
+
+// The create response folds the raw secret in alongside the metadata.
+export interface McpTokenWithSecret extends McpTokenDto {
+  token: string
+}
+
+export async function listMcpTokens(): Promise<McpTokenPage> {
+  return request<McpTokenPage>('GET', '/api/v1/ui/mcp-tokens')
+}
+
+export async function createMcpToken(input: CreateMcpTokenInput): Promise<McpTokenWithSecret> {
+  return request<McpTokenWithSecret>('POST', '/api/v1/ui/mcp-tokens', input)
+}
+
+export async function revokeMcpToken(tokenId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/mcp-tokens/${encodeURIComponent(tokenId)}`)
+}
+
+// --- labels (RPL v1.0.0) --------------------------------------------
+// Free-form colored labels per list; attached to items via `label_ids`.
+// Reads need list access; writes are creator-only (the API enforces).
+
+export interface LabelDto {
+  id: string
+  list_id: string
+  name: string
+  color: string | null
+  position: number
+  created_at: string
+  updated_at: string
+}
+
+export interface LabelPage {
+  items: LabelDto[]
+}
+
+export async function listLabels(listId: string): Promise<LabelPage> {
+  return request<LabelPage>('GET', `/api/v1/ui/lists/${listId}/labels`)
+}
+
+export async function createLabel(listId: string, input: CreateLabelInput): Promise<LabelDto> {
+  return request<LabelDto>('POST', `/api/v1/ui/lists/${listId}/labels`, input)
+}
+
+export async function updateLabel(
+  listId: string,
+  labelId: string,
+  patch: UpdateLabelInput,
+): Promise<LabelDto> {
+  return request<LabelDto>('PATCH', `/api/v1/ui/lists/${listId}/labels/${labelId}`, patch)
+}
+
+export async function deleteLabel(listId: string, labelId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/lists/${listId}/labels/${labelId}`)
+}
+
+// --- item comments (RPL v1.0.0) -------------------------------------
+// Threaded comments on a list item. Any reader may comment; edit/delete
+// are author-only (the API returns 403 otherwise).
+
+export interface CommentDto {
+  id: string
+  item_id: string
+  author_id: string
+  body: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CommentPage {
+  items: CommentDto[]
+}
+
+export async function listComments(listId: string, itemId: string): Promise<CommentPage> {
+  return request<CommentPage>('GET', `/api/v1/ui/lists/${listId}/items/${itemId}/comments`)
+}
+
+export async function createComment(
+  listId: string,
+  itemId: string,
+  body: string,
+): Promise<CommentDto> {
+  return request<CommentDto>('POST', `/api/v1/ui/lists/${listId}/items/${itemId}/comments`, { body })
+}
+
+export async function updateComment(
+  listId: string,
+  itemId: string,
+  commentId: string,
+  body: string,
+): Promise<CommentDto> {
+  return request<CommentDto>(
+    'PATCH',
+    `/api/v1/ui/lists/${listId}/items/${itemId}/comments/${commentId}`,
+    { body },
+  )
+}
+
+export async function deleteComment(
+  listId: string,
+  itemId: string,
+  commentId: string,
+): Promise<void> {
+  await request<void>(
+    'DELETE',
+    `/api/v1/ui/lists/${listId}/items/${itemId}/comments/${commentId}`,
+  )
 }
 
 // --- list views (Lists v2 saved views) ------------------------------
@@ -450,15 +658,3 @@ export async function deleteList(listId: string): Promise<void> {
   await request<void>('DELETE', `/api/v1/ui/lists/${encodeURIComponent(listId)}`)
 }
 
-// --- planner prefs --------------------------------------------------
-// Per-user "show this list in Planner" flag. The server gates on read
-// access to the list, so shared lists can be flagged by the recipient.
-
-export async function setListPlannerPref(listId: string, show: boolean): Promise<void> {
-  await request<void>('PUT', `/api/v1/ui/lists/${encodeURIComponent(listId)}/planner-pref`, { show })
-}
-
-export async function listPlannerPrefs(): Promise<string[]> {
-  const r = await request<{ listIds: string[] }>('GET', '/api/v1/ui/planner-prefs')
-  return r.listIds
-}

@@ -232,6 +232,12 @@ function buildUpdateSet(fields: UpdateListItemInput): Record<string, unknown> {
       set.completedAt = completed ? new Date() : null
     }
   }
+  // Custom-status linkage (RPL v1.0.0). The route resolves status_id ↔
+  // category and dual-writes `status` (above) for the completed mirror;
+  // here we just persist the id verbatim. null clears the linkage.
+  if (fields.statusId !== undefined) set.statusId = fields.statusId
+  // Sub-item parent (RPL v1.0.0). Route-validated; persisted verbatim.
+  if (fields.parentId !== undefined) set.parentId = fields.parentId
   if (fields.listId !== undefined) {
     set.listId = fields.listId
     if (fields.position === undefined) set.position = appendPosition(fields.listId)
@@ -276,6 +282,8 @@ function rowToItem(row: typeof listItems.$inferSelect): ListItemRecord {
     completed: row.completed,
     completedAt: row.completedAt,
     status: row.status as TaskStatus | null,
+    statusId: row.statusId,
+    parentId: row.parentId,
     priority: row.priority as TaskPriority | null,
     dueDate: row.dueDate,
     customFields: (row.customFields ?? {}) as Record<string, unknown>,
@@ -306,6 +314,8 @@ export class D1ListItemRepo implements ListItemRepo {
         notes: input.notes ?? null,
         assignedTo: input.assignedTo ?? null,
         status,
+        statusId: input.statusId ?? null,
+        parentId: input.parentId ?? null,
         priority: input.priority ?? null,
         dueDate: input.dueDate ?? null,
         completed: completedFromStatus,
@@ -442,5 +452,36 @@ export class D1ListItemRepo implements ListItemRepo {
       )
       .returning({ id: listItems.id })
     return rows.map((r) => r.id)
+  }
+
+  async clearChildParent(listId: string, parentId: string): Promise<number> {
+    const rows = await this.db
+      .update(listItems)
+      .set({ parentId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(listItems.listId, listId),
+          eq(listItems.parentId, parentId),
+          isNull(listItems.deletedAt),
+        ),
+      )
+      .returning({ id: listItems.id })
+    return rows.length
+  }
+
+  async bulkClearChildParent(listId: string, parentIds: string[]): Promise<number> {
+    if (parentIds.length === 0) return 0
+    const rows = await this.db
+      .update(listItems)
+      .set({ parentId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(listItems.listId, listId),
+          inArray(listItems.parentId, parentIds),
+          isNull(listItems.deletedAt),
+        ),
+      )
+      .returning({ id: listItems.id })
+    return rows.length
   }
 }

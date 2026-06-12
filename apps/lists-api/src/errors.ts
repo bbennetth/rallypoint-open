@@ -87,6 +87,15 @@ export const errors = {
   fieldDefNotFound(): ApiError {
     return new ApiError({ code: 'field_def_not_found', message: 'Field not found.', status: 404 })
   },
+  statusNotFound(): ApiError {
+    return new ApiError({ code: 'status_not_found', message: 'Status not found.', status: 404 })
+  },
+  commentNotFound(): ApiError {
+    return new ApiError({ code: 'comment_not_found', message: 'Comment not found.', status: 404 })
+  },
+  labelNotFound(): ApiError {
+    return new ApiError({ code: 'label_not_found', message: 'Label not found.', status: 404 })
+  },
   viewNotFound(): ApiError {
     return new ApiError({ code: 'view_not_found', message: 'View not found.', status: 404 })
   },

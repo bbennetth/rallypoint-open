@@ -25,6 +25,7 @@ import type {
 } from '../repos/types.js'
 import { readJsonBody, readOptionalJsonBody } from './_body.js'
 import { loadForAction, recordActivity } from './_access.js'
+import { assertFeatureEnabled } from './_features.js'
 import { captureSnapshot } from './_snapshots.js'
 import { publish } from '../realtime/publish.js'
 import { eventChannel, envelope } from '../realtime/channels.js'
@@ -343,13 +344,15 @@ export const lineupRoutes = new Hono<HonoApp>()
 
   // --- lineup slots (event_artists) --------------------------------
   .get('/api/v1/ui/events/:id/lineup', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'lineup')
     const slots = await c.var.repos.eventArtists.listForEvent(event.id)
     const names = await slotArtistNames(c.var.repos.artists, slots)
     return c.json({ items: slots.map((s) => serializeSlot(s, names.get(s.artistId) ?? null)) })
   })
   .post('/api/v1/ui/events/:id/lineup', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'lineup')
     const parsed = LineupSlotSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const slot = await resolveSlot(c, event.id, parsed.data)
@@ -363,7 +366,8 @@ export const lineupRoutes = new Hono<HonoApp>()
     return c.json(serializeSlot(saved, artist?.name ?? null), 200)
   })
   .post('/api/v1/ui/events/:id/lineup/bulk', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'lineup')
     const parsed = BulkLineupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const slots: EventArtistRecord[] = []
@@ -388,7 +392,8 @@ export const lineupRoutes = new Hono<HonoApp>()
     return c.json({ items: upserted.map((s) => serializeSlot(s, names.get(s.artistId) ?? null)) }, 200)
   })
   .delete('/api/v1/ui/events/:id/lineup/:artistId/:dayId', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'lineup')
     const removed = await c.var.repos.eventArtists.delete(
       event.id,
       c.req.param('artistId'),

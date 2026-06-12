@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
-  getRecurring,
-  getUpcoming,
   setGroupEventPlannerPref,
   setTaskItemCompleted,
   type EventDayDto,
@@ -18,10 +16,9 @@ import {
   fmtTime,
   groupUpcomingByDay,
   hasTimeOfDay,
-  localToday,
+  splitAgendaGroups,
 } from '../lib/planner-helpers.js'
 import { describeRecurrence, summarizeNext } from '../lib/recurrence-label.js'
-import { onCreated } from '../lib/refresh-bus.js'
 import { Drawer } from '@rallypoint/ui'
 import { Check, EventEditPencil, EyeRow, PriTag } from '../ui/bits.js'
 import { Icon } from '../ui/icons.js'
@@ -32,21 +29,8 @@ import { SeriesEdit } from '../ui/SeriesEdit.js'
 import { openProps, stopRowOpen as stop } from '../ui/row-open.js'
 import { MonthGrid, WeekStrip } from '../ui/CalendarView.js'
 
-// View modes for the Upcoming page toggle. Persisted to ?view= URL param.
+// View modes for the calendar control (demoted secondary toggle).
 type UpcomingView = 'list' | 'week' | 'month'
-
-function readViewParam(): UpcomingView {
-  const p = new URLSearchParams(window.location.search).get('view')
-  if (p === 'week' || p === 'month') return p
-  return 'list'
-}
-
-function writeViewParam(v: UpcomingView) {
-  const url = new URL(window.location.href)
-  if (v === 'list') url.searchParams.delete('view')
-  else url.searchParams.set('view', v)
-  window.history.replaceState(null, '', url.toString())
-}
 
 type Selected =
   | { kind: 'task'; task: MyDayTask }
@@ -54,68 +38,49 @@ type Selected =
   | { kind: 'eventDay'; eventDay: EventDayDto }
   | { kind: 'series'; series: RecurringSeriesDto }
 
-// Upcoming surface (slice 9 + Ink redesign). Dated items are grouped by local
-// day with relative labels; undated items fill a sticky Backlog card. Tasks
-// can be checked off in place (optimistic); events are read-only here.
-// Rendered inside My Day behind the Today | Upcoming toggle (issue #495) —
-// no longer a standalone tab/route.
+// Upcoming feed (slice 9 + Ink redesign). Presentational: the parent (My Day)
+// owns the my-day + upcoming + recurring fetch and passes the data down, so the
+// agenda reads as one continuous scroll with no tab/route of its own (the
+// Today | Upcoming toggle from #495 is gone). Dated items group by local day
+// with relative labels; the list view shows only strictly-future days (today
+// already appears in the roll-up above). Calendar week/month is a demoted
+// secondary control. Tasks check off optimistically against a local mirror;
+// events are read-only here.
 
 function errMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message
   return 'Something went wrong. Please try again.'
 }
 
-export function UpcomingView() {
-  const [data, setData] = useState<Upcoming | null>(null)
-  const [recurringData, setRecurringData] = useState<RecurringResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+export interface UpcomingFeedProps {
+  data: Upcoming | null
+  recurringData: RecurringResponse | null
+  todayYmd: string
+  /** Called after a successful mutation so the parent can refetch if it wants. */
+  onChanged: () => void
+}
+
+export function UpcomingFeed({ data: dataProp, recurringData, todayYmd, onChanged }: UpcomingFeedProps) {
+  // Local optimistic mirror of the parent's upcoming payload, re-synced whenever
+  // the parent supplies fresh data. Check-off / remove mutate it in place for a
+  // snappy response and revert on failure.
+  const [data, setData] = useState<Upcoming | null>(dataProp)
+  useEffect(() => setData(dataProp), [dataProp])
+
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selected | null>(null)
   const [recurringExpanded, setRecurringExpanded] = useState(true)
-  const [view, setView] = useState<UpcomingView>(readViewParam)
+  const [view, setView] = useState<UpcomingView>('list')
   // Calendar month/week navigation state — start at the current month/today.
-  const todayObj = useMemo(() => localToday(), [])
-  const [calYear, setCalYear] = useState(() => Number(todayObj.date.slice(0, 4)))
-  const [calMonth, setCalMonth] = useState(() => Number(todayObj.date.slice(5, 7)))
-  const [weekAnchor, setWeekAnchor] = useState(() => todayObj.date)
+  const [calYear, setCalYear] = useState(() => Number(todayYmd.slice(0, 4)))
+  const [calMonth, setCalMonth] = useState(() => Number(todayYmd.slice(5, 7)))
+  const [weekAnchor, setWeekAnchor] = useState(() => todayYmd)
 
-  function switchView(v: UpcomingView) {
-    setView(v)
-    writeViewParam(v)
-  }
-
-  const refresh = useCallback(async () => {
-    const { date, tz } = localToday()
-    setLoading(true)
-    try {
-      // Upcoming is the critical fetch — a failure errors the page.
-      const upcoming = await getUpcoming(date, tz)
-      setData(upcoming)
-      // Recurring is best-effort: if it fails, still show the schedule and
-      // just hide the Recurring section rather than blanking the page.
-      try {
-        setRecurringData(await getRecurring(date, tz))
-      } catch {
-        setRecurringData(null)
-      }
-    } catch (err) {
-      setError(errMessage(err))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
-
-  // A task/event created via the global FAB (or edited in the slider) shows up
-  // here without a manual reload.
-  useEffect(() => onCreated('task', () => void refresh()), [refresh])
-  useEffect(() => onCreated('event', () => void refresh()), [refresh])
-
-  const today = todayObj.date
-  const groups = useMemo(() => (data ? groupUpcomingByDay(data.dated, today) : []), [data, today])
+  const today = todayYmd
+  // Every dated day-group (incl. today + overdue) — what the calendar cells need.
+  const allGroups = useMemo(() => (data ? groupUpcomingByDay(data.dated, today) : []), [data, today])
+  // The list view renders only strictly-future days; today lives in the roll-up.
+  const groups = useMemo(() => splitAgendaGroups(allGroups, today).future, [allGroups, today])
 
   function patchTask(id: string, completed: boolean) {
     setData((d) => {
@@ -128,6 +93,10 @@ export function UpcomingView() {
     })
   }
 
+  // Toggling / removing a forward-looking item only affects this feed, never
+  // the Today roll-up above — so we mutate the local mirror and skip the
+  // parent refetch (which would re-pull all three endpoints and flash the
+  // feed). The mirror re-syncs from props on the next parent-driven refresh.
   async function toggleTask(listId: string, id: string, completed: boolean) {
     const next = !completed
     patchTask(id, next)
@@ -199,11 +168,6 @@ export function UpcomingView() {
                 >
                   {tk.title}
                 </span>
-                {it.shared === true && (
-                  <span className="pl-chip" style={{ color: 'var(--acid)' }}>
-                    Shared
-                  </span>
-                )}
               </li>
             )
           })}
@@ -224,7 +188,7 @@ export function UpcomingView() {
   // day's group in the list view. For now, switch to list view and let the
   // group header be found visually (a future enhancement could scroll-anchor).
   function onCalendarDayClick(_ymd: string) {
-    switchView('list')
+    setView('list')
   }
 
   return (
@@ -234,7 +198,7 @@ export function UpcomingView() {
           <button
             type="button"
             className={view === 'list' ? 'on' : ''}
-            onClick={() => switchView('list')}
+            onClick={() => setView('list')}
             aria-pressed={view === 'list'}
           >
             <Icon name="tasks" size={12} />
@@ -243,7 +207,7 @@ export function UpcomingView() {
           <button
             type="button"
             className={view === 'week' ? 'on' : ''}
-            onClick={() => switchView('week')}
+            onClick={() => setView('week')}
             aria-pressed={view === 'week'}
           >
             <Icon name="upcoming" size={12} />
@@ -252,7 +216,7 @@ export function UpcomingView() {
           <button
             type="button"
             className={view === 'month' ? 'on' : ''}
-            onClick={() => switchView('month')}
+            onClick={() => setView('month')}
             aria-pressed={view === 'month'}
           >
             <Icon name="grid" size={12} />
@@ -267,15 +231,13 @@ export function UpcomingView() {
         </p>
       )}
 
-      {loading && !data ? (
-        <p style={{ color: 'var(--ink-dim)', fontSize: 14, margin: 0 }}>Loading…</p>
-      ) : data ? (
+      {data ? (
         <>
           {/* Calendar views render outside the up-grid (full-width, no aside) */}
           {view === 'month' && (
             <div className="up-cal-wrap">
               <MonthGrid
-                groups={groups}
+                groups={allGroups}
                 year={calYear}
                 month={calMonth}
                 todayYmd={today}
@@ -289,7 +251,7 @@ export function UpcomingView() {
           {view === 'week' && (
             <div className="up-cal-wrap">
               <WeekStrip
-                groups={groups}
+                groups={allGroups}
                 anchorYmd={weekAnchor}
                 todayYmd={today}
                 onWeekChange={setWeekAnchor}
@@ -421,7 +383,6 @@ export function UpcomingView() {
                       const repeats = isTask && it.task.seriesId != null
                       const ticket = !isTask && it.event.ticketCount > 0
                       const priority = isTask ? it.task.priority : null
-                      const shared = isTask && it.kind === 'task' && it.shared === true
                       const key = isTask ? `task:${it.task.id}` : `event:${it.event.id}`
                       return (
                         <li
@@ -484,11 +445,6 @@ export function UpcomingView() {
                                   </span>
                                 )
                               })()}
-                              {shared && (
-                                <span className="pl-chip" style={{ borderColor: 'var(--acid-dim, var(--acid))', color: 'var(--acid)' }}>
-                                  Shared
-                                </span>
-                              )}
                               {ticket && <span className="pl-chip accent">Ticket</span>}
                             </span>
                           </span>
@@ -552,11 +508,6 @@ export function UpcomingView() {
                       >
                         {tk.title}
                       </span>
-                      {it.shared === true && (
-                        <span className="pl-chip" style={{ color: 'var(--acid)' }}>
-                          Shared
-                        </span>
-                      )}
                     </li>
                   )
                 })}
@@ -583,14 +534,14 @@ export function UpcomingView() {
         {selected?.kind === 'task' && (
           <TaskDetail
             task={selected.task}
-            onChanged={() => void refresh()}
+            onChanged={onChanged}
             onClose={() => setSelected(null)}
           />
         )}
         {selected?.kind === 'event' && (
           <PersonalEventEdit
             event={selected.event}
-            onChanged={() => void refresh()}
+            onChanged={onChanged}
             onClose={() => setSelected(null)}
           />
         )}
@@ -598,7 +549,7 @@ export function UpcomingView() {
         {selected?.kind === 'series' && (
           <SeriesEdit
             series={selected.series}
-            onChanged={() => void refresh()}
+            onChanged={onChanged}
             onClose={() => setSelected(null)}
           />
         )}

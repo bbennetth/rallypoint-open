@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { planSessionsImport, sessionsTemplateCsv } from './sessions-csv.js'
-import type { DayDto, SessionDtoFull } from './api.js'
+import type { DayDto, SessionDtoFull, StageDto } from './api.js'
 
 const days: DayDto[] = [
   { id: 'evd_1', event_id: 'e', day_label: 'Day 1', date: '2026-05-01', start_time: null, end_time: null, sort_order: 0 },
   { id: 'evd_2', event_id: 'e', day_label: 'Day 2', date: '2026-05-02', start_time: null, end_time: null, sort_order: 1 },
+]
+
+const stages: StageDto[] = [
+  { id: 'evs_1', event_id: 'e', name: 'Main', sort_order: 0 },
+  { id: 'evs_2', event_id: 'e', name: 'Wellness', sort_order: 1 },
 ]
 
 function session(p: Partial<SessionDtoFull> & { id: string; title: string }): SessionDtoFull {
@@ -13,6 +18,7 @@ function session(p: Partial<SessionDtoFull> & { id: string; title: string }): Se
     description: null,
     location: null,
     day_id: null,
+    stage_id: null,
     start_time: null,
     end_time: null,
     category: null,
@@ -32,14 +38,15 @@ function session(p: Partial<SessionDtoFull> & { id: string; title: string }): Se
 }
 
 function plan(text: string, current: SessionDtoFull[] = [], replace = false) {
-  return planSessionsImport({ text, days, currentSessions: current, replace })
+  return planSessionsImport({ text, days, stages, currentSessions: current, replace })
 }
 
 describe('sessionsTemplateCsv', () => {
   it('emits a header + example with a blank id (create)', () => {
-    const [header, example] = sessionsTemplateCsv(days).split('\r\n')
-    expect(header).toBe('id,title,day,start,end,location,category,host,visibility,description')
+    const [header, example] = sessionsTemplateCsv(days, stages).split('\r\n')
+    expect(header).toBe('id,title,day,start,end,stage,location,category,host,visibility,description')
     expect(example!.startsWith(',Sunrise Yoga,Day 1,')).toBe(true)
+    expect(example!).toContain(',Main,')
   })
 })
 
@@ -60,6 +67,23 @@ describe('planSessionsImport', () => {
     expect(p.errors).toEqual([])
     expect(p.updates).toEqual([{ id: 'evx_1', patch: { dayId: 'evd_2', location: 'Hall A' } }])
     expect(p.summary).toMatchObject({ create: 0, update: 1 })
+  })
+
+  it('resolves a stage by name on create and patches it on update', () => {
+    const p = plan('id,title,stage\n,Keynote,Main')
+    expect(p.errors).toEqual([])
+    expect(p.creates).toEqual([{ title: 'Keynote', stageId: 'evs_1' }])
+
+    const current = [session({ id: 'evx_1', title: 'Old' })]
+    const u = plan('id,title,stage\nevx_1,,wellness', current)
+    expect(u.errors).toEqual([])
+    expect(u.updates).toEqual([{ id: 'evx_1', patch: { stageId: 'evs_2' } }])
+  })
+
+  it('errors on an unknown stage name', () => {
+    const p = plan('id,title,stage\n,Keynote,Backstage')
+    expect(p.errors).toEqual([{ line: 2, message: 'Unknown stage "Backstage".' }])
+    expect(p.creates).toEqual([])
   })
 
   it('errors on an unknown session id', () => {

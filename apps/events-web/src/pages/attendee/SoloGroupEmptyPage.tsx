@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Button, EmptyState } from '@rallypoint/ui'
 import { useSoloEventOutlet } from './_solo-event-outlet.js'
+import { WhoIsGoingCard } from '../../ui/WhoIsGoingCard.js'
 
 // Phase 4 (#16). The Group tab in the solo shell. Renders an empty
 // state because a solo attendee has no group; the CTA jumps to the
@@ -11,7 +12,7 @@ export function SoloGroupEmptyPage() {
   const { event } = useSoloEventOutlet()
   return (
     <main className="page-pad">
-      <div className="max-w-xl mx-auto">
+      <div className="max-w-xl mx-auto space-y-5">
         <EmptyState
           title="You're attending solo"
           body={
@@ -29,6 +30,7 @@ export function SoloGroupEmptyPage() {
             </Link>
           }
         />
+        {event.features.attendees && <WhoIsGoingCard eventId={event.id} />}
       </div>
     </main>
   )

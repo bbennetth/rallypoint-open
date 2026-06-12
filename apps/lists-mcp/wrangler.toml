@@ -1,0 +1,40 @@
+# lists-mcp as a Cloudflare Worker — remote MCP server speaking Streamable
+# HTTP (JSON-RPC 2.0 over POST). Authenticates callers via a personal access
+# token resolved through lists-api. NO D1, NO assets/SPA, NO Durable Object.
+#
+# Real secrets via `wrangler secret bulk --env <env>`:
+#   LISTS_MCP_API_KEY
+
+name = "rallypoint-lists-mcp"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Local-dev vars — parseEnv fills dev-safe defaults for LISTS_MCP_API_KEY.
+[vars]
+NODE_ENV = "development"
+LISTS_API_URL = "http://localhost:8082"
+
+# ---- QA: lists-mcp.rallypt.dev --------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", LISTS_API_URL = "https://lists.rallypt.dev" }
+
+[[env.qa.services]]
+binding = "LISTS"
+service = "rallypoint-lists-qa"
+
+[[env.qa.routes]]
+pattern = "lists-mcp.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: lists-mcp.rallypt.app ------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", LISTS_API_URL = "https://lists.rallypt.app" }
+
+[[env.prod.services]]
+binding = "LISTS"
+service = "rallypoint-lists-prod"
+
+[[env.prod.routes]]
+pattern = "lists-mcp.rallypt.app"
+custom_domain = true

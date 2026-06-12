@@ -20,6 +20,15 @@ const request = client.request
 
 export type PrivacyMode = 'public' | 'unlisted' | 'private'
 export type MemberRole = 'owner' | 'editor' | 'viewer'
+
+// Per-event feature toggles (#216). The API always returns the fully
+// resolved object (defaults merged server-side).
+export interface EventFeatures {
+  lineup: boolean
+  sessions: boolean
+  groups: boolean
+  attendees: boolean
+}
 export type AssignableRole = 'editor' | 'viewer'
 
 export interface EventDto {
@@ -35,10 +44,14 @@ export interface EventDto {
   location_lng: number | null
   privacy_mode: PrivacyMode
   public_page_config: PublicPageConfigInput | null
+  features: EventFeatures
   owner_user_id: string
   // 'personal' | 'group' — discriminates festival events from personal ones.
   scope_type: string
   viewer_role: MemberRole
+  // #440: the caller's group in this event (first joined), or null.
+  // Drives viewer-role routing into the group attendee shell.
+  my_group_id: string | null
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -65,6 +78,8 @@ export type PatchEventInput = Partial<CreateEventInput> & {
   // Owner-curated public page config (slice 11). Snake_case matches
   // the persisted jsonb shape; the API echoes it verbatim.
   publicPageConfig?: PublicPageConfigInput | null
+  // Partial feature-toggle patch (#216); owner-only server-side.
+  features?: Partial<EventFeatures>
 }
 
 // Mirror of @rallypoint/events-shared.PublicPageConfigSchema. Kept
@@ -230,6 +245,34 @@ export async function listEventAttendees(
   )
 }
 
+// "Who's going" (#216): attendee-visible roster, display names only.
+// Two access paths — event membership (solo attendees) or group
+// membership (group-joined attendees). Both 404 when the event's
+// `attendees` feature is off.
+export interface CommunityAttendeeDto {
+  user_id: string
+  display_name: string | null
+  joined_at: string
+}
+
+export async function listCommunityAttendees(
+  eventId: string,
+): Promise<{ items: CommunityAttendeeDto[]; next_cursor: string | null }> {
+  return request<{ items: CommunityAttendeeDto[]; next_cursor: string | null }>(
+    'GET',
+    `/api/v1/ui/events/${encodeURIComponent(eventId)}/attendees/community?limit=200`,
+  )
+}
+
+export async function listGroupAttendees(
+  groupId: string,
+): Promise<{ items: CommunityAttendeeDto[] }> {
+  return request<{ items: CommunityAttendeeDto[] }>(
+    'GET',
+    `/api/v1/ui/groups/${encodeURIComponent(groupId)}/attendees`,
+  )
+}
+
 export async function removeEventAttendee(
   eventId: string,
   userId: string,
@@ -385,12 +428,15 @@ export interface GroupMemberDto {
 }
 
 export interface GroupDetailDto extends GroupDto {
+  // #440: 6-char re-showable join code (lazily backfilled server-side).
+  short_code: string | null
   members: GroupMemberDto[]
 }
 
 // The join_code is only present on the create response (it leaves the
 // API exactly once).
 export interface CreateGroupResult extends GroupDto {
+  short_code: string | null
   join_code: string
 }
 
@@ -431,6 +477,22 @@ export async function createGroupInvite(
 ): Promise<GroupInviteResult> {
   return request<GroupInviteResult>('POST', `/api/v1/ui/groups/${ev(groupId)}/invites`, input)
 }
+export interface GroupJoinPreviewDto {
+  group_id: string
+  name: string
+  member_count: number
+  event_name: string
+  you_are_member: boolean
+}
+
+// Resolve a join code (6-char or rpj_) to a preview without joining.
+export async function previewGroupJoin(code: string): Promise<GroupJoinPreviewDto> {
+  return request<GroupJoinPreviewDto>(
+    'GET',
+    `/api/v1/ui/groups/join/preview?code=${encodeURIComponent(code)}`,
+  )
+}
+
 export async function joinGroup(code: string): Promise<{ group_id: string; role: GroupRole }> {
   return request<{ group_id: string; role: GroupRole }>('POST', '/api/v1/ui/groups/join', { code })
 }
@@ -977,6 +1039,7 @@ export interface SessionDtoFull {
   description: string | null
   location: string | null
   day_id: string | null
+  stage_id: string | null
   start_time: string | null
   end_time: string | null
   category: string | null
@@ -998,6 +1061,7 @@ export interface CreateSessionInput {
   description?: string
   location?: string
   dayId?: string | null
+  stageId?: string | null
   startTime?: string
   endTime?: string
   category?: string
@@ -1058,6 +1122,7 @@ export interface BulkSessionCreate {
   description?: string | null
   location?: string | null
   dayId?: string | null
+  stageId?: string | null
   startTime?: string | null
   endTime?: string | null
   category?: string | null

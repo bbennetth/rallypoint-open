@@ -29,6 +29,48 @@
       "when": 1780990000000,
       "tag": "0003_rate_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1781152913490,
+      "tag": "0004_flaky_frank_castle",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1781155059765,
+      "tag": "0005_perfect_jane_foster",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1781156441748,
+      "tag": "0006_marvelous_wildside",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1781157579990,
+      "tag": "0007_nosy_siren",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1781178587492,
+      "tag": "0008_tiresome_pete_wisdom",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1781219177128,
+      "tag": "0009_planner_origin",
+      "breakpoints": true
     }
   ]
 }

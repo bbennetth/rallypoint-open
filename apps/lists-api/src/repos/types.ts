@@ -6,6 +6,7 @@ import type {
   ListType,
   RecurrenceFreq,
   ScopeType,
+  StatusCategory,
   TaskPriority,
   TaskStatus,
   ValidatedFilter,
@@ -122,6 +123,13 @@ export interface ListItemRecord {
   completed: boolean
   completedAt: Date | null
   status: TaskStatus | null
+  // Custom-status linkage (`lst_…`); null for non-task items / unresolved
+  // rows. Kept in lockstep with `status` (which holds the category slug).
+  // RPL v1.0.0 slice 1.
+  statusId: string | null
+  // Sub-item parent (`lit_…`) in the same list; null for top-level items.
+  // RPL v1.0.0 slice 4.
+  parentId: string | null
   priority: TaskPriority | null
   dueDate: Date | null
   // Lists v2 typed values keyed by field-def id (`lfd_…`). Defaults to
@@ -145,6 +153,11 @@ export interface CreateListItemInput {
   notes?: string | null | undefined
   assignedTo?: string | null | undefined
   status?: TaskStatus | null | undefined
+  // Custom-status id (`lst_…`), resolved + dual-written with `status` by
+  // the route. RPL v1.0.0 slice 1.
+  statusId?: string | null | undefined
+  // Sub-item parent (`lit_…`), validated by the route. RPL v1.0.0 slice 4.
+  parentId?: string | null | undefined
   priority?: TaskPriority | null | undefined
   dueDate?: Date | null | undefined
   // Pre-validated by the route (validateCustomFields); the repo writes it
@@ -166,6 +179,11 @@ export interface UpdateListItemInput {
   assignedTo?: string | null | undefined
   completed?: boolean | undefined
   status?: TaskStatus | null | undefined
+  // Custom-status id (`lst_…`), resolved + dual-written with `status` by
+  // the route. null clears the linkage. RPL v1.0.0 slice 1.
+  statusId?: string | null | undefined
+  // Sub-item parent (`lit_…`). null detaches to top-level. RPL v1.0.0 s4.
+  parentId?: string | null | undefined
   priority?: TaskPriority | null | undefined
   dueDate?: Date | null | undefined
   // Pre-merged + validated by the route (the full intended value map);
@@ -218,6 +236,15 @@ export interface ListItemRepo {
   // Ids outside the list (or already deleted) are skipped. Returns the
   // ids actually deleted.
   bulkSoftDelete(listId: string, itemIds: string[], when: Date): Promise<string[]>
+  // Detach every live child of `parentId` (set parent_id = null), scoped to
+  // `listId`. Called when a parent is soft-deleted so children orphan to
+  // top-level rather than dangle on a deleted parent. Returns the count.
+  // RPL v1.0.0 slice 4.
+  clearChildParent(listId: string, parentId: string): Promise<number>
+  // Bulk variant: detach children of ANY of `parentIds` in one statement.
+  // Used by the bulk soft-delete path so a bulk parent delete orphans its
+  // children too. No-op on an empty list. Returns the count detached.
+  bulkClearChildParent(listId: string, parentIds: string[]): Promise<number>
 }
 
 // --- list field defs (Lists v2) ------------------------------------
@@ -279,6 +306,76 @@ export interface FieldDefRepo {
   softDelete(id: string, when: Date): Promise<void>
 }
 
+// --- list statuses (RPL v1.0.0 slice 1) ----------------------------
+
+// A per-list, user-definable workflow state. `category` is the
+// load-bearing classifier (completion, kanban grouping, GitHub
+// auto-close key off it, never the renameable `name`). `color` is a
+// free-form palette token owned by the UI.
+export interface ListStatusRecord {
+  id: string
+  tenantId: string
+  listId: string
+  name: string
+  color: string | null
+  category: StatusCategory
+  position: number
+  createdBy: string
+  createdAt: Date
+  updatedAt: Date
+  deletedAt: Date | null
+}
+
+export interface CreateListStatusInput {
+  id: string
+  tenantId: string
+  listId: string
+  name: string
+  color?: string | null | undefined
+  category: StatusCategory
+  // Omit to append at max(position)+1 within the list.
+  position?: number | undefined
+  createdBy: string
+}
+
+// Sparse patch. Only defined keys are written.
+export interface UpdateListStatusInput {
+  name?: string | undefined
+  color?: string | null | undefined
+  category?: StatusCategory | undefined
+  position?: number | undefined
+}
+
+export interface ListStatusRepo {
+  create(input: CreateListStatusInput): Promise<ListStatusRecord>
+  // Returns the status regardless of deletedAt (callers gate on it).
+  findById(id: string): Promise<ListStatusRecord | null>
+  // Statuses for a list ordered by (position, createdAt). Excludes
+  // soft-deleted rows unless includeDeleted is set.
+  listForList(listId: string, opts?: { includeDeleted?: boolean }): Promise<ListStatusRecord[]>
+  // Insert the default seed set for a list in one transaction and return
+  // the created rows (ordered by position). Used by the lazy seed-on-
+  // first-read path; the caller decides when the list has zero rows and
+  // mints the ids (route owns id generation). `position` is the array
+  // index.
+  seedDefaults(
+    listId: string,
+    tenantId: string,
+    createdBy: string,
+    seeds: { id: string; name: string; color: string; category: StatusCategory }[],
+  ): Promise<ListStatusRecord[]>
+  update(id: string, fields: UpdateListStatusInput): Promise<ListStatusRecord | null>
+  softDelete(id: string, when: Date): Promise<void>
+  // Reassign every live item pointing at `fromStatusId` to `toStatusId`
+  // (or clear to null) — used before deleting a status so no item is left
+  // dangling. Scoped to the list. Returns the count reassigned.
+  reassignItems(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+  ): Promise<number>
+}
+
 // --- list views (Lists v2 slice 5) ---------------------------------
 
 // A saved filter/sort/columns/mode configuration for a list. v2 views
@@ -334,6 +431,9 @@ export interface GroupRecord {
   tenantId: string
   name: string
   description: string | null
+  // 'planner' for Planner-BFF-provisioned groups (read-only on the UI
+  // surface); null for groups created in the Lists app.
+  origin: string | null
   createdBy: string
   createdAt: Date
   updatedAt: Date
@@ -353,6 +453,7 @@ export interface CreateGroupInput {
   tenantId: string
   name: string
   description?: string | null | undefined
+  origin?: string | null | undefined
   createdBy: string
   // Membership row id for the creator (auto-enrolled as 'owner').
   ownerMemberId: string
@@ -560,17 +661,140 @@ export interface ListItemSeriesRepo {
   softDelete(id: string, actor: string): Promise<boolean>
 }
 
-// --- list planner prefs (per-user "show in planner" flag) ----------
+// --- mcp tokens (RPL v1.0.0 slice 11) ------------------------------
 
-// list_planner_prefs — one row per (user, list). show_in_planner
-// controls whether the list surfaces in the Planner sidebar. Designed
-// as a per-user overlay: user A flagging a shared list has no effect
-// on user B's view.
-export interface ListPlannerPrefRepo {
-  // INSERT … ON CONFLICT DO UPDATE — idempotent, single round-trip.
-  upsert(userId: string, listId: string, show: boolean): Promise<void>
-  // Returns list_id values where show_in_planner = true for this user.
-  flaggedListIdsForActor(userId: string): Promise<string[]>
+// A personal access token for the Lists MCP server. The raw value is
+// never stored — only its sha256 (`idHash`). `id` is the non-secret
+// handle for listing/revoking. A token is valid iff it is not revoked
+// and not past `expiresAt`.
+export interface McpTokenRecord {
+  id: string
+  tenantId: string
+  idHash: string
+  userId: string
+  label: string
+  createdAt: Date
+  lastUsedAt: Date | null
+  expiresAt: Date | null
+  revokedAt: Date | null
+}
+
+export interface CreateMcpTokenInput {
+  id: string
+  tenantId: string
+  idHash: string
+  userId: string
+  label: string
+  expiresAt?: Date | null | undefined
+}
+
+export interface McpTokenRepo {
+  create(input: CreateMcpTokenInput): Promise<McpTokenRecord>
+  // Resolve a token by its hash. Returns the row regardless of
+  // revoked/expired state (the caller decides); null if no such hash.
+  findByHash(idHash: string): Promise<McpTokenRecord | null>
+  // A user's tokens, newest first (includes revoked ones for the UI's
+  // audit view).
+  listForUser(userId: string): Promise<McpTokenRecord[]>
+  // Stamp last_used_at on a successful resolve.
+  touchLastUsed(id: string, when: Date): Promise<void>
+  // Soft-revoke, scoped to the owner. Returns true iff a live token was
+  // revoked (false when missing, not the owner's, or already revoked).
+  revoke(id: string, userId: string, when: Date): Promise<boolean>
+}
+
+// --- list item comments (RPL v1.0.0 slice 7) ----------------------
+
+// A comment on a list item. authorId holds a Rallypoint ID
+// `user_<ulid>` (not a cross-schema FK). Soft-deleted comments are
+// hidden from reads; the pruner hard-purges them alongside items.
+export interface ListItemCommentRecord {
+  id: string
+  tenantId: string
+  itemId: string
+  authorId: string
+  body: string
+  createdAt: Date
+  updatedAt: Date
+  deletedAt: Date | null
+}
+
+export interface CreateListItemCommentInput {
+  id: string
+  tenantId: string
+  itemId: string
+  authorId: string
+  body: string
+}
+
+// Sparse patch. Only body is editable post-create.
+export interface UpdateListItemCommentInput {
+  body?: string | undefined
+}
+
+export interface ListItemCommentRepo {
+  create(input: CreateListItemCommentInput): Promise<ListItemCommentRecord>
+  // Returns the comment regardless of deletedAt (callers gate on it).
+  findById(id: string): Promise<ListItemCommentRecord | null>
+  // Live (non-deleted) comments for an item, oldest-first (thread order).
+  // Pass includeDeleted to surface soft-deleted rows (internal use only).
+  listForItem(itemId: string, opts?: { includeDeleted?: boolean }): Promise<ListItemCommentRecord[]>
+  update(id: string, fields: UpdateListItemCommentInput): Promise<ListItemCommentRecord | null>
+  softDelete(id: string, when: Date): Promise<void>
+}
+
+// --- list labels (RPL v1.0.0 slice 12) ----------------------------
+
+// A per-list, user-definable colored label. `color` is a free-form
+// palette token owned by the UI. Many-to-many with items via the
+// `list_item_labels` join table (hard-delete on label soft-delete).
+export interface ListLabelRecord {
+  id: string
+  tenantId: string
+  listId: string
+  name: string
+  color: string | null
+  position: number
+  createdAt: Date
+  updatedAt: Date
+  deletedAt: Date | null
+}
+
+export interface CreateLabelInput {
+  id: string
+  tenantId: string
+  listId: string
+  name: string
+  color?: string | null | undefined
+  // Omit to append at max(position)+1 within the list.
+  position?: number | undefined
+}
+
+// Sparse patch. Only defined keys are written.
+export interface UpdateLabelInput {
+  name?: string | undefined
+  color?: string | null | undefined
+  position?: number | undefined
+}
+
+export interface ListLabelRepo {
+  create(input: CreateLabelInput): Promise<ListLabelRecord>
+  // Returns the label regardless of deletedAt (callers gate on it).
+  findById(id: string): Promise<ListLabelRecord | null>
+  // Labels for a list ordered by (position, createdAt). Excludes
+  // soft-deleted rows unless includeDeleted is set.
+  listForList(listId: string, opts?: { includeDeleted?: boolean }): Promise<ListLabelRecord[]>
+  update(id: string, fields: UpdateLabelInput): Promise<ListLabelRecord | null>
+  softDelete(id: string, when: Date): Promise<void>
+  // --- join-table helpers ------------------------------------------
+  // Replace the full label set for one item (delete-then-insert).
+  setItemLabels(itemId: string, labelIds: string[]): Promise<void>
+  // Batch lookup: map of itemId → label ids for those items. Used to
+  // attach label_ids to item serializations in one query.
+  labelsForItems(itemIds: string[]): Promise<Map<string, string[]>>
+  // Hard-purge join rows for a label being soft-deleted so it stops
+  // appearing on items immediately.
+  removeLabelFromAllItems(labelId: string): Promise<void>
 }
 
 // --- repo bag ------------------------------------------------------
@@ -579,12 +803,15 @@ export interface Repos {
   lists: ListRepo
   listItems: ListItemRepo
   fieldDefs: FieldDefRepo
+  listStatuses: ListStatusRepo
   listViews: ListViewRepo
   groups: GroupRepo
   listShares: ListShareRepo
   listInvites: ListInviteRepo
   sessions: ListsSessionRepo
   series: ListItemSeriesRepo
-  listPlannerPrefs: ListPlannerPrefRepo
+  mcpTokens: McpTokenRepo
+  listItemComments: ListItemCommentRepo
+  listLabels: ListLabelRepo
   rateLimit: RateLimitRepo
 }

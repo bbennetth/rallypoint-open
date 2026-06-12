@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import {
   clockLabel,
   fmtClock,
-  normalizeDayMode,
   eventDayWindow,
   hasTimeOfDay,
   splitMyDay,
@@ -11,6 +10,7 @@ import {
   dayDiff,
   relativeDayLabel,
   groupUpcomingByDay,
+  splitAgendaGroups,
   buildMonthGrid,
   buildWeekStrip,
   splitQuickNote,
@@ -66,20 +66,6 @@ function eventDay(over: Partial<EventDayDto> = {}): EventDayDto {
     ...over,
   }
 }
-
-describe('normalizeDayMode', () => {
-  it("passes 'upcoming' through", () => {
-    expect(normalizeDayMode('upcoming')).toBe('upcoming')
-  })
-
-  it("defaults 'today' and unknown/empty/null values to 'today'", () => {
-    expect(normalizeDayMode('today')).toBe('today')
-    expect(normalizeDayMode('week')).toBe('today')
-    expect(normalizeDayMode('')).toBe('today')
-    expect(normalizeDayMode(null)).toBe('today')
-    expect(normalizeDayMode(undefined)).toBe('today')
-  })
-})
 
 describe('clockLabel', () => {
   it('formats 12-hour times with AM/PM', () => {
@@ -260,6 +246,34 @@ describe('groupUpcomingByDay', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0]?.ymd).toBe('2026-06-04')
     expect(groups[0]?.items.map((i) => i.kind)).toEqual(['task', 'eventDay'])
+  })
+})
+
+describe('splitAgendaGroups', () => {
+  const t = (id: string, date: string): UpcomingItem => ({
+    kind: 'task',
+    task: task({ id, dueDate: `${date}T12:00:00` }),
+  })
+
+  it('partitions day-groups into overdue / today / future buckets', () => {
+    const groups = groupUpcomingByDay(
+      [t('past', '2026-06-02'), t('now', '2026-06-04'), t('soon', '2026-06-05'), t('later', '2026-06-12')],
+      '2026-06-04',
+    )
+    const { overdue, today, future } = splitAgendaGroups(groups, '2026-06-04')
+    expect(overdue.map((g) => g.ymd)).toEqual(['2026-06-02'])
+    expect(today.map((g) => g.ymd)).toEqual(['2026-06-04'])
+    expect(future.map((g) => g.ymd)).toEqual(['2026-06-05', '2026-06-12'])
+  })
+
+  it("excludes today's group from `future` so the agenda never double-lists it", () => {
+    const groups = groupUpcomingByDay([t('now', '2026-06-04'), t('soon', '2026-06-05')], '2026-06-04')
+    const { future } = splitAgendaGroups(groups, '2026-06-04')
+    expect(future.every((g) => g.ymd !== '2026-06-04')).toBe(true)
+  })
+
+  it('returns empty buckets for empty input', () => {
+    expect(splitAgendaGroups([], '2026-06-04')).toEqual({ overdue: [], today: [], future: [] })
   })
 })
 

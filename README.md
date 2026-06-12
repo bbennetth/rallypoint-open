@@ -13,7 +13,7 @@ what runs the hosted product is what's here.
 > ([money.rallypt.app](https://money.rallypt.app)), and planner
 > ([planner.rallypt.app](https://planner.rallypt.app)).
 
-Released from `rallypoint` `v1.0.3`. Licensed **Apache-2.0**.
+Released from `rallypoint` `v1.0.4`. Licensed **Apache-2.0**.
 
 ## Stack
 

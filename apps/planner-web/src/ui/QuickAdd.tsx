@@ -11,6 +11,7 @@ import {
   type TaskListDto,
 } from '../lib/api.js'
 import { dateInputToInstant, splitQuickNote, toInstant } from '../lib/planner-helpers.js'
+import { LAST_TASK_LIST_KEY, pickDefaultList } from '../lib/task-edit.js'
 import { notifyCreated } from '../lib/refresh-bus.js'
 import { addShoppingItemByTitle } from '../lib/shopping-helpers.js'
 import { PriorityPicker } from './PriorityPicker.js'
@@ -129,7 +130,16 @@ function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => v
       .then((rows) => {
         if (!alive) return
         setLists(rows)
-        setListId(rows[0]?.id ?? '')
+        // Preselect the list this user last filed a quick-add task to, so the
+        // common "same list again" case is a single keystroke.
+        const remembered = (() => {
+          try {
+            return localStorage.getItem(LAST_TASK_LIST_KEY)
+          } catch {
+            return null
+          }
+        })()
+        setListId(pickDefaultList(rows, remembered))
       })
       .catch((e) => alive && setError(errMessage(e)))
     return () => {
@@ -153,6 +163,12 @@ function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => v
         ...(dueDateInstant !== null ? { dueDate: dueDateInstant } : {}),
         priority,
       })
+      // Remember this list for the next quick-add.
+      try {
+        localStorage.setItem(LAST_TASK_LIST_KEY, listId)
+      } catch {
+        // ignore storage failures (private mode, quota) — non-essential
+      }
       onDone()
     } catch (err) {
       setError(errMessage(err))

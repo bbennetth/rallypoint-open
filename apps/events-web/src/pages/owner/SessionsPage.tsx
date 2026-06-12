@@ -16,7 +16,7 @@ export function SessionsPage() {
           </p>
           <h1 className="display text-2xl">{event.name}</h1>
         </header>
-        <SessionsEditor eventId={event.id} isOwner={isOwner} />
+        <SessionsEditor eventId={event.id} isOwner={isOwner} reloadSignal={0} />
       </div>
     </main>
   )

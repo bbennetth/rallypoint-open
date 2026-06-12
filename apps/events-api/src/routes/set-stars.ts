@@ -4,6 +4,7 @@ import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity } from './_access.js'
+import { assertFeatureEnabled } from './_features.js'
 
 function badRequest(code: string, message: string): ApiError {
   return new ApiError({ code, message, status: 400 })
@@ -23,7 +24,8 @@ function badRequest(code: string, message: string): ApiError {
 export const setStarsRoutes = new Hono<HonoApp>()
   // --- GET list starred sets ----------------------------------------
   .get('/api/v1/ui/events/:id/lineup/stars', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'lineup')
     const userId = c.var.session!.userId
     const stars = await c.var.repos.eventSetStars.listForUserEvent(userId, event.id)
     return c.json({
@@ -43,7 +45,8 @@ export const setStarsRoutes = new Hono<HonoApp>()
   // phantom stars on never-added slots and, via the FK's ON DELETE
   // CASCADE, drops a star if its slot is later removed from the lineup.
   .post('/api/v1/ui/events/:id/lineup/stars', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'lineup')
     const parsed = SetStarSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const { artistId, dayId } = parsed.data
@@ -80,7 +83,8 @@ export const setStarsRoutes = new Hono<HonoApp>()
 
   // --- DELETE unstar a set ------------------------------------------
   .delete('/api/v1/ui/events/:id/lineup/stars', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'lineup')
     const parsed = SetStarSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const { artistId, dayId } = parsed.data

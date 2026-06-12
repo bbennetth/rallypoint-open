@@ -73,6 +73,11 @@ body {
   max-width: 880px;
   margin: 0 auto;
 }
+/* Full-bleed opt-out: a page that needs the whole viewport (e.g. a kanban
+   board) marks its root with .plapp-full and the 880px cap lifts. */
+.plapp-content:has(.plapp-full) {
+  max-width: none;
+}
 .plapp .pl-topbar,
 .plapp .pl-tabbar {
   display: none;

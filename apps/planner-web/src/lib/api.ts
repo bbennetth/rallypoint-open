@@ -81,8 +81,6 @@ export interface TaskListDto {
   // Tasks rail.
   incompleteCount: number
   createdAt: string
-  /** True when this list is a planner-flagged shared list (not the actor's personal scope). */
-  shared?: boolean
 }
 
 export interface TaskItemDto {
@@ -275,15 +273,6 @@ export interface RecurringResponse {
 
 export async function listTaskLists(): Promise<TaskListDto[]> {
   return request<TaskListDto[]>('GET', '/api/v1/ui/lists')
-}
-
-/** Set or clear the actor's "show in planner" flag on a shared list. */
-export async function setListPlannerPref(listId: string, show: boolean): Promise<void> {
-  await request<void>(
-    'PUT',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/planner-pref`,
-    { show },
-  )
 }
 
 /** Set or clear the actor's "show in planner" flag on a group event. */
@@ -610,8 +599,6 @@ export interface MyDayTask {
   // Lists v2 typed custom-field values, keyed by field-def id. Rendered as
   // chips where present.
   customFields: Record<string, unknown>
-  /** True when the task belongs to a planner-flagged shared list. */
-  shared?: boolean
 }
 
 export interface MyDayEvent {
@@ -673,7 +660,7 @@ export async function getMyDay(date: string, tz: string): Promise<MyDay> {
 // DTOs are the same Lists/Events shapes as elsewhere.
 
 export type UpcomingItem =
-  | { kind: 'task'; task: MyDayTask; shared?: boolean }
+  | { kind: 'task'; task: MyDayTask }
   | { kind: 'event'; event: MyDayEvent }
   | { kind: 'eventDay'; eventDay: EventDayDto }
 

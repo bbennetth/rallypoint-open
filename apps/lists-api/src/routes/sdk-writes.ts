@@ -1,12 +1,13 @@
 import { Hono } from 'hono'
 import { ulid } from 'ulid'
 import {
-  CreateGroupSchema,
+  SdkCreateGroupSchema,
   CreateListSchema,
   CreateListItemSchema,
   CreateFieldDefSchema,
   UpdateFieldDefSchema,
   UpdateListItemSchema,
+  CreateCommentSchema,
   buildCreateOptions,
   mergeUpdateOptions,
   isSelectFieldType,
@@ -22,7 +23,9 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import type { GroupRecord, ListRecord, UpdateFieldDefInput, UpdateListItemInput } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
-import { serializeListDto, serializeListItemDto, serializeFieldDefDto } from './sdk-lists.js'
+import { serializeListDto, serializeListItemDto, serializeFieldDefDto, serializeCommentDto } from './sdk-lists.js'
+import { ensureStatuses, resolveStatus } from './_statuses.js'
+import { assertValidParent } from './_hierarchy.js'
 
 // Authenticated SDK WRITE surface peer apps (planner-api) call
 // server-to-server to manage a user's personal task lists. Mounted under
@@ -70,6 +73,7 @@ function serializeGroupDto(g: GroupRecord): Record<string, unknown> {
     id: g.id,
     name: g.name,
     description: g.description,
+    origin: g.origin,
     createdBy: g.createdBy,
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
@@ -123,13 +127,14 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
   // --- create a group (actor auto-enrolled owner) ------------------
   .post('/api/v1/sdk/groups', async (c) => {
     const actor = requireActor(c)
-    const parsed = CreateGroupSchema.safeParse(await readJsonBody(c))
+    const parsed = SdkCreateGroupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const group = await c.var.repos.groups.create({
       id: `lgr_${ulid()}`,
       tenantId: TENANT,
       name: parsed.data.name,
       description: parsed.data.description ?? null,
+      origin: parsed.data.origin ?? null,
       createdBy: actor,
       ownerMemberId: `lgm_${ulid()}`,
     })
@@ -215,6 +220,36 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       }
     }
 
+    // Custom statuses (RPL v1.0.0): resolve + dual-write the same way the
+    // UI create route does, so SDK-created items carry a status_id and the
+    // legacy `status` text stays in lockstep.
+    const resolved = isTasks
+      ? resolveStatus(await ensureStatuses(c, list.id, list.createdBy), {
+          statusId: body.statusId,
+          category: body.status,
+          fallbackCategory: 'todo',
+        })
+      : { statusId: null, status: null }
+
+    // Sub-item parent (RPL v1.0.0): validate same-list + depth (parity
+    // with the UI create route).
+    if (body.parentId !== undefined) {
+      await assertValidParent(c, list.id, null, body.parentId)
+    }
+
+    // Validate label ids before writing the item (parity with UI create).
+    const sdkCreateLabelIds = body.labelIds ?? []
+    if (sdkCreateLabelIds.length > 0) {
+      const liveLabels = await c.var.repos.listLabels.listForList(list.id)
+      const liveIds = new Set(liveLabels.map((l) => l.id))
+      const unknown = sdkCreateLabelIds.filter((id) => !liveIds.has(id))
+      if (unknown.length > 0) {
+        throw errors.validation({
+          issues: [{ code: 'custom', path: ['labelIds'], message: `Unknown or deleted label ids: ${unknown.join(', ')}` }],
+        })
+      }
+    }
+
     const item = await c.var.repos.listItems.create({
       id: `lit_${ulid()}`,
       tenantId: TENANT,
@@ -222,13 +257,18 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       title: body.title,
       notes: body.notes ?? null,
       assignedTo: body.assignedTo ?? null,
-      status: isTasks ? (body.status ?? 'todo') : null,
+      status: resolved.status,
+      statusId: resolved.statusId,
+      parentId: body.parentId ?? null,
       priority: isTasks ? body.priority : null,
       dueDate: isTasks && body.dueDate != null ? new Date(body.dueDate) : null,
       customFields: persistedFields,
       position: body.position,
       createdBy: actor,
     })
+    if (sdkCreateLabelIds.length > 0) {
+      await c.var.repos.listLabels.setItemLabels(item.id, sdkCreateLabelIds)
+    }
     return c.json(serializeListItemDto(item), 201)
   })
   // --- update / check-off an item ----------------------------------
@@ -257,11 +297,31 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     if (data.notes !== undefined) patch.notes = data.notes
     if (data.assignedTo !== undefined) patch.assignedTo = data.assignedTo
     if (data.completed !== undefined) patch.completed = data.completed
-    if (isTasks && data.status !== undefined) patch.status = data.status
+    // Custom statuses (RPL v1.0.0): resolve a status_id / legacy category
+    // change and dual-write both columns (parity with the UI PATCH).
+    if (isTasks && (data.statusId !== undefined || data.status !== undefined)) {
+      const resolved = resolveStatus(await ensureStatuses(c, list.id, list.createdBy), {
+        statusId: data.statusId,
+        category: data.status,
+      })
+      patch.statusId = resolved.statusId
+      patch.status = resolved.status
+    }
     if (isTasks && data.priority !== undefined) patch.priority = data.priority
     if (isTasks && data.dueDate !== undefined)
       patch.dueDate = data.dueDate === null ? null : new Date(data.dueDate)
     if (data.position !== undefined) patch.position = data.position
+    // Sub-item parent (RPL v1.0.0). null detaches; a real parent is
+    // validated (same-list, no self/cycle, within depth). No cross-list
+    // move on the SDK surface, so no orphaning branch is needed here.
+    if (data.parentId !== undefined) {
+      if (data.parentId === null) {
+        patch.parentId = null
+      } else {
+        await assertValidParent(c, list.id, item.id, data.parentId)
+        patch.parentId = data.parentId
+      }
+    }
 
     // Custom-field values merge onto the item's existing values (a `null`
     // clears that key), then the FINAL intended state is validated against
@@ -321,9 +381,31 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       }
     }
 
-    if (Object.keys(patch).length === 0) return c.json(serializeListItemDto(item))
+    // Labels (RPL v1.0.0 slice 12): validate + apply after the patch (parity
+    // with the UI PATCH route). SDK item DTO omits label_ids for now.
+    const sdkPatchLabelIds = data.labelIds
+    if (sdkPatchLabelIds !== undefined && sdkPatchLabelIds.length > 0) {
+      const liveLabels = await c.var.repos.listLabels.listForList(list.id)
+      const liveIds = new Set(liveLabels.map((l) => l.id))
+      const unknown = sdkPatchLabelIds.filter((id) => !liveIds.has(id))
+      if (unknown.length > 0) {
+        throw errors.validation({
+          issues: [{ code: 'custom', path: ['labelIds'], message: `Unknown or deleted label ids: ${unknown.join(', ')}` }],
+        })
+      }
+    }
+
+    if (Object.keys(patch).length === 0) {
+      if (sdkPatchLabelIds !== undefined) {
+        await c.var.repos.listLabels.setItemLabels(item.id, sdkPatchLabelIds)
+      }
+      return c.json(serializeListItemDto(item))
+    }
     const updated = await c.var.repos.listItems.update(itemId, patch)
     if (!updated) throw errors.itemNotFound()
+    if (sdkPatchLabelIds !== undefined) {
+      await c.var.repos.listLabels.setItemLabels(updated.id, sdkPatchLabelIds)
+    }
     return c.json(serializeListItemDto(updated))
   })
   // --- soft-delete an item -----------------------------------------
@@ -333,6 +415,9 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     const itemId = c.req.param('itemId')
     const item = await c.var.repos.listItems.findById(itemId)
     if (!item || item.listId !== list.id || item.deletedAt) throw errors.itemNotFound()
+    // Orphan children to top-level before soft-deleting (RPL v1.0.0),
+    // parity with the UI delete route.
+    await c.var.repos.listItems.clearChildParent(list.id, itemId)
     await c.var.repos.listItems.softDelete(itemId, new Date())
     return new Response(null, { status: 204 })
   })
@@ -422,4 +507,24 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     if (!def || def.deletedAt || def.listId !== list.id) throw errors.fieldDefNotFound()
     await c.var.repos.fieldDefs.softDelete(def.id, new Date())
     return new Response(null, { status: 204 })
+  })
+  // --- create a comment on an item ---------------------------------
+  // Author is the x-actor (the calling peer app has already authenticated
+  // them). The item must be live and belong to the list.
+  .post('/api/v1/sdk/lists/:listId/items/:itemId/comments', async (c) => {
+    const actor = requireActor(c)
+    const list = await loadListForActor(c, actor, c.req.param('listId'))
+    const itemId = c.req.param('itemId')
+    const item = await c.var.repos.listItems.findById(itemId)
+    if (!item || item.listId !== list.id || item.deletedAt) throw errors.itemNotFound()
+    const parsed = CreateCommentSchema.safeParse(await readJsonBody(c))
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const comment = await c.var.repos.listItemComments.create({
+      id: `lic_${ulid()}`,
+      tenantId: TENANT,
+      itemId,
+      authorId: actor,
+      body: parsed.data.body,
+    })
+    return c.json(serializeCommentDto(comment), 201)
   })

@@ -6,7 +6,7 @@ import { Banner, Button, Field } from '@rallypoint/ui'
 import { Turnstile } from '../ui/Turnstile.js'
 import { api } from '../api/client.js'
 import { apiValidationToFieldErrors, type FieldErrors, zodToFieldErrors } from '../lib/zod-errors.js'
-import { safeReturnTo } from '../lib/return-to.js'
+import { returnToLabel, safeReturnTo } from '../lib/return-to.js'
 
 export function SignupPage() {
   const [params] = useSearchParams()
@@ -82,7 +82,10 @@ export function SignupPage() {
         </Banner>
         <p className="text-sm text-[color:var(--ink-dim)]">
           Once you've verified, you'll be redirected to{' '}
-          <code className="text-[color:var(--ink)]">{returnTo}</code>.
+          <code className="break-all text-[color:var(--ink)]" title={returnTo}>
+            {returnToLabel(returnTo)}
+          </code>
+          .
         </p>
       </AuthCard>
     )

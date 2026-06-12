@@ -5,17 +5,6 @@
 
 import type { MyDayTask, MyDayEvent, EventDayDto, UpcomingItem } from './api.js'
 
-// ── My Day mode toggle ─────────────────────────────────────────────
-
-// My Day hosts two modes behind a segmented toggle: 'today' (the classic
-// roll-up) and 'upcoming' (the former Upcoming tab, folded in via #495).
-export type DayMode = 'today' | 'upcoming'
-
-// Normalize an untrusted ?mode= URL param value; anything unknown → 'today'.
-export function normalizeDayMode(s: unknown): DayMode {
-  return s === 'upcoming' ? 'upcoming' : 'today'
-}
-
 // ── local date / timezone ──────────────────────────────────────────
 
 // The browser's local calendar date (YYYY-MM-DD) + IANA timezone. Sent to the
@@ -368,6 +357,31 @@ export function groupUpcomingByDay(dated: UpcomingItem[], todayYmd: string): Upc
     g.items.push(item)
   }
   return groups
+}
+
+// Partition day-groups for the single-scroll agenda. `today` (and overdue)
+// items are already surfaced in the My Day roll-up above the feed, so the
+// "Coming up" list renders only `future` (diff ≥ 1) — this is what prevents
+// today's items from appearing twice on one page. `overdue`/`today` are kept
+// for callers that want them (e.g. the calendar, which needs the today cell
+// populated). Input order within each bucket is preserved.
+export interface AgendaGroups {
+  overdue: UpcomingGroup[]
+  today: UpcomingGroup[]
+  future: UpcomingGroup[]
+}
+
+export function splitAgendaGroups(groups: UpcomingGroup[], todayYmd: string): AgendaGroups {
+  const overdue: UpcomingGroup[] = []
+  const today: UpcomingGroup[] = []
+  const future: UpcomingGroup[] = []
+  for (const g of groups) {
+    const diff = dayDiff(g.ymd, todayYmd)
+    if (diff < 0) overdue.push(g)
+    else if (diff === 0) today.push(g)
+    else future.push(g)
+  }
+  return { overdue, today, future }
 }
 
 // ── Calendar view helpers ──────────────────────────────────────────

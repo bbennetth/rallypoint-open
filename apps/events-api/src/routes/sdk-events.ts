@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import {
   PublicPageConfigSchema,
+  resolveEventFeatures,
   type PublicPageConfig,
 } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
@@ -171,6 +172,7 @@ function serializeSessionDto(s: SessionRecord): Record<string, unknown> {
     title: s.title,
     description: s.description,
     dayId: s.dayId,
+    stageId: s.stageId,
     startTime: s.startTime,
     endTime: s.endTime,
     category: s.category,
@@ -236,6 +238,9 @@ export const sdkEventsRoutes = new Hono<HonoApp>()
   .get('/api/v1/sdk/events/:slug/lineup', async (c) => {
     const event = await c.var.repos.events.findBySlug(TENANT, c.req.param('slug'))
     gate(event)
+    // #216: the lineup toggle hides the feed everywhere, including the
+    // anonymous public page — same 404 shape as a disabled public page.
+    if (!resolveEventFeatures(event!.features).lineup) throw errors.eventNotFound()
     setCacheHeaders(c)
 
     const [stages, days, eventArtists] = await Promise.all([
@@ -265,6 +270,8 @@ export const sdkEventsRoutes = new Hono<HonoApp>()
   .get('/api/v1/sdk/events/:slug/sessions', async (c) => {
     const event = await c.var.repos.events.findBySlug(TENANT, c.req.param('slug'))
     gate(event)
+    // #216: same toggle gating as the lineup feed above.
+    if (!resolveEventFeatures(event!.features).sessions) throw errors.eventNotFound()
     setCacheHeaders(c)
 
     const dayId = c.req.query('day_id')

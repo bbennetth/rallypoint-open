@@ -55,6 +55,10 @@ const EnvSchema = z.object({
   // exist on this deployment). the local dev stack exports both to lists-api.
   EVENTS_API_KEY: z.string().min(32).optional(),
   PLANNER_API_KEY: z.string().min(32).optional(),
+  // The Lists MCP Worker presents this key to reach the SDK write surface
+  // (it acts on behalf of a user resolved from an MCP token). Separate from
+  // PLANNER_API_KEY so it is independently revocable. RPL v1.0.0 slice 11.
+  MCP_API_KEY: z.string().min(32).optional(),
 
   // Symmetric key material for sealing the RPID session bearer at rest
   // (crypto/encryption.ts). Active version is LISTS_SESSION_KEY_VERSION;
@@ -119,6 +123,9 @@ const DEV_EVENTS_API_KEY = 'dev-events-api-key-do-not-use-in-production-32+chars
 // MUST match apps/planner-api/src/env.ts DEV_API_KEY — the value
 // planner-api presents to lists-api's /sdk/* gate in the dev stack.
 const DEV_PLANNER_API_KEY = 'dev-planner-api-key-do-not-use-in-production-32+chars'
+// MUST match apps/lists-mcp/src/env.ts DEV_LISTS_API_KEY — the value the
+// MCP Worker presents to lists-api's /sdk/* gate in the dev stack.
+const DEV_MCP_API_KEY = 'dev-mcp-api-key-do-not-use-in-production-32+chars-x'
 
 export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const result = EnvSchema.safeParse(source)
@@ -155,6 +162,7 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
     // personal task lists (planner) without manual config.
     EVENTS_API_KEY: parsed.EVENTS_API_KEY ?? (isProd ? undefined : DEV_EVENTS_API_KEY),
     PLANNER_API_KEY: parsed.PLANNER_API_KEY ?? (isProd ? undefined : DEV_PLANNER_API_KEY),
+    MCP_API_KEY: parsed.MCP_API_KEY ?? (isProd ? undefined : DEV_MCP_API_KEY),
     LISTS_SESSION_KEY_V1: sessionKeyV1,
     REALTIME_TOKEN_HMAC_KEY: realtimeKey,
     LISTS_SESSION_COOKIE_NAME:

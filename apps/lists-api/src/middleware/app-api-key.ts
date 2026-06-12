@@ -21,7 +21,7 @@ import { ANTI_FINGERPRINT_NOT_FOUND } from '@rallypoint/shared'
 // (c.var.env), filters to those that are configured + non-empty, then applies
 // the anti-fingerprint / constant-time-compare posture.
 export function requireSdkKey(
-  opts: { keys: Array<'EVENTS_API_KEY' | 'PLANNER_API_KEY'> },
+  opts: { keys: Array<'EVENTS_API_KEY' | 'PLANNER_API_KEY' | 'MCP_API_KEY'> },
 ): MiddlewareHandler<HonoApp> {
   return async (c, next) => {
     const envObj: Env = c.var.env
@@ -94,8 +94,11 @@ function routeKey(method: string, rawPath: string): string {
 // app.use('/api/v1/sdk/*', sdkKeyGate) so there is no double-gating.
 export const sdkKeyGate: MiddlewareHandler<HonoApp> = async (c, next) => {
   const isEventsRead = EVENTS_READ_ROUTES.has(routeKey(c.req.method, c.req.path))
-  const keyNames: Array<'EVENTS_API_KEY' | 'PLANNER_API_KEY'> = isEventsRead
+  // Events read routes accept either events or planner keys. Every other
+  // /sdk/* route (the write surface + the MCP resolve-token + MCP-driven
+  // item/comment writes) accepts the planner key OR the MCP Worker's key.
+  const keyNames: Array<'EVENTS_API_KEY' | 'PLANNER_API_KEY' | 'MCP_API_KEY'> = isEventsRead
     ? ['EVENTS_API_KEY', 'PLANNER_API_KEY']
-    : ['PLANNER_API_KEY']
+    : ['PLANNER_API_KEY', 'MCP_API_KEY']
   await requireSdkKey({ keys: keyNames })(c, next)
 }

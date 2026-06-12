@@ -74,8 +74,20 @@ export function EventOwnerLayout({ userId }: { userId: string }) {
   }
 
   const { event } = state
+
+  // #440: the owner tab shell is for owners/editors. A viewer-role
+  // user deep-linking /events/:slug gets bounced to their attendee
+  // destination (group shell when they're in a group, else solo).
+  if (event.viewer_role === 'viewer') {
+    void navigate(
+      event.my_group_id ? `/groups/${event.my_group_id}` : `/events/${event.slug}/attending/now`,
+      { replace: true },
+    )
+    return null
+  }
+
   return (
-    <AppChrome eventContext={{ slug: event.slug, name: event.name }}>
+    <AppChrome eventContext={{ slug: event.slug, name: event.name, features: event.features }}>
       <Outlet context={{ event, reload: load, userId } satisfies EventOutlet} />
     </AppChrome>
   )

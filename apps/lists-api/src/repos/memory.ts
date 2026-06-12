@@ -3,6 +3,7 @@ import {
   occurrenceDueDate,
   MAX_INSTANCES_PER_SERIES,
   statusMirrorsCompleted,
+  type StatusCategory,
   type ValidatedFilter,
   type ValidatedSort,
 } from '@rallypoint/lists-shared'
@@ -13,6 +14,7 @@ import type {
   AddGroupMemberInput,
   CreateFieldDefInput,
   CreateGroupInput,
+  CreateLabelInput,
   CreateListInput,
   CreateListItemInput,
   CreateListItemSeriesInput,
@@ -27,7 +29,16 @@ import type {
   ListItemRepo,
   ListItemSeriesRecord,
   ListItemSeriesRepo,
-  ListPlannerPrefRepo,
+  ListLabelRecord,
+  ListLabelRepo,
+  CreateListStatusInput,
+  ListStatusRecord,
+  ListStatusRepo,
+  UpdateLabelInput,
+  UpdateListStatusInput,
+  CreateMcpTokenInput,
+  McpTokenRecord,
+  McpTokenRepo,
   ListRecord,
   ListRepo,
   ListScope,
@@ -44,6 +55,10 @@ import type {
   UpdateListItemInput,
   UpdateListItemSeriesInput,
   UpdateListViewInput,
+  CreateListItemCommentInput,
+  ListItemCommentRecord,
+  ListItemCommentRepo,
+  UpdateListItemCommentInput,
 } from './types.js'
 import { UniqueConstraintError } from './errors.js'
 
@@ -277,6 +292,8 @@ export class MemoryListItemRepo implements ListItemRepo {
       completed: completedFromStatus,
       completedAt: completedFromStatus ? now : null,
       status,
+      statusId: input.statusId ?? null,
+      parentId: input.parentId ?? null,
       priority: input.priority ?? null,
       dueDate: input.dueDate ?? null,
       customFields: input.customFields ?? {},
@@ -348,6 +365,11 @@ export class MemoryListItemRepo implements ListItemRepo {
         r.completedAt = completed ? new Date() : null
       }
     }
+    // Custom-status linkage (RPL v1.0.0). The route dual-writes `status`
+    // above for the completed mirror; here we just track the id.
+    if (fields.statusId !== undefined) r.statusId = fields.statusId
+    // Sub-item parent (RPL v1.0.0).
+    if (fields.parentId !== undefined) r.parentId = fields.parentId
     // Cross-list move: re-home and re-append unless a position is pinned.
     if (fields.listId !== undefined) {
       r.listId = fields.listId
@@ -411,6 +433,24 @@ export class MemoryListItemRepo implements ListItemRepo {
       deleted.push(id)
     }
     return deleted
+  }
+
+  async clearChildParent(listId: string, parentId: string): Promise<number> {
+    return this.bulkClearChildParent(listId, [parentId])
+  }
+
+  async bulkClearChildParent(listId: string, parentIds: string[]): Promise<number> {
+    if (parentIds.length === 0) return 0
+    const targets = new Set(parentIds)
+    let count = 0
+    for (const r of this.byId.values()) {
+      if (r.listId !== listId || r.deletedAt !== null) continue
+      if (r.parentId === null || !targets.has(r.parentId)) continue
+      r.parentId = null
+      r.updatedAt = new Date()
+      count++
+    }
+    return count
   }
 }
 
@@ -578,6 +618,7 @@ export class MemoryGroupRepo implements GroupRepo {
       tenantId: input.tenantId,
       name: input.name,
       description: input.description ?? null,
+      origin: input.origin ?? null,
       createdBy: input.createdBy,
       createdAt: now,
       updatedAt: now,
@@ -778,6 +819,8 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
           completed: false,
           completedAt: null,
           status: 'todo' as import('@rallypoint/lists-shared').TaskStatus,
+          statusId: null,
+          parentId: null,
           priority: taskPriority,
           dueDate,
           customFields: {} as Record<string, unknown>,
@@ -896,6 +939,8 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
           completed: false,
           completedAt: null,
           status: 'todo' as import('@rallypoint/lists-shared').TaskStatus,
+          statusId: null,
+          parentId: null,
           priority: taskPriority,
           dueDate,
           customFields: {} as Record<string, unknown>,
@@ -946,23 +991,322 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
   }
 }
 
-export class MemoryListPlannerPrefRepo implements ListPlannerPrefRepo {
-  // keyed `${userId}:${listId}` → show
-  private prefs = new Map<string, boolean>()
+export class MemoryListStatusRepo implements ListStatusRepo {
+  private byId = new Map<string, ListStatusRecord>()
+  // Back-ref wired in buildMemoryRepos so reassignItems can re-point items
+  // (mirrors series.items). Optional so a bare repo still constructs.
+  items?: MemoryListItemRepo
 
-  async upsert(userId: string, listId: string, show: boolean): Promise<void> {
-    this.prefs.set(`${userId}:${listId}`, show)
+  async create(input: CreateListStatusInput): Promise<ListStatusRecord> {
+    const now = new Date()
+    const position =
+      input.position ??
+      [...this.byId.values()]
+        .filter((s) => s.listId === input.listId)
+        .reduce((max, s) => Math.max(max, s.position), -1) + 1
+    const rec: ListStatusRecord = {
+      id: input.id,
+      tenantId: input.tenantId,
+      listId: input.listId,
+      name: input.name,
+      color: input.color ?? null,
+      category: input.category,
+      position,
+      createdBy: input.createdBy,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    }
+    this.byId.set(rec.id, rec)
+    return { ...rec }
   }
 
-  async flaggedListIdsForActor(userId: string): Promise<string[]> {
-    const prefix = `${userId}:`
-    const result: string[] = []
-    for (const [key, show] of this.prefs) {
-      if (show && key.startsWith(prefix)) {
-        result.push(key.slice(prefix.length))
-      }
+  async findById(id: string): Promise<ListStatusRecord | null> {
+    const r = this.byId.get(id)
+    return r ? { ...r } : null
+  }
+
+  async listForList(
+    listId: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<ListStatusRecord[]> {
+    return [...this.byId.values()]
+      .filter((s) => s.listId === listId && (opts.includeDeleted || s.deletedAt === null))
+      .sort((a, b) => {
+        if (a.position !== b.position) return a.position - b.position
+        const at = a.createdAt.toISOString()
+        const bt = b.createdAt.toISOString()
+        if (at !== bt) return at < bt ? -1 : 1
+        return a.id < b.id ? -1 : 1
+      })
+      .map((s) => ({ ...s }))
+  }
+
+  async seedDefaults(
+    listId: string,
+    tenantId: string,
+    createdBy: string,
+    seeds: { id: string; name: string; color: string; category: StatusCategory }[],
+  ): Promise<ListStatusRecord[]> {
+    const out: ListStatusRecord[] = []
+    for (let i = 0; i < seeds.length; i++) {
+      const s = seeds[i]!
+      out.push(
+        await this.create({
+          id: s.id,
+          tenantId,
+          listId,
+          name: s.name,
+          color: s.color,
+          category: s.category,
+          position: i,
+          createdBy,
+        }),
+      )
+    }
+    return out
+  }
+
+  async update(id: string, fields: UpdateListStatusInput): Promise<ListStatusRecord | null> {
+    const r = this.byId.get(id)
+    if (!r) return null
+    if (fields.name !== undefined) r.name = fields.name
+    if (fields.color !== undefined) r.color = fields.color
+    if (fields.category !== undefined) r.category = fields.category
+    if (fields.position !== undefined) r.position = fields.position
+    r.updatedAt = new Date()
+    return { ...r }
+  }
+
+  async softDelete(id: string, when: Date): Promise<void> {
+    const r = this.byId.get(id)
+    if (r) {
+      r.deletedAt = when
+      r.updatedAt = new Date()
+    }
+  }
+
+  async reassignItems(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+  ): Promise<number> {
+    if (!this.items) return 0
+    const items = await this.items.listForList(listId, {})
+    let count = 0
+    for (const item of items) {
+      if (item.statusId !== fromStatusId) continue
+      await this.items.update(item.id, {
+        statusId: to.statusId,
+        status: to.status,
+        completed: to.completed,
+      })
+      count++
+    }
+    return count
+  }
+}
+
+export class MemoryListItemCommentRepo implements ListItemCommentRepo {
+  private byId = new Map<string, ListItemCommentRecord>()
+
+  async create(input: CreateListItemCommentInput): Promise<ListItemCommentRecord> {
+    const now = new Date()
+    const rec: ListItemCommentRecord = {
+      id: input.id,
+      tenantId: input.tenantId,
+      itemId: input.itemId,
+      authorId: input.authorId,
+      body: input.body,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    }
+    this.byId.set(rec.id, rec)
+    return { ...rec }
+  }
+
+  async findById(id: string): Promise<ListItemCommentRecord | null> {
+    const r = this.byId.get(id)
+    return r ? { ...r } : null
+  }
+
+  async listForItem(
+    itemId: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<ListItemCommentRecord[]> {
+    return [...this.byId.values()]
+      .filter((c) => c.itemId === itemId && (opts.includeDeleted || c.deletedAt === null))
+      .sort((a, b) => {
+        const at = a.createdAt.toISOString()
+        const bt = b.createdAt.toISOString()
+        if (at !== bt) return at < bt ? -1 : 1
+        return a.id < b.id ? -1 : 1
+      })
+      .map((c) => ({ ...c }))
+  }
+
+  async update(id: string, fields: UpdateListItemCommentInput): Promise<ListItemCommentRecord | null> {
+    const r = this.byId.get(id)
+    if (!r) return null
+    if (fields.body !== undefined) r.body = fields.body
+    r.updatedAt = new Date()
+    return { ...r }
+  }
+
+  async softDelete(id: string, when: Date): Promise<void> {
+    const r = this.byId.get(id)
+    if (r) {
+      r.deletedAt = when
+      r.updatedAt = new Date()
+    }
+  }
+}
+
+export class MemoryListLabelRepo implements ListLabelRepo {
+  private byId = new Map<string, ListLabelRecord>()
+  // join rows stored as flat array of {itemId, labelId} pairs
+  private joins: { itemId: string; labelId: string }[] = []
+
+  async create(input: CreateLabelInput): Promise<ListLabelRecord> {
+    const now = new Date()
+    const position =
+      input.position ??
+      [...this.byId.values()]
+        .filter((l) => l.listId === input.listId)
+        .reduce((max, l) => Math.max(max, l.position), -1) + 1
+    const rec: ListLabelRecord = {
+      id: input.id,
+      tenantId: input.tenantId,
+      listId: input.listId,
+      name: input.name,
+      color: input.color ?? null,
+      position,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    }
+    this.byId.set(rec.id, rec)
+    return { ...rec }
+  }
+
+  async findById(id: string): Promise<ListLabelRecord | null> {
+    const r = this.byId.get(id)
+    return r ? { ...r } : null
+  }
+
+  async listForList(
+    listId: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<ListLabelRecord[]> {
+    return [...this.byId.values()]
+      .filter((l) => l.listId === listId && (opts.includeDeleted || l.deletedAt === null))
+      .sort((a, b) => {
+        if (a.position !== b.position) return a.position - b.position
+        const at = a.createdAt.toISOString()
+        const bt = b.createdAt.toISOString()
+        if (at !== bt) return at < bt ? -1 : 1
+        return a.id < b.id ? -1 : 1
+      })
+      .map((l) => ({ ...l }))
+  }
+
+  async update(id: string, fields: UpdateLabelInput): Promise<ListLabelRecord | null> {
+    const r = this.byId.get(id)
+    if (!r) return null
+    if (fields.name !== undefined) r.name = fields.name
+    if (fields.color !== undefined) r.color = fields.color
+    if (fields.position !== undefined) r.position = fields.position
+    r.updatedAt = new Date()
+    return { ...r }
+  }
+
+  async softDelete(id: string, when: Date): Promise<void> {
+    const r = this.byId.get(id)
+    if (r) {
+      r.deletedAt = when
+      r.updatedAt = new Date()
+    }
+  }
+
+  async setItemLabels(itemId: string, labelIds: string[]): Promise<void> {
+    this.joins = this.joins.filter((j) => j.itemId !== itemId)
+    // Dedupe defensively (the composite PK would reject dupes in D1; the
+    // route validator dedupes too, but a direct repo call shouldn't be able
+    // to accumulate duplicate join rows).
+    for (const labelId of new Set(labelIds)) {
+      this.joins.push({ itemId, labelId })
+    }
+  }
+
+  async labelsForItems(itemIds: string[]): Promise<Map<string, string[]>> {
+    const ids = new Set(itemIds)
+    const result = new Map<string, string[]>()
+    for (const j of this.joins) {
+      if (!ids.has(j.itemId)) continue
+      // Mirror the D1 join: a soft-deleted label must not surface on items.
+      const label = this.byId.get(j.labelId)
+      if (!label || label.deletedAt !== null) continue
+      const arr = result.get(j.itemId) ?? []
+      arr.push(j.labelId)
+      result.set(j.itemId, arr)
     }
     return result
+  }
+
+  async removeLabelFromAllItems(labelId: string): Promise<void> {
+    this.joins = this.joins.filter((j) => j.labelId !== labelId)
+  }
+}
+
+export class MemoryMcpTokenRepo implements McpTokenRepo {
+  private byId = new Map<string, McpTokenRecord>()
+
+  async create(input: CreateMcpTokenInput): Promise<McpTokenRecord> {
+    const rec: McpTokenRecord = {
+      id: input.id,
+      tenantId: input.tenantId,
+      idHash: input.idHash,
+      userId: input.userId,
+      label: input.label,
+      createdAt: new Date(),
+      lastUsedAt: null,
+      expiresAt: input.expiresAt ?? null,
+      revokedAt: null,
+    }
+    this.byId.set(rec.id, rec)
+    return { ...rec }
+  }
+
+  async findByHash(idHash: string): Promise<McpTokenRecord | null> {
+    for (const t of this.byId.values()) {
+      if (t.idHash === idHash) return { ...t }
+    }
+    return null
+  }
+
+  async listForUser(userId: string): Promise<McpTokenRecord[]> {
+    return [...this.byId.values()]
+      .filter((t) => t.userId === userId)
+      .sort((a, b) => {
+        const at = a.createdAt.getTime()
+        const bt = b.createdAt.getTime()
+        if (at !== bt) return bt - at
+        return a.id < b.id ? 1 : -1
+      })
+      .map((t) => ({ ...t }))
+  }
+
+  async touchLastUsed(id: string, when: Date): Promise<void> {
+    const t = this.byId.get(id)
+    if (t) t.lastUsedAt = when
+  }
+
+  async revoke(id: string, userId: string, when: Date): Promise<boolean> {
+    const t = this.byId.get(id)
+    if (!t || t.userId !== userId || t.revokedAt !== null) return false
+    t.revokedAt = when
+    return true
   }
 }
 
@@ -977,17 +1321,22 @@ export function buildMemoryRepos(): Repos {
   const listItems = new MemoryListItemRepo()
   const series = new MemoryListItemSeriesRepo()
   series.items = listItems
+  const listStatuses = new MemoryListStatusRepo()
+  listStatuses.items = listItems
   return {
     lists,
     listItems,
     fieldDefs: new MemoryFieldDefRepo(),
+    listStatuses,
     listViews: new MemoryListViewRepo(),
     groups: new MemoryGroupRepo(),
     listShares,
     listInvites,
     sessions: new MemoryListsSessionRepo(),
     series,
-    listPlannerPrefs: new MemoryListPlannerPrefRepo(),
+    listItemComments: new MemoryListItemCommentRepo(),
+    listLabels: new MemoryListLabelRepo(),
+    mcpTokens: new MemoryMcpTokenRepo(),
     rateLimit: new InMemoryRateLimitRepo(),
   }
 }

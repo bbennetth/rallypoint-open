@@ -34,6 +34,9 @@ export interface EventRecord {
   locationLng: string | null
   privacyMode: PrivacyMode
   publicPageConfig: unknown | null
+  // #216 per-event feature toggles; raw JSON, resolved by
+  // resolveEventFeatures at the route boundary. Never read raw.
+  features: unknown | null
   // Slice 2 (planner personal events).
   scopeType: ScopeType
   startAt: Date | null
@@ -95,6 +98,8 @@ export interface PatchEventInput {
   // Slice 11. The schema is enforced by PublicPageConfigSchema at the
   // route boundary; the repo persists the parsed jsonb verbatim.
   publicPageConfig?: unknown | null | undefined
+  // #216 feature toggles; the route stores the fully-merged object.
+  features?: unknown | null | undefined
   // Slice 3b (ticket platform metadata).
   ticketPlatform?: string | null | undefined
   ticketAccountEmail?: string | null | undefined
@@ -541,6 +546,7 @@ export interface SessionRecord {
   description: string | null
   location: string | null
   dayId: string | null
+  stageId: string | null
   startTime: string | null
   endTime: string | null
   category: string | null
@@ -565,6 +571,7 @@ export interface CreateSessionInput {
   description?: string | null
   location?: string | null
   dayId?: string | null
+  stageId?: string | null
   startTime?: string | null
   endTime?: string | null
   category?: string | null
@@ -591,6 +598,7 @@ export interface PatchSessionInput {
   description?: string | null | undefined
   location?: string | null | undefined
   dayId?: string | null | undefined
+  stageId?: string | null | undefined
   startTime?: string | null | undefined
   endTime?: string | null | undefined
   category?: string | null | undefined
@@ -828,6 +836,9 @@ export interface GroupRecord {
   startDate: string | null
   endDate: string | null
   joinCodeHash: string
+  // #440: 6-char human-friendly code; null for pre-#440 rows until
+  // lazily backfilled.
+  shortCode: string | null
   ownerUserId: string
   createdAt: Date
   updatedAt: Date
@@ -841,6 +852,7 @@ export interface CreateGroupInput {
   startDate?: string | null
   endDate?: string | null
   joinCodeHash: string
+  shortCode?: string | null
   ownerUserId: string
 }
 
@@ -862,6 +874,15 @@ export interface GroupRepo {
   // Backs the join-by-code resolver's FIRST lookup (design §5.5):
   // an active group join code wins over a stale invite.
   findByJoinCodeHash(joinCodeHash: string): Promise<GroupRecord | null>
+  // #440: 6-char short-code lookup (uppercase, pre-normalized).
+  findByShortCode(shortCode: string): Promise<GroupRecord | null>
+  // #440: one batched lookup backing My Events' attendee routing —
+  // for each of the given events, the FIRST group (by join order)
+  // the user is a member of. Map key = eventId, value = groupId.
+  listUserGroupIdsByEvent(userId: string, eventIds: string[]): Promise<Map<string, string>>
+  // #440: lazy backfill for pre-#440 groups. Throws
+  // UniqueConstraintError on a collision so the caller can retry.
+  setShortCode(id: string, shortCode: string): Promise<GroupRecord | null>
   listForEvent(eventId: string): Promise<GroupRecord[]>
   patch(id: string, fields: PatchGroupInput): Promise<GroupRecord | null>
   // Hard-delete a group. group_members + group_invites disappear via their

@@ -13,10 +13,17 @@ import { gridKeyAction } from '../lib/grid-keys.js'
 
 interface GridViewProps {
   items: ListItemDto[]
+  // Per-item nesting depth for sub-item indentation (RPL v1.0.0 S5); absent
+  // or 0 renders flush-left. The grid shows the tree fully expanded.
+  depthOf?: Map<string, number>
   members: GroupMemberDto[]
   fieldDefs: FieldDefDto[]
   selectedIds: Set<string>
   onSelect: (itemId: string, on: boolean) => void
+  // Shift-click on a row's select box — extend the selection to that row.
+  onRangeSelect?: (itemId: string) => void
+  // Esc clears the whole selection.
+  onClearSelection?: () => void
   onToggleComplete: (itemId: string, completed: boolean) => void
   onRename: (itemId: string, title: string) => void
   onAssign: (itemId: string, assignedTo: string) => void
@@ -28,10 +35,13 @@ const HEAD = 'border-b border-r px-2 py-1 text-left font-semibold'
 
 export function GridView({
   items,
+  depthOf,
   members,
   fieldDefs,
   selectedIds,
   onSelect,
+  onRangeSelect,
+  onClearSelection,
   onToggleComplete,
   onRename,
   onAssign,
@@ -50,6 +60,12 @@ export function GridView({
     // literal "j" into a title must not navigate.
     const tag = (e.target as HTMLElement).tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+
+    if (e.key === 'Escape' && onClearSelection) {
+      e.preventDefault()
+      onClearSelection()
+      return
+    }
 
     const action = gridKeyAction(e.key, { activeRow, rowCount: items.length })
     if (action.type === 'none') return
@@ -111,10 +127,16 @@ export function GridView({
                 <input
                   type="checkbox"
                   checked={selectedIds.has(item.id)}
+                  onClick={(e) => {
+                    if (e.shiftKey && onRangeSelect) {
+                      e.preventDefault()
+                      onRangeSelect(item.id)
+                    }
+                  }}
                   onChange={(e) => onSelect(item.id, e.target.checked)}
                   className="h-4 w-4"
                   style={{ accentColor: 'var(--hot)' }}
-                  title="Select for bulk actions"
+                  title="Select for bulk actions (shift-click for a range)"
                   aria-label={selectedIds.has(item.id) ? 'Deselect item' : 'Select item'}
                 />
               </td>
@@ -129,7 +151,14 @@ export function GridView({
                   aria-label={item.completed ? 'Mark incomplete' : 'Mark complete'}
                 />
               </td>
-              <td className={CELL} style={{ borderColor: 'var(--line)', minWidth: 160 }}>
+              <td
+                className={CELL}
+                style={{
+                  borderColor: 'var(--line)',
+                  minWidth: 160,
+                  paddingLeft: 8 + (depthOf?.get(item.id) ?? 0) * 16,
+                }}
+              >
                 <TitleCell
                   ref={(el) => {
                     titleRefs.current[index] = el

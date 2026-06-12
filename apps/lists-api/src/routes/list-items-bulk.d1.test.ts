@@ -173,6 +173,45 @@ describe('D1 integration — bulk item actions', () => {
     expect(byId.get(c)!.completed).toBe(false)
   })
 
+  it('bulk-sets a custom status across items, mirroring completed off its category (S6)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bs`)
+    const listId = await makeList(bearer) // tasks list
+    const a = await makeItem(bearer, listId, 'A')
+    const b = await makeItem(bearer, listId, 'B')
+
+    // Reading statuses lazy-seeds the three defaults; pick the done one.
+    const stRes = await req(bearer, 'GET', `/api/v1/ui/lists/${listId}/statuses`)
+    expect(stRes.status).toBe(200)
+    const statuses = ((await stRes.json()) as {
+      items: Array<{ id: string; category: string }>
+    }).items
+    const done = statuses.find((s) => s.category === 'done')!
+    expect(done).toBeTruthy()
+    published = []
+
+    const res = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items/bulk`, {
+      action: 'update',
+      itemIds: [a, b],
+      patch: { statusId: done.id },
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { count: number }).count).toBe(2)
+    // One coalesced realtime frame for the whole batch.
+    expect(published).toHaveLength(1)
+
+    const after = await req(bearer, 'GET', `/api/v1/ui/lists/${listId}/items`)
+    const rows = ((await after.json()) as {
+      items: Array<{ id: string; status_id: string | null; status: string | null; completed: boolean }>
+    }).items
+    const byId = new Map(rows.map((i) => [i.id, i]))
+    for (const id of [a, b]) {
+      expect(byId.get(id)!.status_id).toBe(done.id)
+      // The done category mirrors completed + dual-writes the legacy text.
+      expect(byId.get(id)!.completed).toBe(true)
+      expect(byId.get(id)!.status).toBe('done')
+    }
+  })
+
   it('returns ids in input order for a base-only batch (single-UPDATE path, #247)', async () => {
     const bearer = await loginAs(`user_${Date.now()}_ord`)
     const listId = await makeList(bearer)

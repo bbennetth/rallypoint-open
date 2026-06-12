@@ -24,6 +24,10 @@ export const listGroups = sqliteTable(
     tenantId: text('tenant_id').notNull().default('rallypoint'),
     name: text('name').notNull(),
     description: text('description'),
+    // Provenance discriminator: 'planner' for groups provisioned by the
+    // Planner BFF (read-only on the Lists UI surface); NULL for groups
+    // created in the Lists app. Nullable for expand/contract safety.
+    origin: text('origin'),
     createdBy: text('created_by').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()

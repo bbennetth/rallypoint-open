@@ -2,7 +2,8 @@ import { Hono } from 'hono'
 import { scopeTypeField, scopeIdField } from '@rallypoint/lists-shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
-import type { FieldDefRecord, ListItemRecord, ListRecord } from '../repos/types.js'
+import type { FieldDefRecord, ListItemCommentRecord, ListItemRecord, ListLabelRecord, ListRecord, ListStatusRecord } from '../repos/types.js'
+import { ensureStatuses } from './_statuses.js'
 
 // The /api/v1/sdk/lists surface peer apps (events-api) call server-to-server.
 // Gated by requireSdkKey in build-app — cookieless, key-authenticated. The
@@ -45,6 +46,8 @@ export function serializeListItemDto(i: ListItemRecord): Record<string, unknown>
     completed: i.completed,
     completedAt: i.completedAt ? i.completedAt.toISOString() : null,
     status: i.status,
+    statusId: i.statusId,
+    parentId: i.parentId,
     priority: i.priority,
     dueDate: i.dueDate ? i.dueDate.toISOString() : null,
     position: i.position,
@@ -73,6 +76,50 @@ export function serializeFieldDefDto(d: FieldDefRecord): Record<string, unknown>
     createdBy: d.createdBy,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
+  }
+}
+
+// camelCase mirror of the UI surface's snake_case serializeStatus
+// (routes/statuses.ts). A peer app / the MCP server needs the status set
+// to interpret an item's statusId (id → name/category/color).
+export function serializeListStatusDto(s: ListStatusRecord): Record<string, unknown> {
+  return {
+    id: s.id,
+    listId: s.listId,
+    name: s.name,
+    color: s.color,
+    category: s.category,
+    position: s.position,
+    createdBy: s.createdBy,
+    createdAt: s.createdAt.toISOString(),
+    updatedAt: s.updatedAt.toISOString(),
+  }
+}
+
+// camelCase wire shape for a label (mirrors the UI surface's snake_case
+// serializeLabel in routes/labels.ts). No deletedAt surfaced.
+export function serializeLabelDto(l: ListLabelRecord): Record<string, unknown> {
+  return {
+    id: l.id,
+    listId: l.listId,
+    name: l.name,
+    color: l.color,
+    position: l.position,
+    createdAt: l.createdAt.toISOString(),
+    updatedAt: l.updatedAt.toISOString(),
+  }
+}
+
+// camelCase wire shape for a comment (mirrors the UI surface's snake_case
+// serializeComment in routes/comments.ts). No deletedAt surfaced.
+export function serializeCommentDto(c: ListItemCommentRecord): Record<string, unknown> {
+  return {
+    id: c.id,
+    itemId: c.itemId,
+    authorId: c.authorId,
+    body: c.body,
+    createdAt: c.createdAt.toISOString(),
+    updatedAt: c.updatedAt.toISOString(),
   }
 }
 
@@ -124,4 +171,39 @@ export const sdkListsRoutes = new Hono<HonoApp>()
     if (list.visibility === 'private') throw errors.listNotFound()
     const rows = await c.var.repos.fieldDefs.listForList(list.id)
     return c.json(rows.map(serializeFieldDefDto))
+  })
+  // --- statuses (by list) ------------------------------------------
+  // The per-list custom-status set, needed to interpret an item's
+  // statusId. PLANNER_API_KEY-gated (not in the events read-set). Lazily
+  // seeds the defaults using the list owner as the seeding actor.
+  .get('/api/v1/sdk/lists/:listId/statuses', async (c) => {
+    const list = await c.var.repos.lists.findById(c.req.param('listId'))
+    if (!list || list.deletedAt) throw errors.listNotFound()
+    if (list.visibility === 'private') throw errors.listNotFound()
+    const rows = await ensureStatuses(c, list.id, list.createdBy)
+    return c.json(rows.map(serializeListStatusDto))
+  })
+  // --- comments (by item) ------------------------------------------
+  // Live comments for a specific item, oldest-first. PLANNER_API_KEY-
+  // gated. The caller has already confirmed the item belongs to a list
+  // it is authorized for; lists-api verifies the list and item are live.
+  .get('/api/v1/sdk/lists/:listId/items/:itemId/comments', async (c) => {
+    const list = await c.var.repos.lists.findById(c.req.param('listId'))
+    if (!list || list.deletedAt) throw errors.listNotFound()
+    if (list.visibility === 'private') throw errors.listNotFound()
+    const item = await c.var.repos.listItems.findById(c.req.param('itemId'))
+    if (!item || item.listId !== list.id || item.deletedAt) throw errors.itemNotFound()
+    const rows = await c.var.repos.listItemComments.listForItem(item.id)
+    return c.json(rows.map(serializeCommentDto))
+  })
+  // --- labels (by list) --------------------------------------------
+  // The per-list label set, needed to interpret an item's label_ids.
+  // PLANNER_API_KEY-gated. Same live-only / non-private gating as
+  // statuses.
+  .get('/api/v1/sdk/lists/:listId/labels', async (c) => {
+    const list = await c.var.repos.lists.findById(c.req.param('listId'))
+    if (!list || list.deletedAt) throw errors.listNotFound()
+    if (list.visibility === 'private') throw errors.listNotFound()
+    const rows = await c.var.repos.listLabels.listForList(list.id)
+    return c.json(rows.map(serializeLabelDto))
   })

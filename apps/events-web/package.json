@@ -17,6 +17,7 @@
     "dexie": "^4.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-qr-code": "^2.2.0",
     "react-router-dom": "^7.1.0",
     "zustand": "^5.0.0"
   },

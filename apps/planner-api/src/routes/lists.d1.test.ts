@@ -47,8 +47,6 @@ interface FakeLists {
   // Seed a notes list inside the given actor's personal group (provisioning the
   // group if it doesn't exist yet). Returns the notes list id.
   seedNotesListForActor(actor: string): string
-  // Seed a shared list flagged show_in_planner for the given actor. Returns the list id.
-  seedSharedPlannerList(actor: string, opts?: { listId?: string }): string
 }
 
 function isoNow(): string {
@@ -62,8 +60,6 @@ function makeFakeLists(): FakeLists {
   const series: ListItemSeriesDto[] = []
   const fieldDefs: FieldDefDto[] = []
   const calls: { method: string; actor?: string; args: unknown[] }[] = []
-  // actor → set of list ids flagged show_in_planner=true
-  const plannerPrefs = new Map<string, Set<string>>()
 
   function ownsGroup(actor: string, scopeId: string): boolean {
     return groups.some((g) => g.id === scopeId && g.createdBy === actor)
@@ -311,21 +307,6 @@ function makeFakeLists(): FakeLists {
       if (idx === -1) throw new ListsClientError(404, 'not_found', 'List not found.')
       lists.splice(idx, 1)
     },
-    listPlannerLists: async (actor: string) => {
-      calls.push({ method: 'listPlannerLists', actor, args: [] })
-      const flagged = plannerPrefs.get(actor) ?? new Set<string>()
-      return lists.filter((l) => flagged.has(l.id))
-    },
-    setListPlannerPref: async (listId: string, show: boolean, actor: string) => {
-      calls.push({ method: 'setListPlannerPref', actor, args: [listId, show] })
-      let prefs = plannerPrefs.get(actor)
-      if (!prefs) {
-        prefs = new Set()
-        plannerPrefs.set(actor, prefs)
-      }
-      if (show) prefs.add(listId)
-      else prefs.delete(listId)
-    },
   }
 
   return {
@@ -436,31 +417,6 @@ function makeFakeLists(): FakeLists {
       }
       lists.push(l)
       return l.id
-    },
-    seedSharedPlannerList(actor: string, opts?: { listId?: string }): string {
-      const listId = opts?.listId ?? `lst_shared_for_${actor}`
-      if (!lists.some((l) => l.id === listId)) {
-        lists.push({
-          id: listId,
-          scopeType: 'group',
-          scopeId: `grp_shared_${listId}`,
-          listType: 'tasks',
-          name: `Shared ${listId}`,
-          visibility: 'all',
-          color: null,
-          incompleteCount: 0,
-          createdBy: 'user_shared_owner',
-          createdAt: isoNow(),
-          updatedAt: isoNow(),
-        })
-      }
-      let prefs = plannerPrefs.get(actor)
-      if (!prefs) {
-        prefs = new Set()
-        plannerPrefs.set(actor, prefs)
-      }
-      prefs.add(listId)
-      return listId
     },
   }
 }
@@ -1104,41 +1060,11 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect(fake.calls.some((c) => c.method === 'deleteList')).toBe(false)
   })
 
-  // --- planner-flagged shared lists (issue #388) ----------------------
+  // --- RPL↔RPP separation (#531): no shared lists in Planner ----------
 
-  it('GET /lists includes flagged shared lists marked shared:true', async () => {
-    const bearer = await loginAs('user_sl1')
-    // Personal list.
-    await createList(bearer, 'My List')
-    // Shared list flagged in planner for this actor.
-    const sharedId = fake.seedSharedPlannerList('user_sl1')
-
-    const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-    expect(res.status).toBe(200)
-    const rows = (await res.json()) as { id: string; shared?: boolean }[]
-
-    const personalRow = rows.find((l) => l.id !== sharedId)
-    expect(personalRow?.shared).toBeFalsy()
-
-    const sharedRow = rows.find((l) => l.id === sharedId)
-    expect(sharedRow).toBeDefined()
-    expect(sharedRow?.shared).toBe(true)
-  })
-
-  it('GET /lists/:listId/items allows a flagged shared list', async () => {
-    const bearer = await loginAs('user_sl2')
-    const sharedId = fake.seedSharedPlannerList('user_sl2')
-
-    const res = await app.request(
-      `http://localhost/api/v1/ui/lists/${sharedId}/items`,
-      { headers: headers(bearer) },
-    )
-    expect(res.status).toBe(200)
-  })
-
-  it('GET /lists/:listId/items 404s for a non-personal, non-flagged list (IDOR guard)', async () => {
+  it('GET /lists/:listId/items 404s for a non-personal list (IDOR guard)', async () => {
     const bearer = await loginAs('user_sl3')
-    // A foreign list that is NOT flagged for this actor.
+    // A foreign list — never reachable now that flagged shared lists are gone.
     const foreignId = fake.seedForeignList()
 
     const res = await app.request(
@@ -1150,37 +1076,18 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect(fake.calls.some((c) => c.method === 'listItems')).toBe(false)
   })
 
-  it('PUT /lists/:listId/planner-pref calls setListPlannerPref and returns 204', async () => {
+  it('PUT /lists/:listId/planner-pref no longer exists (404)', async () => {
     const bearer = await loginAs('user_sl4')
-    const sharedId = fake.seedSharedPlannerList('user_sl4')
-
-    const res = await app.request(
-      `http://localhost/api/v1/ui/lists/${sharedId}/planner-pref`,
-      {
-        method: 'PUT',
-        headers: headers(bearer, { 'content-type': 'application/json' }),
-        body: JSON.stringify({ show: false }),
-      },
-    )
-    expect(res.status).toBe(204)
-    const call = fake.calls.find((c) => c.method === 'setListPlannerPref')
-    expect(call?.actor).toBe('user_sl4')
-    expect(call?.args).toEqual([sharedId, false])
-  })
-
-  it('PUT /lists/:listId/planner-pref 400s on missing show field', async () => {
-    const bearer = await loginAs('user_sl5')
 
     const res = await app.request(
       'http://localhost/api/v1/ui/lists/lst_any/planner-pref',
       {
         method: 'PUT',
         headers: headers(bearer, { 'content-type': 'application/json' }),
-        body: JSON.stringify({}),
+        body: JSON.stringify({ show: false }),
       },
     )
-    expect(res.status).toBe(400)
-    expect(fake.calls.some((c) => c.method === 'setListPlannerPref')).toBe(false)
+    expect(res.status).toBe(404)
   })
 
   // --- quick-add path: dueDate + priority forwarding (#430) ----------

@@ -14,6 +14,7 @@ function serializeGroup(g: GroupRecord): Record<string, unknown> {
     id: g.id,
     name: g.name,
     description: g.description,
+    origin: g.origin,
     created_by: g.createdBy,
     created_at: g.createdAt.toISOString(),
     updated_at: g.updatedAt.toISOString(),
@@ -89,8 +90,14 @@ export const groupsRoutes = new Hono<HonoApp>()
   })
 
   // --- update (owner only) -----------------------------------------
+  // Planner-origin groups are immutable here: the Planner BFF resolves
+  // its personal group by the reserved name, so a rename from RPL would
+  // orphan the user's Planner tasks (#531).
   .patch('/api/v1/ui/groups/:groupId', async (c) => {
     const { group } = await loadGroupForMember(c, c.req.param('groupId'), true)
+    if (group.origin === 'planner') {
+      throw errors.forbidden('This group is managed in Planner and is read-only in Lists.')
+    }
     const parsed = UpdateGroupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const updated = await c.var.repos.groups.update(group.id, parsed.data)
@@ -101,6 +108,9 @@ export const groupsRoutes = new Hono<HonoApp>()
   // --- soft-delete (owner only) ------------------------------------
   .delete('/api/v1/ui/groups/:groupId', async (c) => {
     const { group } = await loadGroupForMember(c, c.req.param('groupId'), true)
+    if (group.origin === 'planner') {
+      throw errors.forbidden('This group is managed in Planner and is read-only in Lists.')
+    }
     await c.var.repos.groups.softDelete(group.id, new Date())
     return c.body(null, 204)
   })

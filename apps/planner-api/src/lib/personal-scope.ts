@@ -38,7 +38,13 @@ export async function resolvePersonalScope(
 ): Promise<string> {
   const existing = selectPersonalGroup(await listsClient.listGroups(actor), actor)
   if (existing) return existing.id
-  const created = await listsClient.createGroup({ name: PERSONAL_GROUP_NAME }, actor)
+  // origin:'planner' stamps provenance — the Lists UI serves this group
+  // read-only so RPL-only features (custom statuses, kanban) can't be
+  // attached to Planner lists.
+  const created = await listsClient.createGroup(
+    { name: PERSONAL_GROUP_NAME, origin: 'planner' },
+    actor,
+  )
   return created.id
 }
 

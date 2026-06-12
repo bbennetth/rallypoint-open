@@ -61,6 +61,8 @@ export function deserializeSessionsSnapshot(data: unknown): SessionRecord[] {
       description: (r.description as string | null) ?? null,
       location: (r.location as string | null) ?? null,
       dayId: (r.dayId as string | null) ?? null,
+      // Absent in pre-#215 snapshots; restores as unassigned.
+      stageId: (r.stageId as string | null) ?? null,
       startTime: (r.startTime as string | null) ?? null,
       endTime: (r.endTime as string | null) ?? null,
       category: (r.category as string | null) ?? null,

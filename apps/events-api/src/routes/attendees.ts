@@ -6,6 +6,7 @@ import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity, requireIdPrefix } from './_access.js'
+import { assertFeatureEnabled } from './_features.js'
 
 // Phase 0 of platform/v-1.1 — the owner-side attendees-first surface.
 //
@@ -40,6 +41,39 @@ const AttendeesQuerySchema = z.object({
 })
 
 export const attendeesRoutes = new Hono<HonoApp>()
+  // ── who's going (any member, #216) ────────────────────────────────
+  // Attendee-visible roster, gated on the per-event `attendees`
+  // feature toggle (default OFF; 404s for non-owners when off, like
+  // every gated surface). Display names only — emails stay on the
+  // owner/editor surface below.
+  .get('/api/v1/ui/events/:id/attendees/community', async (c) => {
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'attendees')
+    const parsed = AttendeesQuerySchema.safeParse({
+      limit: c.req.query('limit'),
+      cursor: c.req.query('cursor') ?? null,
+    })
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+
+    const cursor = parsed.data.cursor ? new Date(parsed.data.cursor) : null
+    const page = await c.var.repos.attendees.listForEvent(event.id, {
+      limit: parsed.data.limit,
+      cursor,
+    })
+    const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
+    const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
+    const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
+
+    return c.json({
+      items: page.items.map((a) => ({
+        user_id: a.userId,
+        display_name: nameById.get(a.userId) ?? null,
+        joined_at: a.joinedAt.toISOString(),
+      })),
+      next_cursor: page.nextCursor ? page.nextCursor.toISOString() : null,
+    })
+  })
+
   // ── list attendees (editor+) ──────────────────────────────────────
   .get('/api/v1/ui/events/:id/attendees', async (c) => {
     const { event } = await loadForAction(c, c.req.param('id'), 'editor')

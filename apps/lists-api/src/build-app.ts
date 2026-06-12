@@ -21,10 +21,14 @@ import { settingsRoutes } from './routes/settings.js'
 import { sdkListsRoutes } from './routes/sdk-lists.js'
 import { sdkSeriesRoutes } from './routes/sdk-series.js'
 import { sdkWritesRoutes } from './routes/sdk-writes.js'
-import { sdkPlannerPrefsRoutes } from './routes/sdk-planner-prefs.js'
+import { sdkMcpRoutes } from './routes/sdk-mcp.js'
+import { mcpTokensRoutes } from './routes/mcp-tokens.js'
 import { listsRoutes } from './routes/lists.js'
 import { listItemsRoutes } from './routes/list-items.js'
 import { fieldDefsRoutes } from './routes/field-defs.js'
+import { statusesRoutes } from './routes/statuses.js'
+import { commentsRoutes } from './routes/comments.js'
+import { labelsRoutes } from './routes/labels.js'
 import { viewsRoutes } from './routes/views.js'
 import { groupsRoutes } from './routes/groups.js'
 import { realtimeRoutes } from './routes/realtime.js'
@@ -90,7 +94,8 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.use('/api/v1/ui/lists/*', requireSession())
   app.use('/api/v1/ui/groups', requireSession())
   app.use('/api/v1/ui/groups/*', requireSession())
-  app.use('/api/v1/ui/planner-prefs', requireSession())
+  app.use('/api/v1/ui/mcp-tokens', requireSession())
+  app.use('/api/v1/ui/mcp-tokens/*', requireSession())
 
   // The SDK surface (§3.13): peer-app key gate, no cookies/origin/CSRF.
   // events-api proxies group-list reads (GET /sdk/lists, /sdk/lists/:id/items,
@@ -106,7 +111,8 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.route('/', sdkListsRoutes)
   app.route('/', sdkSeriesRoutes)
   app.route('/', sdkWritesRoutes)
-  app.route('/', sdkPlannerPrefsRoutes)
+  app.route('/', sdkMcpRoutes)
+  app.route('/', mcpTokensRoutes)
   // Mounted before listsRoutes: GET /lists/realtime-token must match the
   // realtime route, not be captured as GET /lists/:listId with
   // listId="realtime-token".
@@ -114,6 +120,9 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.route('/', listsRoutes)
   app.route('/', listItemsRoutes)
   app.route('/', fieldDefsRoutes)
+  app.route('/', statusesRoutes)
+  app.route('/', commentsRoutes)
+  app.route('/', labelsRoutes)
   app.route('/', viewsRoutes)
   app.route('/', groupsRoutes)
 

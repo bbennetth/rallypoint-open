@@ -14,7 +14,7 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
-import { bestEffort, proxyLists } from '../lib/sdk-error.js'
+import { proxyLists } from '../lib/sdk-error.js'
 import {
   listPersonalLists,
   listPersonalTaskLists,
@@ -45,53 +45,19 @@ const CreateListBodySchema = z.object({
   color: listColorField,
 })
 
-// The shape returned by GET /api/v1/ui/lists — a ListDto extended with a
-// `shared` flag to distinguish planner-flagged shared lists from personal ones.
-interface TaskListRow {
-  id: string
-  scopeType: string
-  scopeId: string
-  listType: string
-  name: string
-  visibility: string
-  color: string | null
-  incompleteCount: number
-  createdBy: string
-  createdAt: string
-  updatedAt: string
-  /** True when this list is a planner-flagged shared list (not the actor's personal scope). */
-  shared?: boolean
-}
-
 export const listsRoutes = new Hono<HonoApp>()
   // --- the caller's personal task lists ----------------------------
   // Read-only: returns [] (not a provisioned empty group) until the user
   // creates their first list. The notes list (listType='notes') is hidden
   // here so it never appears in the Tasks rail or the quick-add picker;
-  // notes are reached via /api/v1/ui/notes instead.
-  // Also returns planner-flagged shared lists (best-effort) appended at
-  // the end, marked with shared:true.
+  // notes are reached via /api/v1/ui/notes instead. Personal
+  // (planner-origin) lists only — RPL lists no longer flow into Planner
+  // (#531 separation).
   .get('/api/v1/ui/lists', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const lists = c.var.services.listsClient
-
-    const [personal, flagged] = await Promise.all([
-      proxyLists(() => listPersonalTaskLists(lists, actor)),
-      bestEffort(() => lists.listPlannerLists(actor), []),
-    ])
-
-    const personalIds = new Set(personal.map((l) => l.id))
-    // Append flagged shared lists that are NOT already in the personal scope,
-    // deduplicated by id.
-    const sharedRows: TaskListRow[] = flagged
-      .filter((l) => !personalIds.has(l.id))
-      .map((l) => ({ ...l, shared: true }))
-
-    const rows: TaskListRow[] = [
-      ...personal.map((l) => ({ ...l })),
-      ...sharedRows,
-    ]
-    return c.json(rows)
+    const personal = await proxyLists(() => listPersonalTaskLists(lists, actor))
+    return c.json(personal)
   })
 
   // --- create a personal task list ---------------------------------
@@ -118,21 +84,6 @@ export const listsRoutes = new Hono<HonoApp>()
     return c.json(created, 201)
   })
 
-  // --- toggle the planner-pref for a shared list -------------------
-  // Sets or clears the actor's "show in planner" flag on a shared list they
-  // can access. Used by planner-web to remove a shared list from the Tasks
-  // rail. `show: false` removes it; `show: true` re-adds it.
-  .put('/api/v1/ui/lists/:listId/planner-pref', requireSession(), async (c) => {
-    const actor = c.var.session!.userId
-    const listId = c.req.param('listId')
-    const lists = c.var.services.listsClient
-    const PlannerPrefSchema = z.object({ show: z.boolean() })
-    const parsed = PlannerPrefSchema.safeParse(await readJsonBody(c))
-    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-    await proxyLists(() => lists.setListPlannerPref(listId, parsed.data.show, actor))
-    return c.body(null, 204)
-  })
-
   // --- delete a personal task list ---------------------------------
   // The notes list (listType='notes') is a first-class per-user surface and
   // must not be deletable here; a clear 409 conflict is returned rather than a
@@ -153,21 +104,16 @@ export const listsRoutes = new Hono<HonoApp>()
   })
 
   // --- items in one of the caller's task lists ---------------------
-  // Allows reading items from a personal-scope list OR a planner-flagged
-  // shared list (listPlannerLists re-checks access, so a revoked list isn't
-  // flagged). Still 404s for any other list. A transient Lists failure
-  // surfaces as a 5xx via proxyLists rather than a misleading 404.
+  // Personal-scope lists only (#531 separation). Still 404s for any other
+  // list. A transient Lists failure surfaces as a 5xx via proxyLists
+  // rather than a misleading 404.
   .get('/api/v1/ui/lists/:listId/items', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const listId = c.req.param('listId')
     const lists = c.var.services.listsClient
     const items = await proxyLists(async () => {
-      // Check personal scope first (fastest path for the common case).
       const owned = await listPersonalLists(lists, actor)
-      if (!owned.some((l) => l.id === listId)) {
-        const flagged = await lists.listPlannerLists(actor)
-        if (!flagged.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      }
+      if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
       return lists.listItems(listId)
     })
     return c.json(items)
@@ -176,19 +122,16 @@ export const listsRoutes = new Hono<HonoApp>()
   // --- custom field defs in one of the caller's task lists ---------
   // Reads go through the Lists READ surface (which trusts its caller for
   // scope access), so the BFF owns the ownership guard here — same posture
-  // as item reads above (personal scope OR a planner-flagged shared list).
-  // Writes are membership-checked downstream by the Lists SDK write surface,
-  // so they need no extra BFF guard.
+  // as item reads above (personal scope only, #531 separation). Writes are
+  // membership-checked downstream by the Lists SDK write surface, so they
+  // need no extra BFF guard.
   .get('/api/v1/ui/lists/:listId/fields', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const listId = c.req.param('listId')
     const lists = c.var.services.listsClient
     const defs = await proxyLists(async () => {
       const owned = await listPersonalLists(lists, actor)
-      if (!owned.some((l) => l.id === listId)) {
-        const flagged = await lists.listPlannerLists(actor)
-        if (!flagged.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      }
+      if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
       return lists.listFieldDefs(listId)
     })
     return c.json(defs)

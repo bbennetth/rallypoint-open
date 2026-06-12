@@ -1,5 +1,11 @@
 import { useState } from 'react'
-import { bulkItems, type BulkItemPatch, type FieldDefDto, type GroupMemberDto } from '../lib/api.js'
+import {
+  bulkItems,
+  type BulkItemPatch,
+  type FieldDefDto,
+  type GroupMemberDto,
+  type ListStatusDto,
+} from '../lib/api.js'
 import { CustomFieldsEditor } from './CustomFieldsEditor.js'
 
 type BulkAction =
@@ -17,6 +23,9 @@ interface BulkToolbarProps {
   selectedIds: string[]
   members: GroupMemberDto[]
   fieldDefs: FieldDefDto[]
+  // Custom statuses for the bulk-status control (RPL v1.0.0 S6); omit/empty
+  // on a standard list, where the API ignores statusId.
+  statuses?: ListStatusDto[]
   onDone: () => void
   onError: (err: unknown) => void
   onClear: () => void
@@ -27,6 +36,7 @@ export function BulkToolbar({
   selectedIds,
   members,
   fieldDefs,
+  statuses,
   onDone,
   onError,
   onClear,
@@ -103,6 +113,30 @@ export function BulkToolbar({
           </option>
         ))}
       </select>
+
+      {statuses && statuses.length > 0 && (
+        <select
+          value="__status__"
+          disabled={busy}
+          onChange={(e) => {
+            const statusId = e.target.value
+            if (statusId === '__status__') return
+            void run({ action: 'update', itemIds: selectedIds, patch: { statusId } })
+          }}
+          className="cyber-input"
+          style={{ width: 'auto', padding: '4px 8px' }}
+          aria-label="Set status on selected"
+        >
+          <option value="__status__" disabled hidden>
+            Status…
+          </option>
+          {statuses.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      )}
 
       {fieldDefs.length > 0 && (
         <select

@@ -25,11 +25,10 @@ const ISO = '2026-06-01T00:00:00.000Z'
 interface FakeLists {
   client: ListsClient
   seedTask(actor: string, item: { id: string; title?: string; dueDate: string | null }): void
-  /** Seed a shared list flagged "show in planner" for the given actor. Returns the list id. */
-  seedSharedList(actor: string, listId: string): string
-  /** Seed a task item in a given (e.g. shared) list. */
+  /** Seed a list in a foreign (non-personal) group. Returns the list id. */
+  seedForeignList(listId: string): string
+  /** Seed a task item in a given (e.g. foreign) list. */
   seedTaskInList(listId: string, item: { id: string; title?: string; dueDate: string | null }): void
-  plannerPrefCalls: { listId: string; show: boolean; actor: string }[]
 }
 
 function makeFakeLists(): FakeLists {
@@ -37,9 +36,6 @@ function makeFakeLists(): FakeLists {
   const lists: ListDto[] = []
   const itemsByList = new Map<string, ListItemDto[]>()
   // Maps actor → set of list ids flagged show_in_planner=true
-  const plannerPrefs = new Map<string, Set<string>>()
-  const plannerPrefCalls: { listId: string; show: boolean; actor: string }[] = []
-
   function ensureList(actor: string): string {
     let group = groups.find((g) => g.createdBy === actor && g.name === 'My Tasks')
     if (!group) {
@@ -76,25 +72,10 @@ function makeFakeLists(): FakeLists {
     listLists: async (scope: { scopeType: string; scopeId: string }) =>
       lists.filter((l) => l.scopeType === scope.scopeType && l.scopeId === scope.scopeId),
     listItems: async (listId: string) => itemsByList.get(listId) ?? [],
-    listPlannerLists: async (actor: string) => {
-      const flagged = plannerPrefs.get(actor) ?? new Set<string>()
-      return lists.filter((l) => flagged.has(l.id))
-    },
-    setListPlannerPref: async (listId: string, show: boolean, actor: string) => {
-      plannerPrefCalls.push({ listId, show, actor })
-      let prefs = plannerPrefs.get(actor)
-      if (!prefs) {
-        prefs = new Set()
-        plannerPrefs.set(actor, prefs)
-      }
-      if (show) prefs.add(listId)
-      else prefs.delete(listId)
-    },
   } as unknown as ListsClient
 
   return {
     client,
-    plannerPrefCalls,
     seedTask(actor, item) {
       const listId = ensureList(actor)
       const items = itemsByList.get(listId)!
@@ -116,7 +97,7 @@ function makeFakeLists(): FakeLists {
         updatedAt: ISO,
       })
     },
-    seedSharedList(actor, listId) {
+    seedForeignList(listId) {
       // Create the list in a foreign group (not the actor's personal group).
       if (!lists.some((l) => l.id === listId)) {
         lists.push({
@@ -124,7 +105,7 @@ function makeFakeLists(): FakeLists {
           scopeType: 'group',
           scopeId: `grp_shared_${listId}`,
           listType: 'tasks',
-          name: `Shared ${listId}`,
+          name: `Foreign ${listId}`,
           visibility: 'all',
           color: null,
           incompleteCount: 0,
@@ -134,13 +115,6 @@ function makeFakeLists(): FakeLists {
         })
         itemsByList.set(listId, [])
       }
-      // Flag it in planner prefs for the actor.
-      let prefs = plannerPrefs.get(actor)
-      if (!prefs) {
-        prefs = new Set()
-        plannerPrefs.set(actor, prefs)
-      }
-      prefs.add(listId)
       return listId
     },
     seedTaskInList(listId, item) {
@@ -438,37 +412,18 @@ describe('D1 integration — Planner Upcoming BFF', () => {
     expect(ids(body.dated)).toEqual(['t-keep'])
   })
 
-  // --- planner-flagged shared lists ------------------------------------
+  // --- RPL↔RPP separation (#531): no shared lists in Upcoming -----------
 
-  it('includes items from a flagged shared list and stamps them shared:true', async () => {
+  it('only personal-scope tasks appear — foreign lists never reach Upcoming', async () => {
     const bearer = await loginAs('user_sh1')
-    // Personal task.
     lists.seedTask('user_sh1', { id: 't-personal', dueDate: '2026-06-04T09:00:00.000Z' })
-    // Shared list flagged in planner for this actor.
-    const sharedListId = lists.seedSharedList('user_sh1', 'lst_shared_1')
-    lists.seedTaskInList(sharedListId, { id: 't-shared', dueDate: '2026-06-05T10:00:00.000Z' })
+    // A foreign list with a task — not in the actor's personal group, so
+    // it must not surface now that planner-flagged shared lists are gone.
+    lists.seedForeignList('lst_foreign_1')
+    lists.seedTaskInList('lst_foreign_1', { id: 't-foreign', dueDate: '2026-06-05T10:00:00.000Z' })
 
     const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as UpcomingResponse
-    const taskIds = ids(body.dated)
-    expect(taskIds).toContain('t-personal')
-    expect(taskIds).toContain('t-shared')
-
-    // Personal task must NOT carry shared:true.
-    const personalItem = body.dated.find((i) => i.kind === 'task' && i.task.id === 't-personal')
-    expect(personalItem?.kind === 'task' && personalItem.shared).toBeFalsy()
-
-    // Shared task MUST carry shared:true.
-    const sharedItem = body.dated.find((i) => i.kind === 'task' && i.task.id === 't-shared')
-    expect(sharedItem?.kind === 'task' && sharedItem.shared).toBe(true)
-  })
-
-  it('degrades gracefully when listPlannerLists fails (best-effort)', async () => {
-    const bearer = await loginAs('user_sh2')
-    lists.seedTask('user_sh2', { id: 't-safe', dueDate: '2026-06-04T09:00:00.000Z' })
-    vi.spyOn(lists.client, 'listPlannerLists').mockRejectedValueOnce(new Error('lists-api down'))
-
-    const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as UpcomingResponse
-    expect(ids(body.dated)).toEqual(['t-safe'])
+    expect(ids(body.dated)).toEqual(['t-personal'])
   })
 
   // --- planner-flagged group events ------------------------------------

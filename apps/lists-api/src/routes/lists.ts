@@ -8,10 +8,14 @@ import type { ListInviteRecord, ListRecord, ListShareRecord } from '../repos/typ
 import { readJsonBody } from './_body.js'
 import { envelope, scopeChannel } from '../realtime/channels.js'
 import { publish } from '../realtime/publish.js'
-import { assertScopeReadable, canRead, loadListForRead, loadListForWrite } from './_list-access.js'
+import {
+  assertScopeMutable,
+  assertScopeReadable,
+  canRead,
+  loadListForRead,
+  loadListForWrite,
+} from './_list-access.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
-
-const PlannerPrefSchema = z.object({ show: z.boolean() })
 
 // The group/group `scope_id` carries no tenant of its own in V1, so all
 // rows share the platform default tenant. Slice 2+ may thread a real
@@ -77,6 +81,7 @@ export const listsRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
     await assertScopeReadable(c, body.scopeType, body.scopeId)
+    await assertScopeMutable(c, body.scopeId)
 
     const list = await c.var.repos.lists.create({
       id: `lst_${ulid()}`,
@@ -190,6 +195,7 @@ export const listsRoutes = new Hono<HonoApp>()
   // via a copy-link + mailto: fallback — lists-api has no SMTP path.
   .post('/api/v1/ui/lists/:listId/invites', async (c) => {
     const list = await loadListForRead(c, c.req.param('listId'))
+    await assertScopeMutable(c, list.scopeId)
     if (list.createdBy !== c.var.session!.userId) {
       // Mask non-creator share-invite attempts as 404 so existence isn't
       // confirmed beyond what loadListForRead already exposes.
@@ -332,26 +338,4 @@ export const listsRoutes = new Hono<HonoApp>()
       throw new ApiError({ code: 'share_not_found', message: 'Share not found.', status: 404 })
     }
     return c.body(null, 204)
-  })
-
-  // --- planner pref for a single list (read-access gated) -----------
-  // Any user who can see the list (scope member or share recipient)
-  // may toggle their own "show in planner" flag. The flag is per-user:
-  // flipping it for user A has no effect on user B's planner.
-  .put('/api/v1/ui/lists/:listId/planner-pref', async (c) => {
-    const userId = c.var.session!.userId
-    const list = await loadListForRead(c, c.req.param('listId'))
-    const parsed = PlannerPrefSchema.safeParse(await readJsonBody(c))
-    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-    await c.var.repos.listPlannerPrefs.upsert(userId, list.id, parsed.data.show)
-    return c.body(null, 204)
-  })
-
-  // --- planner prefs overview (all flagged list ids for the caller) --
-  // Returns the list of listIds the current user has flagged
-  // show_in_planner=true. Used by lists-web to restore toggle state.
-  .get('/api/v1/ui/planner-prefs', async (c) => {
-    const userId = c.var.session!.userId
-    const listIds = await c.var.repos.listPlannerPrefs.flaggedListIdsForActor(userId)
-    return c.json({ listIds })
   })

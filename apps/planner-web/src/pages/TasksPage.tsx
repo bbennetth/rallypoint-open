@@ -9,9 +9,9 @@ import {
   listFieldDefs,
   listTaskItems,
   listTaskLists,
-  setListPlannerPref,
   setTaskItemCompleted,
   setTaskItemCustomFields,
+  updateTaskItem,
   type CreateTaskSeriesInput,
   type FieldDefDto,
   type TaskItemDto,
@@ -56,6 +56,9 @@ export function TasksPage() {
   const [activeListId, setActiveListId] = useState<string | null>(null)
   const [items, setItems] = useState<TaskItemDto[]>([])
   const [editing, setEditing] = useState<TaskItemDto | null>(null)
+  // Inline title rename: which row's title is being edited, and its draft text.
+  const [inlineEditId, setInlineEditId] = useState<string | null>(null)
+  const [inlineTitle, setInlineTitle] = useState('')
   const [defs, setDefs] = useState<FieldDefDto[]>([])
   const [fieldsOpen, setFieldsOpen] = useState(false)
   const [newListName, setNewListName] = useState('')
@@ -228,20 +231,6 @@ export function TasksPage() {
     }
   }
 
-  async function onRemoveFromPlanner(list: TaskListDto) {
-    setError(null)
-    try {
-      await setListPlannerPref(list.id, false)
-      setLists((prev) => {
-        const remaining = prev.filter((l) => l.id !== list.id)
-        setActiveListId((cur) => (cur === list.id ? (remaining[0]?.id ?? null) : cur))
-        return remaining
-      })
-    } catch (err) {
-      setError(errMessage(err))
-    }
-  }
-
   async function onCreateItem(e: React.FormEvent) {
     e.preventDefault()
     const title = newItemTitle.trim()
@@ -297,6 +286,34 @@ export function TasksPage() {
     }
   }
 
+  function startInlineEdit(item: TaskItemDto) {
+    setInlineEditId(item.id)
+    setInlineTitle(item.title)
+  }
+
+  function cancelInlineEdit() {
+    setInlineEditId(null)
+    setInlineTitle('')
+  }
+
+  // Commit an inline title rename. A blank or unchanged title is a no-op (the
+  // task keeps its current title). Optimistically patches the row, rolling back
+  // on failure.
+  async function commitInlineEdit(item: TaskItemDto) {
+    const next = inlineTitle.trim()
+    setInlineEditId(null)
+    if (!activeListId || next === '' || next === item.title) return
+    setError(null)
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, title: next } : i)))
+    try {
+      const updated = await updateTaskItem(activeListId, item.id, { title: next })
+      setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)))
+    } catch (err) {
+      setError(errMessage(err))
+      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, title: item.title } : i)))
+    }
+  }
+
   // Merge a single custom-field edit onto a task. Sends only the changed
   // key (null clears it); the server validates the result against the defs.
   async function onCustomFieldChange(item: TaskItemDto, fieldId: string, value: unknown | null) {
@@ -342,7 +359,6 @@ export function TasksPage() {
               )}
               {lists.map((l) => {
                 const sel = l.id === activeListId
-                const isShared = l.shared === true
                 const flyoutOpen = flyoutListId === l.id
                 const confirmPending = confirmListId === l.id
                 return (
@@ -385,11 +401,6 @@ export function TasksPage() {
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {l.name}
                       </span>
-                      {isShared && (
-                        <span className="pl-chip" style={{ flexShrink: 0, fontSize: 10, padding: '2px 6px', borderColor: 'var(--acid-dim, var(--acid))', color: 'var(--acid)' }}>
-                          Shared
-                        </span>
-                      )}
                       <span
                         className="meta"
                         style={{ flex: '0 0 auto', color: sel ? 'var(--acid)' : 'var(--ink-mute)', fontWeight: 700 }}
@@ -439,25 +450,14 @@ export function TasksPage() {
                         </button>
                         {flyoutOpen && (
                           <div className="pl-flyout is-up is-right" role="menu" style={{ minWidth: 160 }}>
-                            {isShared ? (
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="tk-list-menu-item"
-                                onClick={() => { setFlyoutListId(null); void onRemoveFromPlanner(l) }}
-                              >
-                                Remove from Planner
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="tk-list-menu-item is-destructive"
-                                onClick={() => openConfirm(l.id)}
-                              >
-                                Delete list
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="tk-list-menu-item is-destructive"
+                              onClick={() => openConfirm(l.id)}
+                            >
+                              Delete list
+                            </button>
                           </div>
                         )}
                       </div>
@@ -660,20 +660,41 @@ export function TasksPage() {
                       <li key={item.id} className="pl-row" style={{ gridTemplateColumns: '20px 1fr auto', alignItems: 'start' }}>
                         <Check done={item.completed} onClick={() => void onToggle(item)} />
                         <span style={{ display: 'flex', flexDirection: 'column', gap: 7, minWidth: 0 }}>
-                          <button
-                            type="button"
-                            onClick={() => setEditing(item)}
-                            title="Edit task"
-                            style={{
-                              all: 'unset',
-                              cursor: 'pointer',
-                              fontSize: 14,
-                              color: item.completed ? 'var(--ink-mute)' : 'var(--ink)',
-                              textDecoration: item.completed ? 'line-through' : 'none',
-                            }}
-                          >
-                            {item.title}
-                          </button>
+                          {inlineEditId === item.id ? (
+                            <input
+                              className="pl-input"
+                              value={inlineTitle}
+                              autoFocus
+                              aria-label={`Rename ${item.title}`}
+                              onChange={(e) => setInlineTitle(e.target.value)}
+                              onBlur={() => void commitInlineEdit(item)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault()
+                                  e.currentTarget.blur()
+                                } else if (e.key === 'Escape') {
+                                  e.preventDefault()
+                                  cancelInlineEdit()
+                                }
+                              }}
+                              style={{ fontSize: 14, padding: '4px 8px' }}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => startInlineEdit(item)}
+                              title="Rename — or use the ⋯ details button to edit priority, due date & fields"
+                              style={{
+                                all: 'unset',
+                                cursor: 'text',
+                                fontSize: 14,
+                                color: item.completed ? 'var(--ink-mute)' : 'var(--ink)',
+                                textDecoration: item.completed ? 'line-through' : 'none',
+                              }}
+                            >
+                              {item.title}
+                            </button>
+                          )}
                           <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <PriTag p={item.priority} />
                             {dueLabel(item.dueDate) && (
@@ -701,15 +722,26 @@ export function TasksPage() {
                             })}
                           </span>
                         </span>
-                        <button
-                          type="button"
-                          className="pl-donebtn"
-                          onClick={() => void onDelete(item)}
-                          aria-label={`Delete ${item.title}`}
-                          title="Delete"
-                        >
-                          ✕
-                        </button>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <button
+                            type="button"
+                            className="pl-donebtn"
+                            onClick={() => setEditing(item)}
+                            aria-label={`Edit details for ${item.title}`}
+                            title="Priority, due date & custom fields"
+                          >
+                            <Icon name="sliders" size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            className="pl-donebtn"
+                            onClick={() => void onDelete(item)}
+                            aria-label={`Delete ${item.title}`}
+                            title="Delete"
+                          >
+                            ✕
+                          </button>
+                        </span>
                       </li>
                     )
                   })}

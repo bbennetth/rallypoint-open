@@ -61,8 +61,13 @@ emit_env_block() {
   local lists_session events_session money_session planner_session
   local lists_rt events_rt money_rt
   argon2_pepper=$(rnd); session_hmac=$(rnd); signin_hmac=$(rnd); admin_token=$(rnd)
+  local mcp_api_key
   events_api_key=$(rnd); lists_api_key=$(rnd)
   money_api_key=$(rnd); planner_api_key=$(rnd)
+  # The Lists MCP Worker's key — the same value lives under lists-api
+  # (MCP_API_KEY, accepted by its /sdk gate) and lists-mcp (LISTS_MCP_API_KEY,
+  # what the Worker presents). RPL v1.0.0 slice 11.
+  mcp_api_key=$(rnd)
   lists_session=$(rnd); events_session=$(rnd); money_session=$(rnd); planner_session=$(rnd)
   lists_rt=$(rnd); events_rt=$(rnd); money_rt=$(rnd)
 
@@ -85,15 +90,21 @@ emit_env_block() {
       "LISTS_SESSION_KEY_V1": "${lists_session}",
       "REALTIME_TOKEN_HMAC_KEY": "${lists_rt}",
       "EVENTS_API_KEY": "${events_api_key}",
-      "PLANNER_API_KEY": "${planner_api_key}"
+      "PLANNER_API_KEY": "${planner_api_key}",
+      "MCP_API_KEY": "${mcp_api_key}"
+    },
+    "lists-mcp": {
+      "LISTS_MCP_API_KEY": "${mcp_api_key}"
     },
     "events-api": {
       "EVENTS_API_KEY": "${events_api_key}",
+      "PLANNER_API_KEY": "${planner_api_key}",
       "EVENTS_SESSION_KEY_V1": "${events_session}",
       "REALTIME_TOKEN_HMAC_KEY": "${events_rt}"
     },
     "money-api": {
       "MONEY_API_KEY": "${money_api_key}",
+      "EVENTS_API_KEY": "${events_api_key}",
       "MONEY_SESSION_KEY_V1": "${money_session}",
       "REALTIME_TOKEN_HMAC_KEY": "${money_rt}"
     },

@@ -224,7 +224,7 @@ export function MyEventsPage() {
                     <div className="space-y-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <Link
-                          to={`/events/${event.slug}`}
+                          to={eventDestination(event)}
                           className="font-medium hover:opacity-70 transition-opacity"
                         >
                           {event.name}
@@ -300,4 +300,14 @@ export function MyEventsPage() {
       </div>
     </main>
   )
+}
+// #440: events the user doesn't own/edit open the attendee experience.
+// Group members land in their group shell; group-less viewers land in
+// the solo attendee shell. Owners/editors keep the owner tabs.
+function eventDestination(event: EventDto): string {
+  if (event.viewer_role === 'owner' || event.viewer_role === 'editor') {
+    return `/events/${event.slug}`
+  }
+  if (event.my_group_id) return `/groups/${event.my_group_id}`
+  return `/events/${event.slug}/attending/now`
 }

@@ -155,6 +155,7 @@ export class MemoryEventRepo implements EventRepo {
       locationLng: num(input.locationLng),
       privacyMode: input.privacyMode,
       publicPageConfig: null,
+      features: null,
       scopeType: (input.scopeType ?? 'personal') as ScopeType,
       startAt: input.startAt ?? null,
       endAt: input.endAt ?? null,
@@ -230,6 +231,7 @@ export class MemoryEventRepo implements EventRepo {
     if (fields.locationLng !== undefined) r.locationLng = num(fields.locationLng)
     if (fields.privacyMode !== undefined) r.privacyMode = fields.privacyMode
     if (fields.publicPageConfig !== undefined) r.publicPageConfig = fields.publicPageConfig
+    if (fields.features !== undefined) r.features = fields.features
     if (fields.ticketPlatform !== undefined) r.ticketPlatform = fields.ticketPlatform
     if (fields.ticketAccountEmail !== undefined) r.ticketAccountEmail = fields.ticketAccountEmail
     r.updatedAt = new Date()
@@ -1032,6 +1034,7 @@ export class MemoryEventSessionRepo implements EventSessionRepo {
       description: input.description ?? null,
       location: input.location ?? null,
       dayId: input.dayId ?? null,
+      stageId: input.stageId ?? null,
       startTime: input.startTime ?? null,
       endTime: input.endTime ?? null,
       category: input.category ?? null,
@@ -1079,6 +1082,7 @@ export class MemoryEventSessionRepo implements EventSessionRepo {
     if (fields.description !== undefined) r.description = fields.description
     if (fields.location !== undefined) r.location = fields.location
     if (fields.dayId !== undefined) r.dayId = fields.dayId
+    if (fields.stageId !== undefined) r.stageId = fields.stageId
     if (fields.startTime !== undefined) r.startTime = fields.startTime
     if (fields.endTime !== undefined) r.endTime = fields.endTime
     if (fields.category !== undefined) r.category = fields.category
@@ -1135,6 +1139,7 @@ export class MemoryEventSessionRepo implements EventSessionRepo {
           description: c.description ?? null,
           location: c.location ?? null,
           dayId: c.dayId ?? null,
+          stageId: c.stageId ?? null,
           startTime: c.startTime ?? null,
           endTime: c.endTime ?? null,
           category: c.category ?? null,
@@ -1467,6 +1472,9 @@ export class MemoryGroupRepo implements GroupRepo {
       if (c.joinCodeHash === input.joinCodeHash) {
         throw new UniqueConstraintError('groups_join_code_hash_idx')
       }
+      if (input.shortCode != null && c.shortCode === input.shortCode) {
+        throw new UniqueConstraintError('groups_short_code_idx')
+      }
     }
     const now = new Date()
     const rec: GroupRecord = {
@@ -1477,6 +1485,7 @@ export class MemoryGroupRepo implements GroupRepo {
       startDate: input.startDate ?? null,
       endDate: input.endDate ?? null,
       joinCodeHash: input.joinCodeHash,
+      shortCode: input.shortCode ?? null,
       ownerUserId: input.ownerUserId,
       createdAt: now,
       updatedAt: now,
@@ -1495,6 +1504,42 @@ export class MemoryGroupRepo implements GroupRepo {
       if (c.joinCodeHash === joinCodeHash) return { ...c }
     }
     return null
+  }
+
+  async listUserGroupIdsByEvent(userId: string, eventIds: string[]): Promise<Map<string, string>> {
+    const wanted = new Set(eventIds)
+    // Earliest-joined group per event, matching the D1 impl's ORDER BY.
+    const best = new Map<string, { groupId: string; joinedAt: Date }>()
+    for (const g of this.byId.values()) {
+      if (!wanted.has(g.eventId)) continue
+      const m = await this.members?.findByGroupAndUser(g.id, userId)
+      if (!m) continue
+      const cur = best.get(g.eventId)
+      if (!cur || m.joinedAt.getTime() < cur.joinedAt.getTime()) {
+        best.set(g.eventId, { groupId: g.id, joinedAt: m.joinedAt })
+      }
+    }
+    return new Map([...best.entries()].map(([k, v]) => [k, v.groupId]))
+  }
+
+  async findByShortCode(shortCode: string): Promise<GroupRecord | null> {
+    for (const c of this.byId.values()) {
+      if (c.shortCode === shortCode) return { ...c }
+    }
+    return null
+  }
+
+  async setShortCode(id: string, shortCode: string): Promise<GroupRecord | null> {
+    const c = this.byId.get(id)
+    if (!c) return null
+    for (const other of this.byId.values()) {
+      if (other.id !== id && other.shortCode === shortCode) {
+        throw new UniqueConstraintError('groups_short_code_idx')
+      }
+    }
+    c.shortCode = shortCode
+    c.updatedAt = new Date()
+    return { ...c }
   }
 
   async listForEvent(eventId: string): Promise<GroupRecord[]> {

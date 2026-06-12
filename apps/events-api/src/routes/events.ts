@@ -4,6 +4,8 @@ import { ulid } from 'ulid'
 import {
   CreateEventSchema,
   PatchEventSchema,
+  mergeEventFeatures,
+  resolveEventFeatures,
   CreateInviteSchema,
   AcceptInviteSchema,
   TransferOwnershipSchema,
@@ -13,7 +15,7 @@ import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { UniqueConstraintError } from '../repos/errors.js'
-import type { EventRecord, MemberRole } from '../repos/types.js'
+import type { EventRecord, MemberRole, PatchEventInput } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { TENANT, actorRole, loadForAction, recordActivity } from './_access.js'
 import { publish } from '../realtime/publish.js'
@@ -53,6 +55,7 @@ function serializeEvent(e: EventRecord, viewerRole: MemberRole): Record<string, 
     location_lng: num(e.locationLng),
     privacy_mode: e.privacyMode,
     public_page_config: e.publicPageConfig ?? null,
+    features: resolveEventFeatures(e.features),
     owner_user_id: e.ownerUserId,
     scope_type: e.scopeType,
     viewer_role: viewerRole,
@@ -132,10 +135,24 @@ export const eventsRoutes = new Hono<HonoApp>()
     // when the attendee row is removed; we drop those entries here
     // rather than coerce them to 'viewer'.
     const items: ReturnType<typeof serializeEvent>[] = []
+    const visible: { e: (typeof page.items)[number]; role: MemberRole }[] = []
     for (const e of page.items) {
       const role = await actorRole(c, e, userId)
       if (role === null) continue
-      items.push(serializeEvent(e, role))
+      visible.push({ e, role })
+    }
+    // #440: one batched lookup for "which of my groups belongs to each
+    // event" so the client can route viewer-role events into the group
+    // attendee shell. Single query, not per-event N+1.
+    const groupByEvent = await c.var.repos.groups.listUserGroupIdsByEvent(
+      userId,
+      visible.map((v) => v.e.id),
+    )
+    for (const { e, role } of visible) {
+      items.push({
+        ...serializeEvent(e, role),
+        my_group_id: groupByEvent.get(e.id) ?? null,
+      })
     }
     return c.json({ items, next_cursor: page.nextCursor })
   })
@@ -150,7 +167,11 @@ export const eventsRoutes = new Hono<HonoApp>()
     // Deleted events are visible only to the owner (so they can
     // restore); everyone else gets a 404.
     if (event.deletedAt && role !== 'owner') throw errors.eventNotFound()
-    return c.json(serializeEvent(event, role))
+    const groupByEvent = await c.var.repos.groups.listUserGroupIdsByEvent(userId, [event.id])
+    return c.json({
+      ...serializeEvent(event, role),
+      my_group_id: groupByEvent.get(event.id) ?? null,
+    })
   })
 
   // --- patch -------------------------------------------------------
@@ -161,7 +182,21 @@ export const eventsRoutes = new Hono<HonoApp>()
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
     const parsed = PatchEventSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-    const fields = parsed.data
+    // Feature toggles are owner-only (#216); the rest of the patch
+    // surface stays editor-level. Merge the partial patch over the
+    // stored value so the column always holds the full object.
+    const { features: featuresPatch, ...rest } = parsed.data
+    const fields: PatchEventInput = { ...rest }
+    if (featuresPatch !== undefined) {
+      if (role !== 'owner') {
+        throw new ApiError({
+          code: 'features_owner_only',
+          message: 'Only the event owner can change feature toggles.',
+          status: 403,
+        })
+      }
+      fields.features = mergeEventFeatures(event.features, featuresPatch)
+    }
 
     let updated: EventRecord | null
     try {

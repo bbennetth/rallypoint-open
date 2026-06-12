@@ -28,7 +28,7 @@ function run(...args: string[]): Record<string, Record<string, Record<string, st
   return JSON.parse(out)
 }
 
-const APPS = ['id-api', 'lists-api', 'events-api', 'money-api', 'planner-api']
+const APPS = ['id-api', 'lists-api', 'lists-mcp', 'events-api', 'money-api', 'planner-api']
 // 32 random bytes base64-encoded (no padding stripped) -> 44 chars.
 const RANDOM_KEY = /^[A-Za-z0-9+/]{43}=$/
 
@@ -44,13 +44,22 @@ const EXPECTED_KEYS: Record<string, string[]> = {
   ],
   'lists-api': [
     'LISTS_API_KEY', 'LISTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
-    'EVENTS_API_KEY', 'PLANNER_API_KEY',
+    'EVENTS_API_KEY', 'PLANNER_API_KEY', 'MCP_API_KEY',
   ],
+  // The Lists MCP Worker (RPL v1.0.0 slice 11) presents LISTS_MCP_API_KEY,
+  // which must equal lists-api's MCP_API_KEY.
+  'lists-mcp': ['LISTS_MCP_API_KEY'],
+  // events-api needs PLANNER_API_KEY too: it gates the /api/v1/sdk/
+  // personal-events/* routes the Planner BFF calls (My Day / Upcoming fan out
+  // to personal events), accepting the Planner BFF's PLANNER_API_KEY bearer.
   'events-api': [
-    'EVENTS_API_KEY', 'EVENTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
+    'EVENTS_API_KEY', 'PLANNER_API_KEY', 'EVENTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
   ],
+  // money-api needs EVENTS_API_KEY too: it gates its /api/v1/sdk/* routes
+  // (group ledgers/expenses) on EVENTS_API_KEY, the bearer events-api presents
+  // when proxying group-ledger calls (apps/events-api/src/routes/groups.ts).
   'money-api': [
-    'MONEY_API_KEY', 'MONEY_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
+    'MONEY_API_KEY', 'EVENTS_API_KEY', 'MONEY_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
   ],
   'planner-api': ['PLANNER_API_KEY', 'PLANNER_SESSION_KEY_V1'],
 }
@@ -66,7 +75,7 @@ describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
     expect(() => run('staging')).toThrow()
   })
 
-  it('includes all five apps in each env', () => {
+  it('includes every app in each env', () => {
     const d = run()
     for (const env of ['qa', 'prod']) {
       expect(Object.keys(d[env]).sort()).toEqual([...APPS].sort())
@@ -87,10 +96,15 @@ describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
       // id-api is the authority for the four *_API_KEY peer keys.
       expect(env['lists-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
       expect(env['events-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
+      expect(env['money-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
       expect(env['lists-api'].LISTS_API_KEY).toBe(env['id-api'].LISTS_API_KEY)
       expect(env['money-api'].MONEY_API_KEY).toBe(env['id-api'].MONEY_API_KEY)
       expect(env['lists-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
+      expect(env['events-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
       expect(env['planner-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
+      // The MCP key the lists-mcp Worker presents must match the one lists-api
+      // accepts (RPL v1.0.0 slice 11).
+      expect(env['lists-mcp'].LISTS_MCP_API_KEY).toBe(env['lists-api'].MCP_API_KEY)
     }
   })
 

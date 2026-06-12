@@ -24,6 +24,7 @@ interface SessionJson {
   id: string
   title: string
   day_id: string | null
+  stage_id: string | null
   approval_status: string
   visibility: string
   start_time: string | null
@@ -545,5 +546,124 @@ describe('D1 integration — sessions (event_sessions + approval workflow)', () 
       creates: [{ title: 'Should fail' }],
     })
     expect(res.status).toBe(403)
+  })
+
+  it('stage round-trip: create with stageId, patch it, clear it (#215)', async () => {
+    const owner = `user_${Date.now()}_stage`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Stage Sessions Fest')
+
+    const stage = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/stages`, { name: 'Main' })
+    ).json()) as { id: string }
+    const stage2 = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/stages`, { name: 'Wellness' })
+    ).json()) as { id: string }
+
+    const created = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions`, {
+      title: 'Main Stage Talk',
+      stageId: stage.id,
+    })
+    expect(created.status).toBe(201)
+    const session = (await created.json()) as SessionJson
+    expect(session.stage_id).toBe(stage.id)
+
+    // Reassign to another stage.
+    const moved = await req(
+      bearer,
+      'PATCH',
+      `/api/v1/ui/events/${eventId}/sessions/${session.id}`,
+      { stageId: stage2.id },
+    )
+    expect(moved.status).toBe(200)
+    expect(((await moved.json()) as SessionJson).stage_id).toBe(stage2.id)
+
+    // Clear with explicit null.
+    const cleared = await req(
+      bearer,
+      'PATCH',
+      `/api/v1/ui/events/${eventId}/sessions/${session.id}`,
+      { stageId: null },
+    )
+    expect(cleared.status).toBe(200)
+    expect(((await cleared.json()) as SessionJson).stage_id).toBeNull()
+  })
+
+  it('rejects a session referencing a stage from another event', async () => {
+    const owner = `user_${Date.now()}_xstage`
+    const bearer = await loginAs(owner)
+    const eventA = await createEvent(bearer, 'Stage Event A')
+    const eventB = await createEvent(bearer, 'Stage Event B')
+
+    const stageB = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventB}/stages`, { name: 'Foreign' })
+    ).json()) as { id: string }
+
+    const wrong = await req(bearer, 'POST', `/api/v1/ui/events/${eventA}/sessions`, {
+      title: 'Wrong Stage',
+      stageId: stageB.id,
+    })
+    expect(wrong.status).toBe(400)
+    expect(((await wrong.json()) as { error: { code: string } }).error.code).toBe(
+      'stage_not_in_event',
+    )
+
+    // Same check on the bulk path (create + update).
+    const ok = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventA}/sessions`, { title: 'Fixable' })
+    ).json()) as SessionJson
+    const bulkCreate = await req(bearer, 'POST', `/api/v1/ui/events/${eventA}/sessions/bulk`, {
+      creates: [{ title: 'Bulk Wrong', stageId: stageB.id }],
+    })
+    expect(bulkCreate.status).toBe(400)
+    const bulkUpdate = await req(bearer, 'POST', `/api/v1/ui/events/${eventA}/sessions/bulk`, {
+      updates: [{ id: ok.id, patch: { stageId: stageB.id } }],
+    })
+    expect(bulkUpdate.status).toBe(400)
+  })
+
+  it('nulls stage_id when the assigned stage is deleted (session survives)', async () => {
+    const owner = `user_${Date.now()}_stagedel`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Stage Delete Fest')
+
+    const stage = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/stages`, { name: 'Doomed' })
+    ).json()) as { id: string }
+    const session = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions`, {
+        title: 'Stage-bound',
+        stageId: stage.id,
+      })
+    ).json()) as SessionJson
+    expect(session.stage_id).toBe(stage.id)
+
+    await req(bearer, 'DELETE', `/api/v1/ui/events/${eventId}/stages/${stage.id}`)
+    const after = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/sessions/${session.id}`)
+    ).json()) as SessionJson
+    expect(after.stage_id).toBeNull()
+  })
+
+  it('bulk: creates carry stageId through to the stored rows', async () => {
+    const owner = `user_${Date.now()}_bulkstage`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Bulk Stage Fest')
+    const stage = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/stages`, { name: 'Main' })
+    ).json()) as { id: string }
+
+    const res = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions/bulk`, {
+      creates: [
+        { title: 'Staged A', stageId: stage.id },
+        { title: 'Unstaged B' },
+      ],
+    })
+    expect(res.status).toBe(200)
+    const { items } = (await res.json()) as { items: SessionJson[] }
+    const staged = items.find((i) => i.title === 'Staged A')!
+    const unstaged = items.find((i) => i.title === 'Unstaged B')!
+    expect(staged.stage_id).toBe(stage.id)
+    expect(unstaged.stage_id).toBeNull()
   })
 })

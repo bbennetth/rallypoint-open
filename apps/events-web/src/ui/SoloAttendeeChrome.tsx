@@ -6,7 +6,7 @@ import {
   ThemeToggle,
   type AppChromeNavItem,
 } from '@rallypoint/ui'
-import { ApiError, getEvent, type EventDto } from '../lib/api.js'
+import { ApiError, getEvent, type EventDto, type EventFeatures } from '../lib/api.js'
 
 // Phase 4 of platform/v-1.1 (#16). Migrated onto the shared @rallypoint/ui
 // AppChrome. Wraps solo-attendee tab routes under `/events/:slug/attending/*`.
@@ -18,13 +18,19 @@ export interface SoloEventOutlet {
   event: EventDto
 }
 
-function tabsFor(slug: string): readonly AppChromeNavItem[] {
+function tabsFor(slug: string, features?: EventFeatures): readonly AppChromeNavItem[] {
   const base = `/events/${encodeURIComponent(slug)}/attending`
   return [
     { to: `${base}/now`, label: 'Now', icon: 'clock', end: true },
     { to: `${base}/day`, label: 'My Day', icon: 'myday', end: true },
-    { to: `${base}/lineup`, label: 'Lineup', icon: 'events', end: true },
-    { to: `${base}/group`, label: 'Group', icon: 'grid', end: true },
+    // Feature-gated tabs (#216): hide what the owner toggled off.
+    // `features` is undefined while the event is still loading.
+    ...(features === undefined || features.lineup
+      ? [{ to: `${base}/lineup`, label: 'Lineup', icon: 'events', end: true } as const]
+      : []),
+    ...(features === undefined || features.groups
+      ? [{ to: `${base}/group`, label: 'Group', icon: 'grid', end: true } as const]
+      : []),
     { to: `${base}/rallies`, label: 'Rallies', icon: 'bell', end: true },
     { to: `${base}/chat`, label: 'Chat', icon: 'more', end: true },
   ]
@@ -84,7 +90,11 @@ export function SoloAttendeeLayout() {
   }
 
   return (
-    <ChromeShell title={state.event.name} slug={state.event.slug}>
+    <ChromeShell
+      title={state.event.name}
+      slug={state.event.slug}
+      features={state.event.features}
+    >
       {state.event.viewer_role === 'owner' && (
         <OwnerPreviewBanner slug={state.event.slug} />
       )}
@@ -134,13 +144,15 @@ function OwnerPreviewBanner({ slug }: { slug: string }) {
 function ChromeShell({
   title,
   slug,
+  features,
   children,
 }: {
   title: string
   slug: string
+  features?: EventFeatures
   children: ReactNode
 }) {
-  const tabs = tabsFor(slug)
+  const tabs = tabsFor(slug, features)
 
   return (
     <SharedAppChrome

@@ -6,6 +6,7 @@ import {
   patchEvent,
   restoreEvent,
   type EventDto,
+  type EventFeatures,
   type PrivacyMode,
 } from '../../lib/api.js'
 import { buildEventPatch, eventDetailsDraft } from '../../lib/event-patch.js'
@@ -66,6 +67,8 @@ export function SettingsPage() {
         </header>
 
         {isOwner && <DetailsSection event={event} onSaved={() => void reload()} />}
+
+        {isOwner && <FeaturesSection event={event} onSaved={() => void reload()} />}
 
         {isOwner && (
           <StagesEditor eventId={event.id} />
@@ -299,6 +302,93 @@ function DetailsSection({ event, onSaved }: { event: EventDto; onSaved: () => vo
           )}
         </div>
       </form>
+    </section>
+  )
+}
+
+// #216 per-event feature toggles. Each switch PATCHes a partial
+// `features` object; the server merges it over the stored value
+// (owner-only — the route 403s anyone else).
+const FEATURE_LABELS: ReadonlyArray<{
+  key: keyof EventFeatures
+  label: string
+  hint: string
+}> = [
+  { key: 'lineup', label: 'Lineup', hint: 'Artist lineup tab and set times.' },
+  { key: 'sessions', label: 'Sessions', hint: 'Schedule activities and the approval queue.' },
+  { key: 'groups', label: 'Groups', hint: 'Attendee crews: create, join codes, group tools.' },
+  {
+    key: 'attendees',
+    label: "Who's going",
+    hint: 'Let attendees see the names of other attendees. Off by default.',
+  },
+]
+
+function FeaturesSection({ event, onSaved }: { event: EventDto; onSaved: () => void }) {
+  const [busyKey, setBusyKey] = useState<keyof EventFeatures | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function toggle(key: keyof EventFeatures) {
+    setError(null)
+    setBusyKey(key)
+    try {
+      await patchEvent(event.id, { features: { [key]: !event.features[key] } })
+      onSaved()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to update features.')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-sm font-medium text-[color:var(--ink)]">Features</h2>
+      <p className="text-xs text-[color:var(--ink-mute)]">
+        Turn parts of this event on or off. Disabled features disappear for attendees
+        and editors; nothing is deleted — toggling back on restores everything.
+      </p>
+      <ul className="space-y-2">
+        {FEATURE_LABELS.map(({ key, label, hint }) => {
+          const on = event.features[key]
+          return (
+            <li
+              key={key}
+              className="flex items-center gap-3 p-3"
+              style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+            >
+              <div className="flex-1 space-y-0.5">
+                <p className="text-sm font-medium">{label}</p>
+                <p className="text-xs text-[color:var(--ink-dim)]">{hint}</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={on}
+                aria-label={`${label} ${on ? 'enabled' : 'disabled'}`}
+                disabled={busyKey !== null}
+                onClick={() => void toggle(key)}
+                className={on ? 'btn-brutal' : 'btn-ghost'}
+                style={{ width: 72 }}
+              >
+                {busyKey === key ? '…' : on ? 'On' : 'Off'}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+      {error && (
+        <div
+          role="alert"
+          className="p-3 text-sm text-[color:var(--ink)]"
+          style={{
+            border: '1.5px solid var(--hot)',
+            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+          }}
+        >
+          {error}
+        </div>
+      )}
     </section>
   )
 }

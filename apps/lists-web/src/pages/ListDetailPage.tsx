@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -8,18 +8,27 @@ import {
   getList,
   listFieldDefs,
   listGroupMembers,
+  listGroups,
   listItems,
+  listLabels,
   listLists,
+  listStatuses,
   restoreItem,
   updateItem,
   type FieldDefDto,
   type GroupMemberDto,
+  type LabelDto,
   type ListDto,
   type ListItemDto,
+  type ListStatusDto,
 } from '../lib/api.js'
 import { TaskBoard } from '../components/TaskBoard.js'
 import { ShareDrawer } from '../components/ShareDrawer.js'
 import { FieldManagerDrawer } from '../components/FieldManagerDrawer.js'
+import { StatusManagerDrawer } from '../components/StatusManagerDrawer.js'
+import { ItemCommentsDrawer } from '../components/ItemCommentsDrawer.js'
+import { LabelManagerDrawer } from '../components/LabelManagerDrawer.js'
+import { LabelChips } from '../components/LabelChips.js'
 import { CustomFieldsEditor } from '../components/CustomFieldsEditor.js'
 import {
   FilterSortBar,
@@ -32,6 +41,15 @@ import { GridView } from '../components/GridView.js'
 import { resolveQueryField, type ViewMode } from '@rallypoint/lists-shared'
 import { missingRequiredFieldIds } from '../lib/field-form.js'
 import { shouldRefetch, subscribeListStream } from '../lib/realtime.js'
+import { useSelection } from '../lib/selection.js'
+import { groupItemsByStatus } from '../lib/board.js'
+import { applyBoardDrop, planBoardDrop, reindexPatches, type DropTarget } from '../lib/board-dnd.js'
+import {
+  buildItemTree,
+  flattenVisible,
+  progressPercent,
+  type ItemTreeNode,
+} from '../lib/hierarchy-view.js'
 
 // Built-in columns offered in the filter/sort bar on a standard list.
 // Task-only columns (status/priority/due_date) and ordering hints
@@ -77,7 +95,20 @@ function buildFilterableFields(fieldDefs: FieldDefDto[]): FilterableField[] {
 
 type LoadState =
   | { status: 'loading' }
-  | { status: 'ready'; list: ListDto; items: ListItemDto[]; fieldDefs: FieldDefDto[] }
+  | {
+      status: 'ready'
+      list: ListDto
+      items: ListItemDto[]
+      fieldDefs: FieldDefDto[]
+      // Custom kanban statuses — only fetched for `tasks` lists (the board
+      // surface); empty for standard lists, which key off `completed`.
+      statuses: ListStatusDto[]
+      // Per-list labels (RPL v1.0.0 S12) — any list type may carry labels.
+      labels: LabelDto[]
+      // True when the list lives in a Planner-provisioned group — the UI
+      // surface serves it read-only (#531), so mutating affordances hide.
+      readOnly: boolean
+    }
   | { status: 'error'; error: ApiError | Error }
 
 export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
@@ -103,17 +134,27 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
   const [lastDeleted, setLastDeleted] = useState<string | null>(null)
   const [shareOpen, setShareOpen] = useState(false)
   const [fieldsOpen, setFieldsOpen] = useState(false)
+  const [statusesOpen, setStatusesOpen] = useState(false)
+  const [labelsOpen, setLabelsOpen] = useState(false)
   // Filter/sort applied server-side via the items query (Lists v2 slice 4).
   const [query, setQuery] = useState<FilterSortValue>({ filters: [], sort: [] })
   // Bumped on a realtime list_views envelope to reload the saved-view list
   // (slice 5). The view set lives in ViewSwitcher's own state.
   const [viewsReloadKey, setViewsReloadKey] = useState(0)
-  // Row selection for bulk actions (slice 6). Holds item ids; the bulk
-  // toolbar appears while non-empty. Cleared on list change / refetch.
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // Row selection for bulk actions, shared across checklist / grid / board
+  // (slice 6 + RPL v1.0.0 S6). The bulk toolbar appears while non-empty;
+  // cleared on list change / refetch.
+  const selection = useSelection()
   // 'list' (checklist) vs 'grid' (spreadsheet) for a standard list (slice 7).
   // Restored from / persisted into the active saved view via ViewSwitcher.
   const [viewMode, setViewMode] = useState<ViewMode>('list')
+  // Sub-item nesting (RPL v1.0.0 S5): collapsed parent ids (children hidden)
+  // and the parent currently showing an inline "add sub-item" input, if any.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [addSubParent, setAddSubParent] = useState<string | null>(null)
+  const [addingSub, setAddingSub] = useState(false)
+  // The item whose comments thread is open (RPL v1.0.0 S7 UI), or null.
+  const [commentsItem, setCommentsItem] = useState<{ id: string; title: string } | null>(null)
 
   // `silent` skips the loading flash — used by realtime refetches so a
   // collaborator's edit doesn't blank the page out from under the viewer.
@@ -121,12 +162,39 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     if (!listId) return
     if (!opts.silent) setState({ status: 'loading' })
     try {
-      const [list, page, defs] = await Promise.all([
+      const [list, page, defs, labelPage] = await Promise.all([
         getList(listId),
         listItems(listId, query),
         listFieldDefs(listId),
+        listLabels(listId),
       ])
-      setState({ status: 'ready', list, items: page.items, fieldDefs: defs.items })
+      // Statuses back the kanban board only; fetching also lazy-seeds the
+      // defaults server-side, so don't touch them on a standard list. The
+      // board can't render without them, so let a failure bubble to the
+      // outer catch (page error state) rather than silently show no columns.
+      const statuses: ListStatusDto[] =
+        list.list_type === 'tasks' ? (await listStatuses(listId)).items : []
+      // Planner-origin groups are read-only on this surface (#531). The
+      // group lookup is best-effort: on failure the page renders writable
+      // and the server's 403 still backstops every mutation.
+      let readOnly = false
+      if (list.scope_type === 'list_group') {
+        try {
+          const groups = await listGroups()
+          readOnly = groups.items.find((g) => g.id === list.scope_id)?.origin === 'planner'
+        } catch {
+          readOnly = false
+        }
+      }
+      setState({
+        status: 'ready',
+        list,
+        items: page.items,
+        fieldDefs: defs.items,
+        statuses,
+        labels: labelPage.items,
+        readOnly,
+      })
       // Group-scoped lists can assign items to a member; group scopes
       // defer to the Events group roster (not wired in this slice).
       if (list.scope_type === 'list_group') {
@@ -166,10 +234,12 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     void load()
   }, [listId, queryKey])
 
-  // Drop any stale selection when the list or filter changes — selected
-  // ids may no longer be in view.
+  // Drop any stale selection / nesting UI state when the list or filter
+  // changes — those ids may no longer be in view.
   useEffect(() => {
-    setSelectedIds(new Set())
+    selection.clear()
+    setCollapsed(new Set())
+    setAddSubParent(null)
   }, [listId, queryKey])
 
   // Live updates: refetch (silently) when another client changes an item
@@ -243,12 +313,19 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     })
   }
 
-  async function patch(itemId: string, fields: Parameters<typeof updateItem>[2]) {
+  async function patch(
+    itemId: string,
+    fields: Parameters<typeof updateItem>[2],
+    opts: { silent?: boolean } = {},
+  ) {
     if (!listId) return
     setActionError(null)
     try {
       await updateItem(listId, itemId, fields)
-      await load()
+      // A silent reload keeps the ready view mounted — used by the inline
+      // label picker so toggling a label doesn't blank the page and snap the
+      // <details> disclosure shut between toggles.
+      await load(opts.silent ? { silent: true } : {})
     } catch (err) {
       reportError(err)
     }
@@ -278,13 +355,38 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     }
   }
 
-  function toggleSelect(itemId: string, on: boolean) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (on) next.add(itemId)
-      else next.delete(itemId)
-      return next
-    })
+
+  // Kanban drag-drop (S3): move `activeId` onto a card or column. Plan the
+  // move purely (lib/board-dnd), apply it optimistically, then persist the
+  // status change + the target column's position reindex. The PATCHes are
+  // self-authored, so the realtime echo is skipped; a silent reload
+  // reconciles to server truth (and a failure restores it loudly).
+  async function handleReorder(activeId: string, target: DropTarget) {
+    if (!listId || state.status !== 'ready') return
+    const cols = groupItemsByStatus(state.items, state.statuses).map((c) => ({
+      statusId: c.status.id,
+      itemIds: c.items.map((i) => i.id),
+    }))
+    const plan = planBoardDrop(cols, activeId, target)
+    if (!plan) return
+
+    const ready = state
+    setState({ ...ready, items: applyBoardDrop(ready.items, plan) })
+    setActionError(null)
+    try {
+      await Promise.all(
+        reindexPatches(plan).map((p) =>
+          updateItem(listId, p.id, {
+            position: p.position,
+            ...(p.id === plan.itemId && plan.statusChanged ? { statusId: plan.toStatusId } : {}),
+          }),
+        ),
+      )
+      await load({ silent: true })
+    } catch (err) {
+      reportError(err)
+      await load()
+    }
   }
 
   // Move an item up/down by swapping position values with its neighbour.
@@ -306,9 +408,128 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     }
   }
 
+  function toggleCollapse(itemId: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(itemId)) next.delete(itemId)
+      else next.add(itemId)
+      return next
+    })
+  }
+
+  // Add a sub-item under `parentId` from the inline affordance. The
+  // in-flight guard stops a fast double-Enter from creating two children.
+  async function handleAddSubItem(parentId: string, title: string) {
+    if (!listId || addingSub || title.trim().length === 0) return
+    setActionError(null)
+    setAddingSub(true)
+    try {
+      await createItem(listId, { title: title.trim(), parentId })
+      setAddSubParent(null)
+      // Make sure the new child is visible.
+      setCollapsed((prev) => {
+        if (!prev.has(parentId)) return prev
+        const next = new Set(prev)
+        next.delete(parentId)
+        return next
+      })
+      await load()
+    } catch (err) {
+      reportError(err)
+    } finally {
+      setAddingSub(false)
+    }
+  }
+
+  // The item ids currently visible in the active view — all items in the
+  // grid (no collapse there), but only un-collapsed rows in the checklist.
+  // Drives select-all so it never sweeps in a hidden child.
+  function currentVisibleIds(allItems: ListItemDto[]): string[] {
+    const hidden = viewMode === 'grid' ? new Set<string>() : collapsed
+    return flattenVisible(buildItemTree(allItems), hidden).map((r) => r.item.id)
+  }
+
+  // Render the checklist as a sub-item tree (RPL v1.0.0 S5): rows are the
+  // tree flattened in order (children hidden under a collapsed parent),
+  // indented by depth; up/down moves swap with a sibling, not a flat
+  // neighbour. An inline add-sub-item input opens under the chosen parent.
+  function renderChecklist(allItems: ListItemDto[]) {
+    const tree = buildItemTree(allItems)
+    const rows = flattenVisible(tree, collapsed)
+    // id → its sibling group + index, for sibling-scoped reordering.
+    const siblingInfo = new Map<string, { siblings: ListItemDto[]; index: number }>()
+    const indexSiblings = (nodes: ItemTreeNode<ListItemDto>[]) => {
+      const items = nodes.map((n) => n.item)
+      nodes.forEach((n, i) => {
+        siblingInfo.set(n.item.id, { siblings: items, index: i })
+        indexSiblings(n.children)
+      })
+    }
+    indexSiblings(tree)
+    const visibleIds = rows.map((r) => r.item.id)
+
+    return (
+      <ul className="space-y-2">
+        {rows.map((row) => {
+          const item = row.item
+          const sib = siblingInfo.get(item.id)!
+          return (
+            <Fragment key={item.id}>
+              <ItemRow
+                item={item}
+                depth={row.depth}
+                hasChildren={row.hasChildren}
+                collapsed={collapsed.has(item.id)}
+                onToggleCollapse={() => toggleCollapse(item.id)}
+                onAddSubItem={() => setAddSubParent(item.id)}
+                onComments={() => setCommentsItem({ id: item.id, title: item.title })}
+                labels={state.status === 'ready' ? state.labels : []}
+                onSetLabels={(labelIds) => void patch(item.id, { labelIds }, { silent: true })}
+                members={members}
+                fieldDefs={state.status === 'ready' ? state.fieldDefs : []}
+                selected={selection.isSelected(item.id)}
+                onSelect={(on) => selection.toggle(item.id, on)}
+                onRangeSelect={() => selection.extendTo(item.id, visibleIds)}
+                canMoveUp={sib.index > 0}
+                canMoveDown={sib.index < sib.siblings.length - 1}
+                onToggle={(completed) => void patch(item.id, { completed })}
+                onRename={(title) => void patch(item.id, { title })}
+                onAssign={(assignedTo) => void patch(item.id, { assignedTo })}
+                onSetCustomField={(fieldId, value) =>
+                  void patch(item.id, { customFields: { [fieldId]: value } })
+                }
+                onDelete={() => void handleDelete(item.id)}
+                onMoveUp={() => void move(sib.siblings, sib.index, -1)}
+                onMoveDown={() => void move(sib.siblings, sib.index, 1)}
+              />
+              {addSubParent === item.id && (
+                <AddSubItemRow
+                  depth={row.depth + 1}
+                  submitting={addingSub}
+                  onCancel={() => setAddSubParent(null)}
+                  onSubmit={(title) => void handleAddSubItem(item.id, title)}
+                />
+              )}
+            </Fragment>
+          )
+        })}
+      </ul>
+    )
+  }
+
+  // The kanban board (tasks lists) wants the full viewport width — columns
+  // size themselves and overflow into horizontal scroll. Everything else
+  // stays capped for readability.
+  const isBoard = state.status === 'ready' && state.list.list_type === 'tasks'
+
   return (
     <main className="page-pad">
-      <div className="content-cap mx-auto space-y-6">
+      {/* The board breaks out of the shell's 880px cap entirely (plapp-full)
+          so its grid can fill the viewport; other list views stay on the
+          wider-but-bounded cap (data-dense, but they starve at 860px). */}
+      <div
+        className={`${isBoard ? 'plapp-full w-full' : 'content-cap-wide'} mx-auto space-y-6`}
+      >
         <Link to="/me/lists" className="text-sm hover:underline" style={{ color: 'var(--ink-dim)' }}>
           ← All lists
         </Link>
@@ -349,9 +570,40 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                 <h1 className="display text-2xl mt-1">{state.list.name}</h1>
               </div>
               <div className="flex items-center gap-2">
+                {state.readOnly && (
+                  <span className="chip" style={{ color: 'var(--ink-dim)' }}>
+                    Planner · read-only
+                  </span>
+                )}
+                {/* Statuses button — board columns; creator-only on a
+                    tasks list (the API enforces the same). */}
+                {!state.readOnly &&
+                  state.list.list_type === 'tasks' &&
+                  state.list.created_by === selfUserId && (
+                    <button
+                      type="button"
+                      onClick={() => setStatusesOpen(true)}
+                      className="btn-ghost"
+                      style={{ width: 'auto' }}
+                    >
+                      Statuses
+                    </button>
+                  )}
+                {/* Labels button — creator-only (the API enforces the
+                    same); labels apply to any list type. */}
+                {!state.readOnly && state.list.created_by === selfUserId && (
+                  <button
+                    type="button"
+                    onClick={() => setLabelsOpen(true)}
+                    className="btn-ghost"
+                    style={{ width: 'auto' }}
+                  >
+                    Labels
+                  </button>
+                )}
                 {/* Fields button — only the list creator can define
                     custom columns (the API enforces the same). */}
-                {state.list.created_by === selfUserId && (
+                {!state.readOnly && state.list.created_by === selfUserId && (
                   <button
                     type="button"
                     onClick={() => setFieldsOpen(true)}
@@ -364,7 +616,8 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                 {/* Share button — only the creator of a 'private' list
                     can mint share invites. 'all' lists are scope-wide
                     already; no separate sharing surface. */}
-                {state.list.visibility === 'private' &&
+                {!state.readOnly &&
+                  state.list.visibility === 'private' &&
                   state.list.created_by === selfUserId && (
                     <button
                       type="button"
@@ -376,7 +629,7 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                     </button>
                   )}
                 {/* Delete list — creator-only; the API enforces the same. */}
-                {state.list.created_by === selfUserId && (
+                {!state.readOnly && state.list.created_by === selfUserId && (
                   <button
                     type="button"
                     onClick={() => void handleDeleteList()}
@@ -389,7 +642,26 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
               </div>
             </header>
 
-            <form onSubmit={(e) => void handleAdd(e)} className="space-y-3">
+            {state.readOnly && (
+              <div
+                className="p-4 text-sm"
+                style={{
+                  border: '1.5px solid var(--line)',
+                  background: 'var(--surface)',
+                  color: 'var(--ink-dim)',
+                }}
+              >
+                This list is managed by Rallypoint Planner and is read-only
+                here — open Planner to add or edit items.
+              </div>
+            )}
+
+            {!state.readOnly && (
+            <form
+              onSubmit={(e) => void handleAdd(e)}
+              className="space-y-3"
+              style={isBoard ? { maxWidth: '640px' } : undefined}
+            >
               <div className="flex items-end gap-3">
                 <label className="flex-1 text-sm text-[color:var(--ink-dim)]">
                   Add an item
@@ -423,6 +695,7 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                 />
               )}
             </form>
+            )}
 
             {actionError && (
               <p className="text-sm" style={{ color: 'var(--hot)' }}>
@@ -489,22 +762,46 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
             )}
 
             {state.list.list_type === 'tasks' ? (
-              <TaskBoard
-                items={state.items}
-                members={members}
-                moveTargets={moveTargets}
-                fieldDefs={state.fieldDefs}
-                onCycleStatus={(itemId, next) => void patch(itemId, { status: next })}
-                onRename={(itemId, title) => void patch(itemId, { title })}
-                onAssign={(itemId, assignedTo) => void patch(itemId, { assignedTo })}
-                onSetPriority={(itemId, priority) => void patch(itemId, { priority })}
-                onSetDueDate={(itemId, dueDate) => void patch(itemId, { dueDate })}
-                onMove={(itemId, targetListId) => void patch(itemId, { listId: targetListId })}
-                onSetCustomField={(itemId, fieldId, value) =>
-                  void patch(itemId, { customFields: { [fieldId]: value } })
-                }
-                onDelete={(itemId) => void handleDelete(itemId)}
-              />
+              <div className="space-y-2">
+                {!state.readOnly && selection.count > 0 && (
+                  <BulkToolbar
+                    listId={state.list.id}
+                    selectedIds={[...selection.selected]}
+                    members={members}
+                    fieldDefs={state.fieldDefs}
+                    statuses={state.statuses}
+                    onDone={() => {
+                      selection.clear()
+                      void load({ silent: true })
+                    }}
+                    onError={reportError}
+                    onClear={() => selection.clear()}
+                  />
+                )}
+                <TaskBoard
+                  items={state.items}
+                  statuses={state.statuses}
+                  members={members}
+                  moveTargets={moveTargets}
+                  fieldDefs={state.fieldDefs}
+                  selectedIds={selection.selected}
+                  onToggleSelect={(itemId, on) => selection.toggle(itemId, on)}
+                  onComments={(itemId, title) => setCommentsItem({ id: itemId, title })}
+                  labels={state.labels}
+                  onSetLabels={(itemId, labelIds) => void patch(itemId, { labelIds }, { silent: true })}
+                  onSetStatus={(itemId, statusId) => void patch(itemId, { statusId })}
+                  onReorder={(activeId, target) => void handleReorder(activeId, target)}
+                  onRename={(itemId, title) => void patch(itemId, { title })}
+                  onAssign={(itemId, assignedTo) => void patch(itemId, { assignedTo })}
+                  onSetPriority={(itemId, priority) => void patch(itemId, { priority })}
+                  onSetDueDate={(itemId, dueDate) => void patch(itemId, { dueDate })}
+                  onMove={(itemId, targetListId) => void patch(itemId, { listId: targetListId })}
+                  onSetCustomField={(itemId, fieldId, value) =>
+                    void patch(itemId, { customFields: { [fieldId]: value } })
+                  }
+                  onDelete={(itemId) => void handleDelete(itemId)}
+                />
+              </div>
             ) : state.items.length === 0 ? (
               <div
                 className="p-6 text-center text-[color:var(--ink-dim)] text-sm"
@@ -512,22 +809,24 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
               >
                 {query.filters.length > 0
                   ? 'No items match the current filters.'
-                  : 'No items yet. Add the first one above.'}
+                  : state.readOnly
+                    ? 'No items yet.'
+                    : 'No items yet. Add the first one above.'}
               </div>
             ) : (
               <div className="space-y-2">
-                {selectedIds.size > 0 && (
+                {!state.readOnly && selection.count > 0 && (
                   <BulkToolbar
                     listId={state.list.id}
-                    selectedIds={[...selectedIds]}
+                    selectedIds={[...selection.selected]}
                     members={members}
                     fieldDefs={state.fieldDefs}
                     onDone={() => {
-                      setSelectedIds(new Set())
+                      selection.clear()
                       void load({ silent: true })
                     }}
                     onError={reportError}
-                    onClear={() => setSelectedIds(new Set())}
+                    onClear={() => selection.clear()}
                   />
                 )}
 
@@ -538,26 +837,29 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                   className="flex items-center gap-3 px-3 text-xs"
                   style={{ color: 'var(--ink-dim)' }}
                 >
-                  <label className="flex items-center gap-2" title="Select every item for bulk actions">
-                    <input
-                      type="checkbox"
-                      checked={state.items.every((i) => selectedIds.has(i.id))}
-                      ref={(el) => {
-                        if (el) {
-                          el.indeterminate =
-                            selectedIds.size > 0 && !state.items.every((i) => selectedIds.has(i.id))
-                        }
-                      }}
-                      onChange={(e) =>
-                        setSelectedIds(
-                          e.target.checked ? new Set(state.items.map((i) => i.id)) : new Set(),
-                        )
-                      }
-                      className="h-4 w-4"
-                      style={{ accentColor: 'var(--hot)' }}
-                    />
-                    Select all
-                  </label>
+                  {(() => {
+                    // Select-all targets only the rows currently in view — a
+                    // collapsed parent's hidden children must not be swept into
+                    // a bulk action the user can't see. (The grid shows
+                    // everything; the checklist honors collapse.)
+                    const visIds = currentVisibleIds(state.items)
+                    const selVis = visIds.filter((id) => selection.isSelected(id)).length
+                    return (
+                      <label className="flex items-center gap-2" title="Select every visible item for bulk actions">
+                        <input
+                          type="checkbox"
+                          checked={visIds.length > 0 && selVis === visIds.length}
+                          ref={(el) => {
+                            if (el) el.indeterminate = selVis > 0 && selVis < visIds.length
+                          }}
+                          onChange={(e) => selection.replace(e.target.checked ? visIds : [])}
+                          className="h-4 w-4"
+                          style={{ accentColor: 'var(--hot)' }}
+                        />
+                        Select all
+                      </label>
+                    )
+                  })()}
                   <span aria-hidden style={{ alignSelf: 'stretch', borderLeft: '1px solid var(--line)' }} />
                   <span className="flex items-center gap-1.5" title="The green checkbox marks an item complete">
                     <span
@@ -570,43 +872,35 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                 </div>
 
                 {viewMode === 'grid' ? (
-                  <GridView
-                    items={state.items}
-                    members={members}
-                    fieldDefs={state.fieldDefs}
-                    selectedIds={selectedIds}
-                    onSelect={toggleSelect}
-                    onToggleComplete={(itemId, completed) => void patch(itemId, { completed })}
-                    onRename={(itemId, title) => void patch(itemId, { title })}
-                    onAssign={(itemId, assignedTo) => void patch(itemId, { assignedTo })}
-                    onSetCustomField={(itemId, fieldId, value) =>
-                      void patch(itemId, { customFields: { [fieldId]: value } })
-                    }
-                  />
-                ) : (
-                  <ul className="space-y-2">
-                    {state.items.map((item, index) => (
-                      <ItemRow
-                        key={item.id}
-                        item={item}
+                  (() => {
+                    // Grid shows the tree-flattened order (children follow
+                    // their parent) with a per-row depth for indentation. No
+                    // collapse in the grid — a flat table reads better fully
+                    // expanded; the checklist owns expand/collapse.
+                    const gridRows = flattenVisible(buildItemTree(state.items), new Set())
+                    const depthOf = new Map(gridRows.map((r) => [r.item.id, r.depth]))
+                    const gridOrder = gridRows.map((r) => r.item.id)
+                    return (
+                      <GridView
+                        items={gridRows.map((r) => r.item)}
+                        depthOf={depthOf}
                         members={members}
                         fieldDefs={state.fieldDefs}
-                        selected={selectedIds.has(item.id)}
-                        onSelect={(on) => toggleSelect(item.id, on)}
-                        canMoveUp={index > 0}
-                        canMoveDown={index < state.items.length - 1}
-                        onToggle={(completed) => void patch(item.id, { completed })}
-                        onRename={(title) => void patch(item.id, { title })}
-                        onAssign={(assignedTo) => void patch(item.id, { assignedTo })}
-                        onSetCustomField={(fieldId, value) =>
-                          void patch(item.id, { customFields: { [fieldId]: value } })
+                        selectedIds={selection.selected}
+                        onSelect={(itemId, on) => selection.toggle(itemId, on)}
+                        onRangeSelect={(itemId) => selection.extendTo(itemId, gridOrder)}
+                        onClearSelection={() => selection.clear()}
+                        onToggleComplete={(itemId, completed) => void patch(itemId, { completed })}
+                        onRename={(itemId, title) => void patch(itemId, { title })}
+                        onAssign={(itemId, assignedTo) => void patch(itemId, { assignedTo })}
+                        onSetCustomField={(itemId, fieldId, value) =>
+                          void patch(itemId, { customFields: { [fieldId]: value } })
                         }
-                        onDelete={() => void handleDelete(item.id)}
-                        onMoveUp={() => void move(state.items, index, -1)}
-                        onMoveDown={() => void move(state.items, index, 1)}
                       />
-                    ))}
-                  </ul>
+                    )
+                  })()
+                ) : (
+                  renderChecklist(state.items)
                 )}
               </div>
             )}
@@ -627,6 +921,37 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
             listId={state.list.id}
             listName={state.list.name}
           />
+          {state.list.list_type === 'tasks' && (
+            <StatusManagerDrawer
+              open={statusesOpen}
+              onClose={() => {
+                setStatusesOpen(false)
+                // Self-authored realtime events are skipped, so pull the
+                // board's columns back in sync with any drawer edits.
+                void load({ silent: true })
+              }}
+              listId={state.list.id}
+              listName={state.list.name}
+            />
+          )}
+          <ItemCommentsDrawer
+            open={commentsItem !== null}
+            onClose={() => setCommentsItem(null)}
+            listId={state.list.id}
+            itemId={commentsItem?.id ?? ''}
+            itemTitle={commentsItem?.title ?? ''}
+            selfUserId={selfUserId}
+          />
+          <LabelManagerDrawer
+            open={labelsOpen}
+            onClose={() => {
+              setLabelsOpen(false)
+              // Self-authored realtime is skipped; refresh chips after edits.
+              void load({ silent: true })
+            }}
+            listId={state.list.id}
+            listName={state.list.name}
+          />
         </>
       )}
     </main>
@@ -635,10 +960,20 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
 
 interface ItemRowProps {
   item: ListItemDto
+  depth: number
+  hasChildren: boolean
+  collapsed: boolean
+  onToggleCollapse: () => void
+  onAddSubItem: () => void
+  onComments: () => void
+  labels: LabelDto[]
+  onSetLabels: (labelIds: string[]) => void
   members: GroupMemberDto[]
   fieldDefs: FieldDefDto[]
   selected: boolean
   onSelect: (on: boolean) => void
+  // Shift-click on the select box — extend the selection to this row.
+  onRangeSelect: () => void
   canMoveUp: boolean
   canMoveDown: boolean
   onToggle: (completed: boolean) => void
@@ -652,10 +987,19 @@ interface ItemRowProps {
 
 function ItemRow({
   item,
+  depth,
+  hasChildren,
+  collapsed,
+  onToggleCollapse,
+  onAddSubItem,
+  onComments,
+  labels,
+  onSetLabels,
   members,
   fieldDefs,
   selected,
   onSelect,
+  onRangeSelect,
   canMoveUp,
   canMoveDown,
   onToggle,
@@ -680,19 +1024,49 @@ function ItemRow({
     else setTitle(item.title)
   }
 
+  const childTotal = item.child_count ?? 0
+  const childDone = item.child_done_count ?? 0
+
   return (
     <li
       className="space-y-2 px-3 py-2"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      style={{
+        border: '1.5px solid var(--line)',
+        background: 'var(--surface)',
+        marginLeft: depth * 20,
+      }}
     >
       <div className="flex items-center gap-3">
+      {/* Collapse caret (parents only); a fixed-width spacer keeps leaf
+          rows aligned with their parent's controls. */}
+      {hasChildren ? (
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          aria-label={collapsed ? 'Expand sub-items' : 'Collapse sub-items'}
+          aria-expanded={!collapsed}
+          className="w-4 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
+      ) : (
+        <span aria-hidden className="w-4" />
+      )}
       <input
         type="checkbox"
         checked={selected}
+        onClick={(e) => {
+          // Shift-click selects the range from the anchor; let a plain click
+          // fall through to onChange for the normal toggle.
+          if (e.shiftKey) {
+            e.preventDefault()
+            onRangeSelect()
+          }
+        }}
         onChange={(e) => onSelect(e.target.checked)}
         className="h-4 w-4"
         style={{ accentColor: 'var(--hot)' }}
-        title="Select for bulk actions"
+        title="Select for bulk actions (shift-click for a range)"
         aria-label={selected ? 'Deselect item' : 'Select item'}
       />
       {/* Divider so the bulk-select box reads as separate from the
@@ -742,6 +1116,24 @@ function ItemRow({
       <div className="flex items-center gap-1">
         <button
           type="button"
+          onClick={onComments}
+          aria-label="Comments"
+          title="Comments"
+          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
+        >
+          💬
+        </button>
+        <button
+          type="button"
+          onClick={onAddSubItem}
+          aria-label="Add sub-item"
+          title="Add sub-item"
+          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
+        >
+          + sub
+        </button>
+        <button
+          type="button"
           onClick={onMoveUp}
           disabled={!canMoveUp}
           aria-label="Move up"
@@ -770,8 +1162,37 @@ function ItemRow({
       </div>
       </div>
 
+      <div className="pl-8">
+        <LabelChips labelIds={item.label_ids} labels={labels} onSetLabels={onSetLabels} />
+      </div>
+
+      {childTotal > 0 && (
+        <div className="flex items-center gap-2 pl-8 text-xs" style={{ color: 'var(--ink-dim)' }}>
+          <div
+            className="h-1.5 flex-1 overflow-hidden rounded-full"
+            style={{ background: 'var(--surface-2)' }}
+            role="progressbar"
+            aria-valuenow={progressPercent(childDone, childTotal)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Sub-item progress"
+          >
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${progressPercent(childDone, childTotal)}%`,
+                background: 'var(--acid)',
+              }}
+            />
+          </div>
+          <span className="shrink-0 tabular-nums">
+            {childDone}/{childTotal}
+          </span>
+        </div>
+      )}
+
       {fieldDefs.length > 0 && (
-        <div className="pl-7">
+        <div className="pl-8">
           <CustomFieldsEditor
             defs={fieldDefs}
             values={item.custom_fields}
@@ -780,6 +1201,63 @@ function ItemRow({
           />
         </div>
       )}
+    </li>
+  )
+}
+
+// Inline add-sub-item input, opened under a parent row. Indented to match
+// its parent's children; Enter or the Add button creates, Esc or ✕ cancels.
+function AddSubItemRow({
+  depth,
+  submitting,
+  onCancel,
+  onSubmit,
+}: {
+  depth: number
+  submitting: boolean
+  onCancel: () => void
+  onSubmit: (title: string) => void
+}) {
+  const [title, setTitle] = useState('')
+  return (
+    <li
+      className="flex items-center gap-2 px-3 py-2"
+      style={{
+        border: '1.5px dashed var(--line)',
+        background: 'var(--surface)',
+        marginLeft: depth * 20,
+      }}
+    >
+      <input
+        autoFocus
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && title.trim().length > 0) onSubmit(title)
+          else if (e.key === 'Escape') onCancel()
+        }}
+        placeholder="Sub-item title…"
+        className="cyber-input flex-1"
+        style={{ padding: '4px 8px' }}
+      />
+      <button
+        type="button"
+        onClick={() => title.trim().length > 0 && onSubmit(title)}
+        disabled={title.trim().length === 0 || submitting}
+        className="btn-ghost"
+        style={{ width: 'auto' }}
+      >
+        Add
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        aria-label="Cancel"
+        className="rounded px-1.5 py-0.5"
+        style={{ color: 'var(--ink-dim)' }}
+      >
+        ✕
+      </button>
     </li>
   )
 }

@@ -101,6 +101,7 @@ export interface SessionDto {
   title: string
   description: string | null
   dayId: string | null
+  stageId: string | null
   startTime: string | null
   endTime: string | null
   category: string | null

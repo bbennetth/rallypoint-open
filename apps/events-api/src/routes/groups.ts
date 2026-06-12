@@ -15,6 +15,13 @@ import { UniqueConstraintError } from '../repos/errors.js'
 import type { GroupMemberRecord, GroupRecord, GroupRole } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity, requireIdPrefix } from './_access.js'
+import { assertFeatureEnabled } from './_features.js'
+import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
+import {
+  SHORT_CODE_MAX_ATTEMPTS,
+  generateShortCode,
+  normalizeShortCode,
+} from '@rallypoint/events-shared'
 import { GROUP_ROLE_RANK, groupActorRole, loadGroupForAction } from './_group-access.js'
 
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000 // 14 days
@@ -52,7 +59,8 @@ function serializeMember(m: GroupMemberRecord): Record<string, unknown> {
 export const groupsRoutes = new Hono<HonoApp>()
   // --- create (event editor+) --------------------------------------
   .post('/api/v1/ui/events/:id/groups', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    assertFeatureEnabled(event, role, 'groups')
     const userId = c.var.session!.userId
     const parsed = CreateGroupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
@@ -64,27 +72,49 @@ export const groupsRoutes = new Hono<HonoApp>()
     // name collision; no phantom owner-member or attendee row on the
     // sad path. Phase 0 attendee rule: event owners don't carry an
     // attendees row, so `attendeeId: null` skips that write.
-    let group: GroupRecord
-    try {
-      group = await c.var.repos.groups.createWithOwner({
-        group: {
-          id: `grp_${ulid()}`,
-          eventId: event.id,
-          name: body.name,
-          description: body.description ?? null,
-          startDate: body.startDate ?? null,
-          endDate: body.endDate ?? null,
-          joinCodeHash: hashToken(rawCode),
-          ownerUserId: userId,
-        },
-        ownerMemberId: `grm_${ulid()}`,
-        attendeeId: event.ownerUserId !== userId ? `eva_${ulid()}` : null,
-      })
-    } catch (err) {
-      if (err instanceof UniqueConstraintError) {
-        throw errors.conflict('group_name_taken', 'A group with that name already exists.')
+    //
+    // #440: also mint a 6-char short code. A collision on the
+    // short-code unique index retries with a fresh code (32^6 space —
+    // vanishingly rare); a name collision keeps its 409.
+    let group: GroupRecord | null = null
+    for (let attempt = 0; attempt < SHORT_CODE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        group = await c.var.repos.groups.createWithOwner({
+          group: {
+            id: `grp_${ulid()}`,
+            eventId: event.id,
+            name: body.name,
+            description: body.description ?? null,
+            startDate: body.startDate ?? null,
+            endDate: body.endDate ?? null,
+            joinCodeHash: hashToken(rawCode),
+            shortCode: generateShortCode(),
+            ownerUserId: userId,
+          },
+          ownerMemberId: `grm_${ulid()}`,
+          attendeeId: event.ownerUserId !== userId ? `eva_${ulid()}` : null,
+        })
+        break
+      } catch (err) {
+        // D1 reports "groups.short_code", the memory repo
+        // "groups_short_code_idx" — match on the column name.
+        if (err instanceof UniqueConstraintError && err.constraintName.includes('short_code')) {
+          continue
+        }
+        if (err instanceof UniqueConstraintError) {
+          throw errors.conflict('group_name_taken', 'A group with that name already exists.')
+        }
+        throw err
       }
-      throw err
+    }
+    if (!group) {
+      // Exhausted short-code retries — fail loudly (FP's silent
+      // collision reuse is the bug we're not replicating).
+      throw new ApiError({
+        code: 'short_code_exhausted',
+        message: 'Could not allocate a join code; try again.',
+        status: 503,
+      })
     }
     await recordActivity(c, event.id, 'group.created', { group_id: group.id })
 
@@ -112,11 +142,13 @@ export const groupsRoutes = new Hono<HonoApp>()
         'auto-attach money ledger failed; will heal on first BFF read',
       )
     }
-    // The raw join code leaves the API exactly once, here.
+    // The raw rpj_ join code leaves the API exactly once, here. The
+    // short code is re-showable (group detail, owner/sidekick).
     return c.json(
       {
         ...serializeGroup(group, 'owner', 1),
         join_code: rawCode,
+        short_code: group.shortCode,
         ...(ledgerId !== null ? { ledger_id: ledgerId } : {}),
       },
       201,
@@ -131,7 +163,8 @@ export const groupsRoutes = new Hono<HonoApp>()
   // short-circuits event ownership to `owner`, so the role filter and
   // the membership check below collapse to the same predicate.
   .get('/api/v1/ui/events/:id/groups', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
+    assertFeatureEnabled(event, role, 'groups')
     const userId = c.var.session!.userId
     const groups = await c.var.repos.groups.listForEvent(event.id)
     const items: ReturnType<typeof serializeGroup>[] = []
@@ -145,21 +178,91 @@ export const groupsRoutes = new Hono<HonoApp>()
   })
 
   // --- join by code (resolver: join code first, then invite) -------
+  // --- join preview (#440, FP parity) --------------------------------
+  // Resolve a join code (6-char short code or rpj_ token) to a small
+  // preview card payload WITHOUT joining: group name, member count,
+  // whether the caller is already a member, plus the event name (RPE
+  // extension — groups are event-scoped here, FP's were festival-
+  // scoped). Auth'd + per-user rate limited; invalid codes 404 with
+  // the same shape as the join route so codes aren't probeable
+  // cheaper here than there.
+  .get('/api/v1/ui/groups/join/preview', async (c) => {
+    const userId = c.var.session!.userId
+    await applyPerUserRateLimit(c, {
+      userId,
+      route: 'group-join-preview',
+      limit: 30,
+      windowSeconds: 300,
+    })
+    const raw = c.req.query('code') ?? ''
+    if (!raw) throw errors.groupJoinCodeInvalid()
+
+    const short = normalizeShortCode(raw)
+    let group = short
+      ? await c.var.repos.groups.findByShortCode(short)
+      : await c.var.repos.groups.findByJoinCodeHash(hashToken(raw))
+    if (!group && !short) {
+      const invite = await c.var.repos.groupInvites.findByCodeHash(hashToken(raw))
+      if (invite && !invite.consumedAt && invite.expiresAt.getTime() >= Date.now()) {
+        group = await c.var.repos.groups.findById(invite.groupId)
+      }
+    }
+    if (!group) throw errors.groupJoinCodeInvalid()
+
+    const event = await c.var.repos.events.findById(group.eventId)
+    if (!event || event.deletedAt) throw errors.groupJoinCodeInvalid()
+
+    const member = await c.var.repos.groupMembers.findByGroupAndUser(group.id, userId)
+    const memberCount = await c.var.repos.groupMembers.countForGroup(group.id)
+    return c.json({
+      group_id: group.id,
+      name: group.name,
+      member_count: memberCount,
+      event_name: event.name,
+      you_are_member: member !== null,
+    })
+  })
+
   .post('/api/v1/ui/groups/join', async (c) => {
     const userId = c.var.session!.userId
+    // 6-char codes are brute-forceable in principle (32^6); throttle
+    // join attempts per user. rpj_ tokens share the bucket — joining
+    // is not a hot path.
+    await applyPerUserRateLimit(c, {
+      userId,
+      route: 'group-join',
+      limit: 20,
+      windowSeconds: 300,
+    })
     const parsed = JoinGroupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+
+    // #440: a 6-char short code (any casing/spacing) resolves via
+    // groups.short_code; anything else is treated as an rpj_ token.
+    const short = normalizeShortCode(parsed.data.code)
     const codeHash = hashToken(parsed.data.code)
 
     // §5.5 contract: an active group join code wins over a colliding
     // invite code, so check groups.join_code_hash FIRST.
-    let group = await c.var.repos.groups.findByJoinCodeHash(codeHash)
+    let group = short
+      ? await c.var.repos.groups.findByShortCode(short)
+      : await c.var.repos.groups.findByJoinCodeHash(codeHash)
     let invite = null
-    if (!group) {
+    if (!group && !short) {
       invite = await c.var.repos.groupInvites.findByCodeHash(codeHash)
       if (invite) group = await c.var.repos.groups.findById(invite.groupId)
     }
     if (!group) throw errors.groupJoinCodeInvalid()
+
+    // #216: with groups toggled off, join codes behave as invalid for
+    // everyone but the owner — indistinguishable from a dead code. This
+    // fires BEFORE the invite liveness checks below so a consumed or
+    // expired invite can't leak its state through the toggle wall.
+    {
+      const gateEvent = await c.var.repos.events.findById(group.eventId)
+      if (!gateEvent || gateEvent.deletedAt) throw errors.groupJoinCodeInvalid()
+      assertFeatureEnabled(gateEvent, gateEvent.ownerUserId === userId ? 'owner' : 'viewer', 'groups')
+    }
 
     // Invite-path liveness checks.
     if (invite) {
@@ -205,11 +308,76 @@ export const groupsRoutes = new Hono<HonoApp>()
   // Event owners no longer pass through here (Phase 0 privacy rule);
   // they read the flat attendees list instead. groupActorRole gates.
   .get('/api/v1/ui/groups/:id', async (c) => {
-    const { group, role } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const loaded = await loadGroupForAction(c, c.req.param('id'), 'member')
+    let group = loaded.group
+    const role = loaded.role
     const members = await c.var.repos.groupMembers.listForGroup(group.id)
+
+    // #440: lazy short-code backfill for pre-#440 groups, then expose
+    // the code to privileged members (owner/sidekick) so the invite UI
+    // can re-show it any time. Plain members share via the invite UI
+    // too, so expose to all group members — the code is group-internal
+    // either way (matches FP, where every member saw the Crew invite
+    // section).
+    if (group.shortCode === null) {
+      for (let attempt = 0; attempt < SHORT_CODE_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const updated = await c.var.repos.groups.setShortCode(group.id, generateShortCode())
+          if (updated) group = updated
+          break
+        } catch (err) {
+          if (err instanceof UniqueConstraintError && err.constraintName.includes('short_code')) {
+            continue
+          }
+          throw err
+        }
+      }
+      // Statistically unreachable, but fail loudly rather than return
+      // a permanent null code (matches the create path's 503).
+      if (group.shortCode === null) {
+        throw new ApiError({
+          code: 'short_code_exhausted',
+          message: 'Could not allocate a join code; try again.',
+          status: 503,
+        })
+      }
+    }
+
     return c.json({
       ...serializeGroup(group, role, members.length),
+      short_code: group.shortCode,
       members: members.map(serializeMember),
+    })
+  })
+
+  // --- who's going via group membership (#216) ------------------------
+  // Group-joined attendees may have no event_members row, so the event-
+  // scoped /attendees/community route would 404 them. This variant gates
+  // on group membership instead, then applies the same `attendees`
+  // feature toggle on the group's event. Display names only.
+  .get('/api/v1/ui/groups/:id/attendees', async (c) => {
+    const { group } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const event = await c.var.repos.events.findById(group.eventId)
+    if (!event || event.deletedAt) throw errors.notFound('Not found.')
+    const userId = c.var.session!.userId
+    assertFeatureEnabled(event, event.ownerUserId === userId ? 'owner' : 'viewer', 'attendees')
+
+    // First page only, capped at the endpoint max (200) — matches the
+    // event-scoped community endpoint's max. Very large events show a
+    // truncated roster here; the card is a social glance, not a census.
+    const page = await c.var.repos.attendees.listForEvent(event.id, {
+      limit: 200,
+      cursor: null,
+    })
+    const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
+    const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
+    const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
+    return c.json({
+      items: page.items.map((a) => ({
+        user_id: a.userId,
+        display_name: nameById.get(a.userId) ?? null,
+        joined_at: a.joinedAt.toISOString(),
+      })),
     })
   })
 

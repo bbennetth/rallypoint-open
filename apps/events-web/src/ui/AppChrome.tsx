@@ -19,6 +19,7 @@ import { useSession, RPID_UI_URL } from '../lib/session.js'
 export interface EventContextProps {
   slug: string
   name: string
+  features?: EventFeatures
 }
 
 export interface AppChromeProps {
@@ -37,12 +38,17 @@ const GLOBAL_NAV: readonly AppChromeNavItem[] = [
   { to: '/events/join', label: 'Join', icon: 'download', end: true },
 ]
 
-function eventNavFor(slug: string): readonly AppChromeNavItem[] {
+function eventNavFor(slug: string, features?: EventFeatures): readonly AppChromeNavItem[] {
   const base = `/events/${encodeURIComponent(slug)}`
   return [
     { to: base, label: 'Overview', icon: 'grid', end: true },
-    { to: `${base}/lineup`, label: 'Lineup', icon: 'events' },
-    { to: `${base}/sessions`, label: 'Sessions', icon: 'clock' },
+    // Feature-gated tabs (#216). undefined = not loaded yet → show all.
+    ...(features === undefined || features.lineup
+      ? [{ to: `${base}/lineup`, label: 'Lineup', icon: 'events' } as const]
+      : []),
+    ...(features === undefined || features.sessions
+      ? [{ to: `${base}/sessions`, label: 'Sessions', icon: 'clock' } as const]
+      : []),
     { to: `${base}/map`, label: 'Map', icon: 'pin' },
     { to: `${base}/attendees`, label: 'Attendees', icon: 'more' },
     { to: `${base}/public`, label: 'Public Page', icon: 'file' },
@@ -67,7 +73,7 @@ export function AppChrome({ children, eventContext }: AppChromeProps) {
     }
   }
 
-  const nav = eventContext ? eventNavFor(eventContext.slug) : GLOBAL_NAV
+  const nav = eventContext ? eventNavFor(eventContext.slug, eventContext.features) : GLOBAL_NAV
   const subLabel = eventContext ? eventContext.name : 'Events'
 
   const brand = eventContext

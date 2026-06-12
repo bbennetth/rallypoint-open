@@ -2,21 +2,23 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
   getMyDay,
+  getRecurring,
+  getUpcoming,
   setGroupEventPlannerPref,
   setTaskItemCompleted,
   type EventDayDto,
   type MyDay,
   type MyDayEvent,
   type MyDayTask,
+  type RecurringResponse,
+  type Upcoming,
 } from '../lib/api.js'
 import {
   fmtTime,
   localToday,
-  normalizeDayMode,
   pickNext,
   progressPct,
   splitMyDay,
-  type DayMode,
 } from '../lib/planner-helpers.js'
 import { onCreated } from '../lib/refresh-bus.js'
 import { Drawer } from '@rallypoint/ui'
@@ -26,35 +28,20 @@ import { TaskDetail } from '../ui/TaskDetail.js'
 import { PersonalEventEdit } from '../ui/PersonalEventEdit.js'
 import { EventDayDetail } from '../ui/EventDayDetail.js'
 import { openProps, stopRowOpen as stop } from '../ui/row-open.js'
-import { UpcomingView } from './UpcomingPage.js'
-
-// My Day hosts two modes behind a segmented toggle (issue #495): 'today'
-// (the classic My Day roll-up) and 'upcoming' (the former Upcoming tab).
-// Persisted to ?mode= so /upcoming can redirect here and links survive.
-function readModeParam(): DayMode {
-  return normalizeDayMode(new URLSearchParams(window.location.search).get('mode'))
-}
-
-function writeModeParam(m: DayMode) {
-  const url = new URL(window.location.href)
-  if (m === 'today') {
-    url.searchParams.delete('mode')
-    url.searchParams.delete('view') // calendar view param belongs to upcoming mode
-  } else {
-    url.searchParams.set('mode', m)
-  }
-  window.history.replaceState(null, '', url.toString())
-}
+import { UpcomingFeed } from './UpcomingPage.js'
 
 type Selected =
   | { kind: 'task'; task: MyDayTask }
   | { kind: 'event'; event: MyDayEvent }
   | { kind: 'eventDay'; eventDay: EventDayDto }
 
-// My Day surface (slice 8 + Ink redesign). A roll-up of tasks due today and
-// personal events starting today, resolved in the browser's local timezone.
-// Data lives in Lists/Events via the planner-api BFF; this page owns view
-// state, the local date/tz it sends, and optimistic Mark-done toggles.
+// My Day surface (slice 8 + Ink redesign). A single scrolling agenda: today's
+// roll-up (tasks due today + personal events starting today, resolved in the
+// browser's local timezone) at the top, then a "Coming up" feed of everything
+// on the horizon below it (the former Upcoming tab, folded in here without a
+// mode toggle — issue #495 shipped the toggle, this removes it). The page owns
+// the my-day + upcoming + recurring fetch and passes the forward-looking data
+// down to <UpcomingFeed>. Data lives in Lists/Events via the planner-api BFF.
 
 function errMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message
@@ -69,30 +56,46 @@ function headingLabel(date: string): string {
 
 export function MyDayPage() {
   const [data, setData] = useState<MyDay | null>(null)
+  const [upcoming, setUpcoming] = useState<Upcoming | null>(null)
+  const [recurring, setRecurring] = useState<RecurringResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selected | null>(null)
-  const [mode, setMode] = useState<DayMode>(readModeParam)
 
-  function switchMode(m: DayMode) {
-    // The detail Drawer lives in the today branch; clear the selection so a
-    // mode round-trip doesn't re-open a stale drawer.
-    setSelected(null)
-    setMode(m)
-    writeModeParam(m)
-  }
+  const today = useMemo(() => localToday().date, [])
+
+  // The Upcoming tab is gone; scrub any stale ?mode= / ?view= a bookmarked or
+  // redirected link may carry so the URL reflects the single-agenda view.
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('mode') || url.searchParams.has('view')) {
+      url.searchParams.delete('mode')
+      url.searchParams.delete('view')
+      window.history.replaceState(null, '', url.toString())
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     const { date, tz } = localToday()
     setLoading(true)
-    try {
-      setData(await getMyDay(date, tz))
-    } catch (err) {
-      setError(errMessage(err))
-    } finally {
-      setLoading(false)
+    // One parallel fetch feeds the whole agenda. My Day is the critical slice —
+    // its failure surfaces an error. Upcoming + Recurring are best-effort: if
+    // either fails the today roll-up still renders, the feed just stays empty.
+    const [md, up, rec] = await Promise.allSettled([
+      getMyDay(date, tz),
+      getUpcoming(date, tz),
+      getRecurring(date, tz),
+    ])
+    if (md.status === 'fulfilled') {
+      setData(md.value)
+      setError(null)
+    } else {
+      setError(errMessage(md.reason))
     }
+    setUpcoming(up.status === 'fulfilled' ? up.value : null)
+    setRecurring(rec.status === 'fulfilled' ? rec.value : null)
+    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -179,43 +182,17 @@ export function MyDayPage() {
         <div>
           <h1>My Day</h1>
           <div className="sub">
-            {mode === 'upcoming'
-              ? 'Everything on the horizon, soonest first.'
-              : (data ? headingLabel(data.date) : 'Today') +
-                (view ? (view.total > 0 ? ` · ${view.done} of ${view.total} tasks done` : ' · All clear') : '')}
+            {(data ? headingLabel(data.date) : 'Today') +
+              (view ? (view.total > 0 ? ` · ${view.done} of ${view.total} tasks done` : ' · All clear') : '')}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto' }}>
-          <div className="seg" role="radiogroup" aria-label="My Day mode" style={{ flexShrink: 0 }}>
-            <button
-              type="button"
-              role="radio"
-              className={mode === 'today' ? 'on' : ''}
-              onClick={() => switchMode('today')}
-              aria-checked={mode === 'today'}
-            >
-              <Icon name="myday" size={12} />
-              Today
-            </button>
-            <button
-              type="button"
-              role="radio"
-              className={mode === 'upcoming' ? 'on' : ''}
-              onClick={() => switchMode('upcoming')}
-              aria-checked={mode === 'upcoming'}
-            >
-              <Icon name="upcoming" size={12} />
-              Upcoming
-            </button>
+        {view && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto' }}>
+            <Ring pct={view.pct} size={62} />
           </div>
-          {mode === 'today' && view && <Ring pct={view.pct} size={62} />}
-        </div>
+        )}
       </div>
 
-      {mode === 'upcoming' ? (
-        <UpcomingView />
-      ) : (
-        <>
       {error && (
         <p role="alert" style={{ color: 'var(--hot)', fontSize: 13, marginTop: 0 }}>
           {error}
@@ -268,11 +245,6 @@ export function MyDayPage() {
                       >
                         {a.title}
                       </span>
-                      {a.shared && (
-                        <span className="pl-chip" style={{ flexShrink: 0, borderColor: 'var(--acid-dim)', color: 'var(--acid)' }}>
-                          Shared
-                        </span>
-                      )}
                     </span>
                     <span onClick={stop} style={{ display: 'flex' }}>
                       <Check done={a.completed} onClick={() => toggle(a)} />
@@ -366,11 +338,6 @@ export function MyDayPage() {
                         >
                           {e.title}
                         </span>
-                        {e.kind === 'task' && e.task?.shared && (
-                          <span className="pl-chip" style={{ flexShrink: 0, borderColor: 'var(--acid-dim)', color: 'var(--acid)' }}>
-                            Shared
-                          </span>
-                        )}
                         {e.kind === 'eventDay' && e.eventDay?.shared && (
                           <span className="pl-chip" style={{ flexShrink: 0, borderColor: 'var(--acid-dim)', color: 'var(--acid)' }}>
                             Shared
@@ -449,11 +416,6 @@ export function MyDayPage() {
                       >
                         {u.title}
                       </span>
-                      {u.shared && (
-                        <span className="pl-chip" style={{ flexShrink: 0, borderColor: 'var(--acid-dim)', color: 'var(--acid)' }}>
-                          Shared
-                        </span>
-                      )}
                     </span>
                     <span onClick={stop} style={{ display: 'flex' }}>
                       <Check done={u.completed} onClick={() => toggle(u)} />
@@ -462,6 +424,18 @@ export function MyDayPage() {
                 ))}
               </div>
             </>
+          )}
+
+          {upcoming && (
+            <div style={{ marginTop: 26 }}>
+              <EyeRow>Coming up</EyeRow>
+              <UpcomingFeed
+                data={upcoming}
+                recurringData={recurring}
+                todayYmd={today}
+                onChanged={() => void refresh()}
+              />
+            </div>
           )}
         </>
       ) : null}
@@ -488,8 +462,6 @@ export function MyDayPage() {
         )}
         {selected?.kind === 'eventDay' && <EventDayDetail eventDay={selected.eventDay} />}
       </Drawer>
-        </>
-      )}
     </>
   )
 }

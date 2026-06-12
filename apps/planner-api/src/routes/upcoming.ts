@@ -7,7 +7,7 @@ import { requireSession } from '../middleware/session.js'
 import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
 import { bestEffort, proxyEvents, proxyLists } from '../lib/sdk-error.js'
 import { listPersonalTaskLists } from '../lib/personal-scope.js'
-import { mergeSharedTaskItems, mergeSharedGroupEvents, sharedListIdSet, sharedEventIdSet } from '../lib/shared-merge.js'
+import { mergeSharedGroupEvents, sharedEventIdSet } from '../lib/shared-merge.js'
 import { zonedDayWindow } from '../lib/day-window.js'
 import { composeUpcoming } from '../lib/upcoming.js'
 
@@ -57,17 +57,9 @@ export const upcomingRoutes = new Hono<HonoApp>()
       bestEffort(() => eventsClient.listUserEvents({ actor }), []),
     ])
 
-    const personalListIds = personalLists.lists.map((l) => l.id)
-
-    // Planner-flagged shared lists: best-effort so a lists-api hiccup never
-    // drops the actor's own tasks. Fetch items for each flagged list in parallel.
-    const flaggedLists = await bestEffort(() => listsClient.listPlannerLists(actor), [])
-    const sharedItems = (
-      await Promise.all(flaggedLists.map((l) => bestEffort(() => listsClient.listItems(l.id), [])))
-    ).flat()
-
-    const tasks = mergeSharedTaskItems(personalLists.items, sharedItems)
-    const sharedListIds = [...sharedListIdSet(flaggedLists.map((l) => l.id), personalListIds)]
+    // Tasks come from the actor's personal (planner-origin) lists only —
+    // RPL lists no longer flow into Planner (#531 separation).
+    const tasks = personalLists.items
 
     // Planner-flagged group events: best-effort so an events-api hiccup never
     // drops the actor's own events. Merge with already-reachable events, dedup
@@ -81,6 +73,6 @@ export const upcomingRoutes = new Hono<HonoApp>()
     const sharedEventIds = [...sharedEventIdSet(flaggedGroupEvents.map((e) => e.eventId), reachableEventIds)]
 
     return c.json(
-      composeUpcoming({ date, timezone, fromInstant, tasks, events, userEvents: mergedUserEvents, sharedListIds, sharedEventIds }),
+      composeUpcoming({ date, timezone, fromInstant, tasks, events, userEvents: mergedUserEvents, sharedEventIds }),
     )
   })

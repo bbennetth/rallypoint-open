@@ -10,18 +10,11 @@ import { expandEventDays, isAllDay, type EventDayItem } from './event-days.js'
 // is the Planner BFF's own aggregation (modelled on events-api's group-day),
 // not domain logic, so it lives here rather than in a shared SDK package.
 
-// Task wrapper with optional shared marker. When `shared` is true the item
-// came from a planner-flagged shared list (not the actor's personal scope).
-export interface MyDayTaskItem extends ListItemDto {
-  /** True when the task belongs to a planner-flagged shared list. */
-  shared?: boolean
-}
-
 export interface MyDay {
   date: string
   timezone: string
-  tasks: MyDayTaskItem[] // due within the day, soonest first
-  undatedTasks: MyDayTaskItem[] // no dueDate; priority asc (high first) then title
+  tasks: ListItemDto[] // due within the day, soonest first
+  undatedTasks: ListItemDto[] // no dueDate; priority asc (high first) then title
   events: PersonalEventDto[] // starting within the day, soonest first
   eventDays: EventDayItem[] // group event days falling on the day, all-day first
 }
@@ -48,23 +41,16 @@ export function composeMyDay(input: {
   tasks: ListItemDto[]
   events: PersonalEventDto[]
   userEvents: UserEventDto[] // group (festival) events, expanded per day
-  /** List ids that should be marked shared in the output (planner-flagged). */
-  sharedListIds?: readonly string[]
   /** Group event ids that should be marked shared in the output (planner-flagged). */
   sharedEventIds?: readonly string[]
 }): MyDay {
   const startMs = Date.parse(input.window.start)
   const endMs = Date.parse(input.window.end)
   const tz = input.timezone
-  const sharedIds = new Set(input.sharedListIds ?? [])
   const sharedEventIds = new Set(input.sharedEventIds ?? [])
 
-  const tasks: MyDayTaskItem[] = input.tasks
+  const tasks: ListItemDto[] = input.tasks
     .filter((t) => t.dueDate != null && inWindow(t.dueDate, startMs, endMs))
-    .map((t): MyDayTaskItem => ({
-      ...t,
-      ...(sharedIds.has(t.listId) ? { shared: true } : {}),
-    }))
     .sort((a, b) => {
       const ad = Date.parse(a.dueDate as string)
       const bd = Date.parse(b.dueDate as string)
@@ -75,12 +61,8 @@ export function composeMyDay(input: {
   // Completed undated tasks drop off once their completedAt is no longer
   // within today's window; a null completedAt also drops off. Ordered by
   // priority (high→medium→low→none) then title for a stable, useful sort.
-  const undatedTasks: MyDayTaskItem[] = input.tasks
+  const undatedTasks: ListItemDto[] = input.tasks
     .filter((t) => t.dueDate == null && (!t.completed || (t.completedAt != null && inWindow(t.completedAt, startMs, endMs))))
-    .map((t): MyDayTaskItem => ({
-      ...t,
-      ...(sharedIds.has(t.listId) ? { shared: true } : {}),
-    }))
     .sort((a, b) => {
       const pr = priorityRank(a.priority) - priorityRank(b.priority)
       return pr !== 0 ? pr : a.title.localeCompare(b.title)

@@ -5,6 +5,7 @@ import { SsoCallbackPage } from './pages/SsoCallbackPage.js'
 import { MyListsPage } from './pages/MyListsPage.js'
 import { ListDetailPage } from './pages/ListDetailPage.js'
 import { ShareAcceptPage } from './pages/ShareAcceptPage.js'
+import { McpTokensPage } from './pages/McpTokensPage.js'
 
 export function App() {
   return (
@@ -34,6 +35,18 @@ export function App() {
             {(userId) => (
               <AppChrome>
                 <ListDetailPage selfUserId={userId} />
+              </AppChrome>
+            )}
+          </RequireSession>
+        }
+      />
+      <Route
+        path="/me/tokens"
+        element={
+          <RequireSession>
+            {() => (
+              <AppChrome>
+                <McpTokensPage />
               </AppChrome>
             )}
           </RequireSession>

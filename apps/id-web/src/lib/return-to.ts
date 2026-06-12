@@ -19,6 +19,20 @@ const ALLOWED_ORIGINS = (
 
 const UI_ORIGIN = (import.meta.env.VITE_UI_ORIGIN as string | undefined) ?? ''
 
+// Human-readable destination for an (already-sanitized) returnTo value.
+// Absolute URLs collapse to their host and relative paths drop their
+// query string — the signup confirmation screen shows this instead of
+// the raw URL, whose unbroken length overflowed the card (#492).
+export function returnToLabel(returnTo: string): string {
+  if (returnTo === '/') return 'your account'
+  if (returnTo.startsWith('/')) return returnTo.split('?')[0]!
+  try {
+    return new URL(returnTo).host
+  } catch {
+    return returnTo
+  }
+}
+
 export function safeReturnTo(input: string | null | undefined, fallback = '/'): string {
   if (!input) return fallback
   const trimmed = input.trim()

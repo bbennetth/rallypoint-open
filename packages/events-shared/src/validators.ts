@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { EventFeaturesPatchSchema } from './event-features.js'
 import { POI_CATEGORY_IDS } from './poi-categories.js'
 import { dayTimesIssue } from './day-generation.js'
 import { ticketPlatformField } from './ticket-platforms.js'
@@ -362,6 +363,9 @@ export const PatchEventSchema = z
     locationLng: eventLngField.nullable().optional(),
     privacyMode: privacyModeField.optional(),
     publicPageConfig: PublicPageConfigSchema.nullable().optional(),
+    // Per-event feature toggles (#216). Owner-only — enforced at the
+    // route (PatchEventSchema is shared by editor-level patches).
+    features: EventFeaturesPatchSchema.optional(),
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {
@@ -715,6 +719,7 @@ export const CreateSessionSchema = z.object({
   description: sessionDescriptionField,
   location: shortTextField('Location', 200),
   dayId: idRefField('Day id').nullable().optional(),
+  stageId: idRefField('Stage id').nullable().optional(),
   startTime: setTimeField,
   endTime: setTimeField,
   category: shortTextField('Category', 100),
@@ -733,6 +738,7 @@ export const PatchSessionSchema = z
     description: sessionDescriptionField,
     location: shortTextField('Location', 200),
     dayId: idRefField('Day id').nullable().optional(),
+    stageId: idRefField('Stage id').nullable().optional(),
     startTime: setTimeField,
     endTime: setTimeField,
     category: shortTextField('Category', 100),

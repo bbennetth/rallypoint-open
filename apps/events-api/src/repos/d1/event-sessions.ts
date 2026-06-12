@@ -22,6 +22,7 @@ function rowToSession(row: typeof eventSessions.$inferSelect): SessionRecord {
     description: row.description ?? null,
     location: row.location ?? null,
     dayId: row.dayId ?? null,
+    stageId: row.stageId ?? null,
     startTime: row.startTime ?? null,
     endTime: row.endTime ?? null,
     category: row.category ?? null,
@@ -48,6 +49,7 @@ function insertValues(c: CreateSessionInput, now: Date) {
     description: c.description ?? null,
     location: c.location ?? null,
     dayId: c.dayId ?? null,
+    stageId: c.stageId ?? null,
     startTime: c.startTime ?? null,
     endTime: c.endTime ?? null,
     category: c.category ?? null,
@@ -72,6 +74,7 @@ function patchSet(fields: PatchSessionInput, now: Date): Record<string, unknown>
   if (fields.description !== undefined) set.description = fields.description
   if (fields.location !== undefined) set.location = fields.location
   if (fields.dayId !== undefined) set.dayId = fields.dayId
+  if (fields.stageId !== undefined) set.stageId = fields.stageId
   if (fields.startTime !== undefined) set.startTime = fields.startTime
   if (fields.endTime !== undefined) set.endTime = fields.endTime
   if (fields.category !== undefined) set.category = fields.category
@@ -239,6 +242,7 @@ export class D1EventSessionRepo implements EventSessionRepo {
         description: r.description,
         location: r.location,
         dayId: r.dayId,
+        stageId: r.stageId,
         startTime: r.startTime,
         endTime: r.endTime,
         category: r.category,

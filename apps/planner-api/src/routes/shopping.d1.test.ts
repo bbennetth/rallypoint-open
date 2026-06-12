@@ -129,8 +129,6 @@ function makeFakeLists(): { client: ListsClient } {
       if (idx === -1) throw new ListsClientError(404, 'not_found', 'List not found.')
       lists.splice(idx, 1)
     },
-    listPlannerLists: async (_actor) => [],
-    setListPlannerPref: async () => {},
     // Stub remaining SDK methods not used by the shopping BFF.
     listFieldDefs: async () => [],
     createFieldDef: async () => { throw new Error('not stubbed') },

@@ -11,6 +11,8 @@
 
 export * from './validators.js'
 export * from './tasks.js'
+export * from './statuses.js'
+export * from './hierarchy.js'
 export * from './custom-fields.js'
 export * from './list-query.js'
 export * from './recurrence.js'

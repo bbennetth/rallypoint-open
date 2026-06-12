@@ -458,6 +458,9 @@ html[data-pwa-standalone='true'] .app-tabbar {
   }
   .app-tabbar { display: none; }
   .content-cap { max-width: 860px; }
+  /* Wide variant for data-dense surfaces (kanban boards, grids) that
+     starve at 860px on desktop. Below 1024px both caps are no-ops. */
+  .content-cap-wide { max-width: 1440px; }
 }
 
 /* Content padding helper */

@@ -63,6 +63,7 @@ function rowToEvent(
     locationLng: row.locationLng != null ? String(row.locationLng) : null,
     privacyMode: row.privacyMode as PrivacyMode,
     publicPageConfig: row.publicPageConfig ?? null,
+    features: row.features ?? null,
     scopeType: row.scopeType as ScopeType,
     startAt: row.startAt,
     endAt: row.endAt,
@@ -197,6 +198,7 @@ export class D1EventRepo implements EventRepo {
     if (fields.locationLng !== undefined) set.locationLng = num(fields.locationLng)
     if (fields.privacyMode !== undefined) set.privacyMode = fields.privacyMode
     if (fields.publicPageConfig !== undefined) set.publicPageConfig = fields.publicPageConfig
+    if (fields.features !== undefined) set.features = fields.features
     if (fields.ticketPlatform !== undefined) set.ticketPlatform = fields.ticketPlatform
     if (fields.ticketAccountEmail !== undefined) set.ticketAccountEmail = fields.ticketAccountEmail
 

@@ -6,16 +6,23 @@ import {
   deleteSession,
   listDays,
   listSessions,
+  listStages,
   setSessionApproval,
   type BulkSessionCreate,
   type DayDto,
   type SessionApprovalStatus,
   type SessionDtoFull,
   type SessionVisibility,
+  type StageDto,
 } from '../lib/api.js'
 import { SnapshotHistory } from './SnapshotHistory.js'
 import { CsvImportPanel, type CsvPreview } from './CsvImportPanel.js'
 import { planSessionsImport, sessionsTemplateCsv } from '../lib/sessions-csv.js'
+import {
+  parseSessionsClipboard,
+  sessionRowsToTsv,
+  type SessionClipboardRow,
+} from '../lib/sessions-grid.js'
 
 // --- Bulk grid types --------------------------------------------------
 
@@ -30,6 +37,7 @@ interface DraftRow {
   category: string
   host: string
   dayId: string
+  stageId: string
   startTime: string
   endTime: string
   visibility: SessionVisibility
@@ -47,6 +55,7 @@ function rowFromSession(s: SessionDtoFull): DraftRow {
     category: s.category ?? '',
     host: s.host ?? '',
     dayId: s.day_id ?? '',
+    stageId: s.stage_id ?? '',
     startTime: s.start_time ?? '',
     endTime: s.end_time ?? '',
     visibility: s.visibility,
@@ -63,6 +72,7 @@ function emptyDraftRow(): DraftRow {
     category: '',
     host: '',
     dayId: '',
+    stageId: '',
     startTime: '',
     endTime: '',
     visibility: 'group',
@@ -83,6 +93,7 @@ function computeBulkOps(draftRows: DraftRow[], sessions: SessionDtoFull[]) {
       ...(r.category.trim() ? { category: r.category.trim() } : {}),
       ...(r.host.trim() ? { host: r.host.trim() } : {}),
       ...(r.dayId ? { dayId: r.dayId } : {}),
+      ...(r.stageId ? { stageId: r.stageId } : {}),
       ...(r.startTime ? { startTime: r.startTime } : {}),
       ...(r.endTime ? { endTime: r.endTime } : {}),
       visibility: r.visibility,
@@ -100,6 +111,7 @@ function computeBulkOps(draftRows: DraftRow[], sessions: SessionDtoFull[]) {
       if (r.category.trim() !== (orig.category ?? '')) patch.category = r.category.trim() || null
       if (r.host.trim() !== (orig.host ?? '')) patch.host = r.host.trim() || null
       if (r.dayId !== (orig.day_id ?? '')) patch.dayId = r.dayId || null
+      if (r.stageId !== (orig.stage_id ?? '')) patch.stageId = r.stageId || null
       if (r.startTime !== (orig.start_time ?? '')) patch.startTime = r.startTime || null
       if (r.endTime !== (orig.end_time ?? '')) patch.endTime = r.endTime || null
       if (r.visibility !== orig.visibility) patch.visibility = r.visibility
@@ -136,15 +148,21 @@ function StatusBadge({ status }: { status: SessionApprovalStatus }) {
   )
 }
 
+// `reloadSignal` is a monotonically increasing counter the parent bumps to
+// force a silent re-fetch without remounting the editor (same contract as
+// LineupEditor).
 export function SessionsEditor({
   eventId,
   isOwner,
+  reloadSignal = 0,
 }: {
   eventId: string
   isOwner: boolean
+  reloadSignal?: number
 }) {
   const [sessions, setSessions] = useState<SessionDtoFull[]>([])
   const [days, setDays] = useState<DayDto[]>([])
+  const [stages, setStages] = useState<StageDto[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [filterStatus, setFilterStatus] = useState<SessionApprovalStatus | ''>('')
 
@@ -155,6 +173,7 @@ export function SessionsEditor({
   const [category, setCategory] = useState('')
   const [host, setHost] = useState('')
   const [sessionDayId, setSessionDayId] = useState('')
+  const [sessionStageId, setSessionStageId] = useState('')
   const [startTime, setStartTime] = useState('')
   const [endTime, setEndTime] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
@@ -164,7 +183,7 @@ export function SessionsEditor({
   const [draftRows, setDraftRows] = useState<DraftRow[]>([])
   const [bulkSaving, setBulkSaving] = useState(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
-  const [bulkMode, setBulkMode] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const bulkDirty = useMemo(() => {
     const { creates, updates, deletes } = computeBulkOps(draftRows, sessions)
@@ -173,11 +192,12 @@ export function SessionsEditor({
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([listSessions(eventId), listDays(eventId)])
-      .then(([s, d]) => {
+    Promise.all([listSessions(eventId), listDays(eventId), listStages(eventId)])
+      .then(([s, d, st]) => {
         if (cancelled) return
         setSessions(s)
         setDays(d)
+        setStages(st)
         setDraftRows(s.map(rowFromSession))
       })
       .catch((err: unknown) => {
@@ -187,7 +207,7 @@ export function SessionsEditor({
     return () => {
       cancelled = true
     }
-  }, [eventId])
+  }, [eventId, reloadSignal])
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
@@ -201,6 +221,7 @@ export function SessionsEditor({
         ...(category.trim() ? { category: category.trim() } : {}),
         ...(host.trim() ? { host: host.trim() } : {}),
         ...(sessionDayId ? { dayId: sessionDayId } : {}),
+        ...(sessionStageId ? { stageId: sessionStageId } : {}),
         ...(startTime ? { startTime } : {}),
         ...(endTime ? { endTime } : {}),
         // Sessions are always attendee-visible; the visibility column is
@@ -214,6 +235,7 @@ export function SessionsEditor({
       setCategory('')
       setHost('')
       setSessionDayId('')
+      setSessionStageId('')
       setStartTime('')
       setEndTime('')
     } catch (err) {
@@ -274,15 +296,11 @@ export function SessionsEditor({
       await bulkApplySessions(eventId, { creates, updates, deletes })
 
       // Refetch after bulk save.
-      const [freshSessions, freshDays] = await Promise.all([
-        listSessions(eventId),
-        listDays(eventId),
-      ])
-      setSessions(freshSessions)
-      setDays(freshDays)
-      setDraftRows(freshSessions.map(rowFromSession))
-      setBulkMode(false)
+      await refetchSessions()
+      const saved = creates.length + updates.length + deletes.length
+      setNotice(`Saved ${saved} change${saved === 1 ? '' : 's'}.`)
     } catch (err) {
+      setNotice(null)
       setBulkError(err instanceof ApiError ? err.message : 'Bulk save failed.')
     } finally {
       setBulkSaving(false)
@@ -290,20 +308,109 @@ export function SessionsEditor({
   }
 
   async function refetchSessions() {
-    const [freshSessions, freshDays] = await Promise.all([
+    const [freshSessions, freshDays, freshStages] = await Promise.all([
       listSessions(eventId),
       listDays(eventId),
+      listStages(eventId),
     ])
     setSessions(freshSessions)
     setDays(freshDays)
+    setStages(freshStages)
     setDraftRows(freshSessions.map(rowFromSession))
+  }
+
+  // ---- Copy / paste (lineup-grid parity, #215) ----
+
+  async function copyGrid() {
+    setNotice(null)
+    setBulkError(null)
+    const dayLabelById = new Map(days.map((d) => [d.id, d.day_label]))
+    const stageNameById = new Map(stages.map((s) => [s.id, s.name]))
+    const out: SessionClipboardRow[] = draftRows
+      .filter((r) => !r.pendingDelete)
+      .map((r) => ({
+        title: r.title,
+        day: r.dayId ? dayLabelById.get(r.dayId) ?? '' : '',
+        start: r.startTime,
+        end: r.endTime,
+        stage: r.stageId ? stageNameById.get(r.stageId) ?? '' : '',
+        location: r.location,
+        category: r.category,
+        host: r.host,
+        description: r.description,
+      }))
+    try {
+      await navigator.clipboard.writeText(sessionRowsToTsv(out))
+      setNotice(`Copied ${out.length} row${out.length === 1 ? '' : 's'} to the clipboard.`)
+    } catch {
+      setBulkError('Could not access the clipboard. Check browser permissions.')
+    }
+  }
+
+  // Resolve a pasted day cell (label or date) and stage name to ids, mint
+  // new draft rows, and append them. Unresolved day / unknown stage fall
+  // back to empty so the user can fix them inline.
+  function appendPastedRows(text: string) {
+    const parsed = parseSessionsClipboard(text)
+    if (parsed.length === 0) return
+    const dayByKey = new Map<string, string>()
+    for (const d of days) {
+      dayByKey.set(d.day_label.trim().toLowerCase(), d.id)
+      dayByKey.set(d.date.trim().toLowerCase(), d.id)
+    }
+    const stageByName = new Map(stages.map((s) => [s.name.trim().toLowerCase(), s.id]))
+    const additions: DraftRow[] = parsed
+      .filter((p) => p.title.trim() !== '')
+      .map((p) => ({
+        ...emptyDraftRow(),
+        title: p.title.trim(),
+        dayId: dayByKey.get(p.day.trim().toLowerCase()) ?? '',
+        startTime: p.start.trim(),
+        endTime: p.end.trim(),
+        stageId: stageByName.get(p.stage.trim().toLowerCase()) ?? '',
+        location: p.location.trim(),
+        category: p.category.trim(),
+        host: p.host.trim(),
+        description: p.description.trim(),
+      }))
+    if (additions.length === 0) return
+    setDraftRows((prev) => [...prev, ...additions])
+    setNotice(
+      `Pasted ${additions.length} row${additions.length === 1 ? '' : 's'}. Review, then Save changes.`,
+    )
+  }
+
+  function onGridPaste(e: React.ClipboardEvent) {
+    const text = e.clipboardData.getData('text')
+    // Only hijack multi-cell pastes; a single value pasted into one input
+    // should behave normally.
+    if (text && /[\t\r\n]/.test(text)) {
+      e.preventDefault()
+      setBulkError(null)
+      appendPastedRows(text)
+    }
+  }
+
+  async function pasteFromClipboard() {
+    setNotice(null)
+    setBulkError(null)
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) {
+        setBulkError('Clipboard is empty.')
+        return
+      }
+      appendPastedRows(text)
+    } catch {
+      setBulkError('Could not read the clipboard. Check browser permissions.')
+    }
   }
 
   // CSV import: client-side dry-run preview, then an apply that POSTs the
   // assembled creates/updates/deletes to the snapshot-protected bulk endpoint
   // (revertible from Version history below).
   function sessionsPreview(text: string, replace: boolean): CsvPreview {
-    const p = planSessionsImport({ text, days, currentSessions: sessions, replace })
+    const p = planSessionsImport({ text, days, stages, currentSessions: sessions, replace })
     const titleById = new Map(sessions.map((s) => [s.id, s.title]))
     return {
       summary: p.summary,
@@ -318,7 +425,7 @@ export function SessionsEditor({
   }
 
   async function applySessionsCsv(text: string, replace: boolean) {
-    const p = planSessionsImport({ text, days, currentSessions: sessions, replace })
+    const p = planSessionsImport({ text, days, stages, currentSessions: sessions, replace })
     if (p.summary.error > 0) throw new Error('Fix the errors in the preview before importing.')
     await bulkApplySessions(eventId, { creates: p.creates, updates: p.updates, deletes: p.deletes })
     await refetchSessions()
@@ -340,6 +447,7 @@ export function SessionsEditor({
   }
 
   const dayMap = new Map(days.map((d) => [d.id, d]))
+  const stageMap = new Map(stages.map((s) => [s.id, s]))
 
   const displayed =
     filterStatus
@@ -424,23 +532,43 @@ export function SessionsEditor({
             />
           </div>
 
-          <div className="space-y-1">
-            <label htmlFor="session-day-select" className="block text-xs font-medium text-[color:var(--ink-mute)]">
-              Day
-            </label>
-            <select
-              id="session-day-select"
-              value={sessionDayId}
-              onChange={(e) => setSessionDayId(e.target.value)}
-              className="w-full cyber-input"
-            >
-              <option value="">No day</option>
-              {days.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.day_label}
-                </option>
-              ))}
-            </select>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label htmlFor="session-day-select" className="block text-xs font-medium text-[color:var(--ink-mute)]">
+                Day
+              </label>
+              <select
+                id="session-day-select"
+                value={sessionDayId}
+                onChange={(e) => setSessionDayId(e.target.value)}
+                className="w-full cyber-input"
+              >
+                <option value="">No day</option>
+                {days.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.day_label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="session-stage-select" className="block text-xs font-medium text-[color:var(--ink-mute)]">
+                Stage
+              </label>
+              <select
+                id="session-stage-select"
+                value={sessionStageId}
+                onChange={(e) => setSessionStageId(e.target.value)}
+                className="w-full cyber-input"
+              >
+                <option value="">No stage</option>
+                {stages.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="flex gap-3 items-center">
@@ -483,22 +611,55 @@ export function SessionsEditor({
         </form>
       </div>
 
-      {/* Bulk edit grid */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-3">
-          <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Bulk edit</h3>
+      {/* Bulk edit grid — always visible (lineup parity, #215) */}
+      <div className="space-y-3" onPaste={onGridPaste}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <h3 className="text-xs font-medium text-[color:var(--ink-mute)] flex-1">Bulk edit</h3>
           <button
             type="button"
-            onClick={() => setBulkMode((v) => !v)}
+            onClick={addDraftRow}
+            className="btn-brutal"
+            style={{ width: 'auto' }}
+            title="Add a session row"
+          >
+            + Add row
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyGrid()}
+            disabled={draftRows.length === 0}
             className="btn-ghost"
             style={{ width: 'auto' }}
+            title="Copy the grid as tab-separated rows"
           >
-            {bulkMode ? 'Hide grid' : 'Open grid'}
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={() => void pasteFromClipboard()}
+            className="btn-ghost"
+            style={{ width: 'auto' }}
+            title="Paste rows from the clipboard"
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleBulkSave()}
+            disabled={bulkSaving || !bulkDirty}
+            className="btn-hot"
+            style={{ width: 'auto' }}
+          >
+            {bulkSaving ? 'Saving…' : 'Save changes'}
           </button>
         </div>
 
-        {bulkMode && (
-          <div className="space-y-2">
+        <p className="text-xs text-[color:var(--ink-dim)]">
+          Tip: paste rows straight from a spreadsheet (title, day, start, end, stage, location,
+          category, host, description). Save changes writes them all at once.
+        </p>
+
+        <div className="space-y-2">
             <div className="overflow-x-auto">
               <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
                 <thead>
@@ -507,6 +668,7 @@ export function SessionsEditor({
                     <th className="text-left p-1" style={{ minWidth: 80 }}>Day</th>
                     <th className="text-left p-1" style={{ minWidth: 70 }}>Start</th>
                     <th className="text-left p-1" style={{ minWidth: 70 }}>End</th>
+                    <th className="text-left p-1" style={{ minWidth: 100 }}>Stage</th>
                     <th className="text-left p-1" style={{ minWidth: 100 }}>Location</th>
                     <th className="text-left p-1" style={{ minWidth: 90 }}>Category</th>
                     <th className="text-left p-1" style={{ minWidth: 90 }}>Host</th>
@@ -570,6 +732,21 @@ export function SessionsEditor({
                           className="cyber-input"
                           style={{ padding: '2px 6px', fontSize: '0.75rem', width: 90 }}
                         />
+                      </td>
+                      <td className="p-1">
+                        <select
+                          value={row.stageId}
+                          disabled={row.pendingDelete}
+                          onChange={(e) => updateDraftRow(row.key, { stageId: e.target.value })}
+                          className="w-full cyber-input"
+                          style={{ padding: '2px 6px', fontSize: '0.75rem' }}
+                          aria-label="Stage"
+                        >
+                          <option value="">—</option>
+                          {stages.map((s) => (
+                            <option key={s.id} value={s.id}>{s.name}</option>
+                          ))}
+                        </select>
                       </td>
                       <td className="p-1">
                         <input
@@ -650,26 +827,10 @@ export function SessionsEditor({
             <div className="flex items-center gap-3 flex-wrap">
               <button
                 type="button"
-                onClick={addDraftRow}
-                className="btn-ghost"
-                style={{ width: 'auto' }}
-              >
-                + Add row
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleBulkSave()}
-                disabled={bulkSaving || !bulkDirty}
-                className="btn-hot"
-                style={{ width: 'auto' }}
-              >
-                {bulkSaving ? 'Saving…' : 'Save changes'}
-              </button>
-              <button
-                type="button"
                 onClick={() => {
                   setDraftRows(sessions.map(rowFromSession))
                   setBulkError(null)
+                  setNotice(null)
                 }}
                 className="btn-ghost"
                 style={{ width: 'auto' }}
@@ -678,6 +839,12 @@ export function SessionsEditor({
                 Reset
               </button>
             </div>
+
+            {notice && (
+              <p className="text-xs" style={{ color: 'var(--map-highlight)' }}>
+                {notice}
+              </p>
+            )}
 
             {bulkError && (
               <div
@@ -692,7 +859,6 @@ export function SessionsEditor({
               </div>
             )}
           </div>
-        )}
       </div>
 
       {/* Sessions list */}
@@ -719,6 +885,7 @@ export function SessionsEditor({
         <ul className="space-y-2">
           {displayed.map((session) => {
             const day = session.day_id ? dayMap.get(session.day_id) : undefined
+            const stage = session.stage_id ? stageMap.get(session.stage_id) : undefined
             return (
               <li
                 key={session.id}
@@ -739,6 +906,7 @@ export function SessionsEditor({
                           {session.end_time ? `–${session.end_time}` : ''}
                         </span>
                       )}
+                      {stage && <span>🎤 {stage.name}</span>}
                       {session.location && <span>📍 {session.location}</span>}
                       {session.category && <span>{session.category}</span>}
                       {session.host && <span>Host: {session.host}</span>}
@@ -799,7 +967,7 @@ export function SessionsEditor({
 
       <CsvImportPanel
         label="sessions"
-        templateCsv={() => sessionsTemplateCsv(days)}
+        templateCsv={() => sessionsTemplateCsv(days, stages)}
         templateFilename="sessions-template.csv"
         replaceHint="Delete sessions not present in the file"
         buildPreview={sessionsPreview}

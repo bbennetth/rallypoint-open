@@ -27,6 +27,11 @@ export const events = sqliteTable(
     locationLng: real('location_lng'),
     privacyMode: text('privacy_mode').notNull().default('unlisted'),
     publicPageConfig: text('public_page_config', { mode: 'json' }),
+    // Per-event feature toggles (#216): JSON {lineup,sessions,groups,
+    // attendees} booleans. NULL = defaults (lineup/sessions/groups on,
+    // attendees off). Parsed/merged by resolveEventFeatures in
+    // events-shared; never read raw outside that helper.
+    features: text('features', { mode: 'json' }),
     // Slice 2 (planner personal events): scope discriminator + UTC instants.
     // Existing rows take 'personal' via the column default; personal events
     // are private datetime events owned by a single user (never group/festival).

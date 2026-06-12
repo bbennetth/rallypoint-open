@@ -1,43 +1,55 @@
-import { useEffect, useState, type CSSProperties } from 'react'
-import {
-  TASK_PRIORITIES,
-  nextStatus,
-  type TaskPriority,
-  type TaskStatus,
-} from '@rallypoint/lists-shared'
-import type { FieldDefDto, GroupMemberDto, ListDto, ListItemDto } from '../lib/api.js'
+import { useEffect, useState, type CSSProperties, type DragEvent } from 'react'
+import { TASK_PRIORITIES, type TaskPriority } from '@rallypoint/lists-shared'
+import type {
+  FieldDefDto,
+  GroupMemberDto,
+  LabelDto,
+  ListDto,
+  ListItemDto,
+  ListStatusDto,
+} from '../lib/api.js'
 import { CustomFieldsEditor } from './CustomFieldsEditor.js'
+import { LabelChips } from './LabelChips.js'
+import { groupItemsByStatus, resolveItemStatus } from '../lib/board.js'
+import { statusColorStyle } from '../lib/status-colors.js'
+import type { DropTarget } from '../lib/board-dnd.js'
 
-// Faithful port of festival-planner's Tasks.tsx kanban: three columns
-// (To do / In progress / Done) built by grouping items on status (a null
-// status — e.g. a pre-slice-3 row — reads as 'todo'). Click the status
-// chip to cycle todo→in_progress→done→todo; the server mirrors completed.
+// Kanban board over a list's custom statuses (RPL v1.0.0 S2 + S3 drag-drop).
+// Layout is fluid: an equal-width `1fr` grid fills the (uncapped) board width
+// down to a 280px floor, then the wrapper scrolls horizontally.
+// Columns are the list's `list_statuses` in position order; a card's status
+// is changed by the per-card picker OR by dragging it to another column.
+// Drag-and-drop is native HTML5 (no dnd library — keeps React 19 happy and
+// the ordering math, in lib/board-dnd.ts, fully unit-tested): grab a card by
+// its grip handle, drop it on another card (lands before it) or a column's
+// empty area (appends). An item's "done" styling keys off its resolved
+// status's `category`, so a renamed done column still strikes its cards.
 
-const COLUMNS: { status: TaskStatus; label: string }[] = [
-  { status: 'todo', label: 'To do' },
-  { status: 'in_progress', label: 'In progress' },
-  { status: 'done', label: 'Done' },
-]
-
-// Semantic Ink mapping (sky/amber/rose aren't theme-remapped, so set
-// border+text via inline style): low de-emphasised, high = destructive red.
 const PRIORITY_STYLE: Record<TaskPriority, CSSProperties> = {
   low: { borderColor: 'var(--line)', color: 'var(--ink-dim)' },
   medium: { borderColor: 'var(--acid)', color: 'var(--acid)' },
   high: { borderColor: 'var(--hot)', color: 'var(--hot)' },
 }
 
-function effectiveStatus(item: ListItemDto): TaskStatus {
-  return item.status ?? 'todo'
-}
-
 interface TaskBoardProps {
   items: ListItemDto[]
+  statuses: ListStatusDto[]
   members: GroupMemberDto[]
   // Other lists in scope the card can be moved into (current list excluded).
   moveTargets: ListDto[]
   fieldDefs: FieldDefDto[]
-  onCycleStatus: (itemId: string, next: TaskStatus) => void
+  // Bulk-select (RPL v1.0.0 S6): selected card ids + a per-card toggle.
+  selectedIds: Set<string>
+  onToggleSelect: (itemId: string, on: boolean) => void
+  // Open the comments thread for a card (RPL v1.0.0 S7 UI).
+  onComments: (itemId: string, title: string) => void
+  // Labels (RPL v1.0.0 S12): the list's labels + a per-card replace.
+  labels: LabelDto[]
+  onSetLabels: (itemId: string, labelIds: string[]) => void
+  onSetStatus: (itemId: string, statusId: string) => void
+  // A drag-drop gesture: move `activeId` onto `target` (another card or a
+  // column). The page turns this into a status change + position reindex.
+  onReorder: (activeId: string, target: DropTarget) => void
   onRename: (itemId: string, title: string) => void
   onAssign: (itemId: string, assignedTo: string) => void
   onSetPriority: (itemId: string, priority: TaskPriority) => void
@@ -49,10 +61,17 @@ interface TaskBoardProps {
 
 export function TaskBoard({
   items,
+  statuses,
   members,
   moveTargets,
   fieldDefs,
-  onCycleStatus,
+  selectedIds,
+  onToggleSelect,
+  onComments,
+  labels,
+  onSetLabels,
+  onSetStatus,
+  onReorder,
   onRename,
   onAssign,
   onSetPriority,
@@ -61,32 +80,98 @@ export function TaskBoard({
   onSetCustomField,
   onDelete,
 }: TaskBoardProps) {
+  const columns = groupItemsByStatus(items, statuses)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [overColumn, setOverColumn] = useState<string | null>(null)
+
+  function endDrag() {
+    setDraggingId(null)
+    setOverColumn(null)
+  }
+
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-      {COLUMNS.map((col) => {
-        const cards = items.filter((i) => effectiveStatus(i) === col.status)
+    // Columns never squeeze below a usable card width — past that the board
+    // scrolls horizontally instead of letting card controls bleed across
+    // column borders. The scroll lives on the wrapper, NOT the grid: an
+    // `overflow-x` on the grid would force `overflow-y: auto` too (CSS rule),
+    // clipping a card's absolutely-positioned label popover. The board's
+    // container breaks out of the page width cap (see `.plapp-full` in
+    // ListDetailPage), so `1fr` tracks fill the whole viewport.
+    <div className="overflow-x-auto pb-2">
+      <div
+        className="grid gap-4"
+        style={{
+          gridTemplateColumns: `repeat(${Math.max(columns.length, 1)}, minmax(280px, 1fr))`,
+        }}
+      >
+      {columns.map((col) => {
+        const chip = statusColorStyle(col.status.color)
+        const isOver = overColumn === col.status.id && draggingId !== null
         return (
           <div
-            key={col.status}
+            key={col.status.id}
             className="p-3"
-            style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+            style={{
+              border: `1.5px solid ${isOver ? 'var(--acid)' : 'var(--line)'}`,
+              background: 'var(--surface)',
+            }}
+            onDragOver={(e) => {
+              if (draggingId === null) return
+              e.preventDefault()
+              setOverColumn(col.status.id)
+            }}
+            onDragLeave={(e) => {
+              // Only clear when the pointer truly left this column (not when
+              // it crossed onto a child card), so the highlight doesn't flicker.
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setOverColumn((cur) => (cur === col.status.id ? null : cur))
+              }
+            }}
+            onDrop={(e) => {
+              if (draggingId === null) return
+              e.preventDefault()
+              onReorder(draggingId, { type: 'column', statusId: col.status.id })
+              endDrag()
+            }}
           >
-            <h2 className="mb-3 flex items-center justify-between text-xs font-semibold text-[color:var(--ink-dim)]">
-              {col.label}
-              <span className="chip">{cards.length}</span>
+            <h2 className="mb-3 flex items-center justify-between gap-2 text-xs font-semibold">
+              <span
+                className="truncate rounded-full border px-2 py-0.5"
+                style={chip}
+                title={col.status.name}
+              >
+                {col.status.name}
+              </span>
+              <span className="chip">{col.items.length}</span>
             </h2>
-            {cards.length === 0 ? (
-              <p className="px-1 py-4 text-center text-xs text-[color:var(--ink-mute)]">No tasks</p>
+            {col.items.length === 0 ? (
+              <p className="px-1 py-4 text-center text-xs text-[color:var(--ink-mute)]">
+                {isOver ? 'Drop here' : 'No tasks'}
+              </p>
             ) : (
               <ul className="space-y-2">
-                {cards.map((item) => (
+                {col.items.map((item) => (
                   <TaskCard
                     key={item.id}
                     item={item}
+                    statuses={statuses}
                     members={members}
                     moveTargets={moveTargets}
                     fieldDefs={fieldDefs}
-                    onCycleStatus={onCycleStatus}
+                    selected={selectedIds.has(item.id)}
+                    onToggleSelect={onToggleSelect}
+                    onComments={onComments}
+                    labels={labels}
+                    onSetLabels={onSetLabels}
+                    dragging={draggingId === item.id}
+                    onDragStartItem={setDraggingId}
+                    onDragEndItem={endDrag}
+                    onDropOnItem={(targetId) => {
+                      if (draggingId === null) return
+                      onReorder(draggingId, { type: 'item', itemId: targetId })
+                      endDrag()
+                    }}
+                    onSetStatus={onSetStatus}
                     onRename={onRename}
                     onAssign={onAssign}
                     onSetPriority={onSetPriority}
@@ -101,16 +186,27 @@ export function TaskBoard({
           </div>
         )
       })}
+      </div>
     </div>
   )
 }
 
 interface TaskCardProps {
   item: ListItemDto
+  statuses: ListStatusDto[]
   members: GroupMemberDto[]
   moveTargets: ListDto[]
   fieldDefs: FieldDefDto[]
-  onCycleStatus: (itemId: string, next: TaskStatus) => void
+  selected: boolean
+  onToggleSelect: (itemId: string, on: boolean) => void
+  onComments: (itemId: string, title: string) => void
+  labels: LabelDto[]
+  onSetLabels: (itemId: string, labelIds: string[]) => void
+  dragging: boolean
+  onDragStartItem: (itemId: string) => void
+  onDragEndItem: () => void
+  onDropOnItem: (itemId: string) => void
+  onSetStatus: (itemId: string, statusId: string) => void
   onRename: (itemId: string, title: string) => void
   onAssign: (itemId: string, assignedTo: string) => void
   onSetPriority: (itemId: string, priority: TaskPriority) => void
@@ -128,10 +224,20 @@ function toDateInput(iso: string | null): string {
 
 function TaskCard({
   item,
+  statuses,
   members,
   moveTargets,
   fieldDefs,
-  onCycleStatus,
+  selected,
+  onToggleSelect,
+  onComments,
+  labels,
+  onSetLabels,
+  dragging,
+  onDragStartItem,
+  onDragEndItem,
+  onDropOnItem,
+  onSetStatus,
   onRename,
   onAssign,
   onSetPriority,
@@ -140,7 +246,8 @@ function TaskCard({
   onSetCustomField,
   onDelete,
 }: TaskCardProps) {
-  const status = effectiveStatus(item)
+  const status = resolveItemStatus(item, statuses)
+  const isDone = status?.category === 'done'
   const [title, setTitle] = useState(item.title)
 
   useEffect(() => {
@@ -153,12 +260,53 @@ function TaskCard({
     else setTitle(item.title)
   }
 
+  // A card is a drop target (drop-before semantics); only the grip handle
+  // initiates a drag so the title/select controls stay usable.
+  function handleDrop(e: DragEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    onDropOnItem(item.id)
+  }
+
   return (
     <li
       className="space-y-2 p-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface-2)' }}
+      style={{
+        border: `1.5px solid ${selected ? 'var(--hot)' : 'var(--line)'}`,
+        background: 'var(--surface-2)',
+        opacity: dragging ? 0.5 : 1,
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={handleDrop}
     >
       <div className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onToggleSelect(item.id, e.target.checked)}
+          className="mt-0.5 h-4 w-4"
+          style={{ accentColor: 'var(--hot)' }}
+          title="Select for bulk actions"
+          aria-label={selected ? 'Deselect task' : 'Select task'}
+        />
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label="Drag to reorder"
+          title="Drag to reorder"
+          draggable
+          onDragStart={(e) => {
+            onDragStartItem(item.id)
+            e.dataTransfer.effectAllowed = 'move'
+            // Firefox requires data to be set for a drag to start.
+            e.dataTransfer.setData('text/plain', item.id)
+          }}
+          onDragEnd={onDragEndItem}
+          className="cursor-grab select-none px-0.5 text-[color:var(--ink-mute)]"
+          style={{ lineHeight: 1 }}
+        >
+          ⠿
+        </span>
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -167,9 +315,18 @@ function TaskCard({
             if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
           }}
           className={`flex-1 bg-transparent text-sm focus:outline-none ${
-            status === 'done' ? 'text-[color:var(--ink-mute)] line-through' : ''
+            isDone ? 'text-[color:var(--ink-mute)] line-through' : ''
           }`}
         />
+        <button
+          type="button"
+          onClick={() => onComments(item.id, item.title)}
+          aria-label="Comments"
+          title="Comments"
+          className="rounded px-1 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
+        >
+          💬
+        </button>
         <button
           type="button"
           onClick={() => onDelete(item.id)}
@@ -182,13 +339,21 @@ function TaskCard({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onCycleStatus(item.id, nextStatus(status))}
-          className="chip"
+        <select
+          value={status?.id ?? ''}
+          onChange={(e) => {
+            if (e.target.value && e.target.value !== status?.id) onSetStatus(item.id, e.target.value)
+          }}
+          aria-label="Status"
+          className="rounded-full border bg-transparent px-2 py-0.5 text-xs"
+          style={statusColorStyle(status?.color ?? null)}
         >
-          {COLUMNS.find((c) => c.status === status)?.label ?? status}
-        </button>
+          {statuses.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
 
         <select
           value={item.priority ?? 'medium'}
@@ -203,7 +368,23 @@ function TaskCard({
             </option>
           ))}
         </select>
+
+        {(item.child_count ?? 0) > 0 && (
+          <span
+            className="chip"
+            title={`${item.child_done_count ?? 0} of ${item.child_count} sub-items done`}
+            aria-label={`${item.child_done_count ?? 0} of ${item.child_count} sub-items done`}
+          >
+            ☰ {item.child_done_count ?? 0}/{item.child_count}
+          </span>
+        )}
       </div>
+
+      <LabelChips
+        labelIds={item.label_ids}
+        labels={labels}
+        onSetLabels={(labelIds) => onSetLabels(item.id, labelIds)}
+      />
 
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <input

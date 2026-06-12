@@ -17,17 +17,8 @@ import { expandEventDays, isAllDay, type EventDayItem } from './event-days.js'
 // today's items are included (My Day and Upcoming intentionally overlap on
 // today, the first row of the list).
 
-// Task wrapper with optional shared marker. When `shared` is true the item
-// came from a planner-flagged shared list (not the actor's personal scope).
-export interface UpcomingTaskItem {
-  kind: 'task'
-  task: ListItemDto
-  /** True when the task belongs to a planner-flagged shared list. */
-  shared?: boolean
-}
-
 export type UpcomingItem =
-  | UpcomingTaskItem
+  | { kind: 'task'; task: ListItemDto }
   | { kind: 'event'; event: PersonalEventDto }
   | { kind: 'eventDay'; eventDay: EventDayItem }
 
@@ -76,22 +67,15 @@ export function composeUpcoming(input: {
   tasks: ListItemDto[]
   events: PersonalEventDto[]
   userEvents: UserEventDto[] // group (festival) events, expanded per day
-  /** List ids that should be marked shared in the output (planner-flagged). */
-  sharedListIds?: readonly string[]
   /** Group event ids that should be marked shared in the output (planner-flagged). */
   sharedEventIds?: readonly string[]
 }): Upcoming {
   const fromMs = Date.parse(input.fromInstant)
   const tz = input.timezone
-  const sharedIds = new Set(input.sharedListIds ?? [])
   const sharedEventIds = new Set(input.sharedEventIds ?? [])
 
   const items: UpcomingItem[] = [
-    ...input.tasks.map((task): UpcomingItem => ({
-      kind: 'task',
-      task,
-      ...(sharedIds.has(task.listId) ? { shared: true } : {}),
-    })),
+    ...input.tasks.map((task): UpcomingItem => ({ kind: 'task', task })),
     ...input.events.map((event): UpcomingItem => ({ kind: 'event', event })),
     ...expandEventDays(input.userEvents, sharedEventIds).map(
       (eventDay): UpcomingItem => ({ kind: 'eventDay', eventDay }),
