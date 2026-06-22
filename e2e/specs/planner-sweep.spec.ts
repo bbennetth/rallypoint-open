@@ -22,21 +22,15 @@ test('planner sweep — SSO, tasks, events, My Day, Upcoming', async ({ page }) 
   await signInToPlanner(page)
   await expect(page.getByRole('heading', { name: 'My Day', level: 1 })).toBeVisible()
 
-  // 2. Task list + an undated task.
+  // 2. The single canonical Tasks list (#543) + an undated task. Tasks is now
+  // one system-managed list (like Shopping/Notes) — no "add list" step; the
+  // list is auto-provisioned on load, so the task input is available straight
+  // away. (`listName` from uniquePlanner is unused now that lists aren't created.)
+  void listName
   await page.goto(`${PLANNER_WEB_URL}/tasks`)
   await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible()
-  await page.getByLabel('New list name').fill(listName)
-  // Click "Add" (not Enter): slice 12 fixed the grid blow-out that let the
-  // task input overlap the list "Add" button and intercept the click. Before
-  // any list exists the items form isn't rendered, so this button is unique.
-  await page.getByRole('button', { name: 'Add' }).click()
-  // The new list becomes active; add a task to it. Wait for the active list's
-  // initial (empty) items load to settle first — creating the list kicks off an
-  // async items fetch, and adding the task before it resolves lets the stale
-  // empty response clobber the optimistic append.
   const taskField = page.getByLabel('New task title')
   await expect(taskField).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByText('Nothing here yet.')).toBeVisible({ timeout: 15_000 })
   await taskField.fill(taskTitle)
   await taskField.press('Enter')
   await expect(page.getByText(taskTitle, { exact: true })).toBeVisible({ timeout: 15_000 })
@@ -69,6 +63,13 @@ test('planner sweep — SSO, tasks, events, My Day, Upcoming', async ({ page }) 
   await page.getByRole('button', { name: 'Add event' }).click()
   await expect(page.getByRole('heading', { name: eventName })).toBeVisible({ timeout: 15_000 })
 
+  // 3b. Events calendar view (#547): switch to month view on the Events tab and
+  //     verify the created event's day shows a chip marker.
+  await page.goto(`${PLANNER_WEB_URL}/events`)
+  await page.getByRole('button', { name: 'Month' }).click()
+  // At least one .cal-chip should appear (the event we just created falls today).
+  await expect(page.locator('.cal-chip').first()).toBeVisible({ timeout: 15_000 })
+
   // 4. My Day reflects today's event under "Events today".
   await page.goto(`${PLANNER_WEB_URL}/me`)
   const eventsToday = page.locator('section', {
@@ -89,4 +90,28 @@ test('planner sweep — SSO, tasks, events, My Day, Upcoming', async ({ page }) 
     has: page.getByRole('heading', { name: 'No date' }),
   })
   await expect(noDate.getByText(taskTitle, { exact: true })).toBeVisible({ timeout: 15_000 })
+
+  // 6. Chores (#546): add a recurring chore, confirm it materializes on the
+  //    Chores tab, appears in the Upcoming feed, then toggle it OFF inline and
+  //    confirm it disappears from the feed.
+  const choreTitle = `${taskTitle} chore`
+  await page.goto(`${PLANNER_WEB_URL}/chores`)
+  await expect(page.getByRole('heading', { name: 'Chores', level: 1 })).toBeVisible({ timeout: 15_000 })
+  const choreField = page.getByLabel('New chore name')
+  await expect(choreField).toBeVisible({ timeout: 15_000 })
+  await choreField.fill(choreTitle)
+  // Repeat is on by default on the Chores tab; daily so an occurrence lands today.
+  await page.getByRole('button', { name: 'Day(s)' }).click()
+  await page.getByRole('button', { name: 'Add' }).last().click()
+  // Occurrence items materialize server-side and render badged "Recurring".
+  await expect(page.getByText(choreTitle, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
+
+  // The chore appears in the Upcoming feed (My Day agenda) while the toggle is on.
+  await page.goto(`${PLANNER_WEB_URL}/me`)
+  await expect(page.getByText(choreTitle, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
+
+  // Toggle chores OFF inline near the feed header → the feed refetches and the
+  // chore disappears.
+  await page.getByLabel('Show chores in feed').uncheck()
+  await expect(page.getByText(choreTitle, { exact: true })).toHaveCount(0, { timeout: 15_000 })
 })

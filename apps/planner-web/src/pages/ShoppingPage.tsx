@@ -16,6 +16,7 @@ import {
 import { completedItemIds, groupItemsByCategory, isShoppingCategory } from '../lib/shopping-helpers.js'
 import { onCreated } from '../lib/refresh-bus.js'
 import { Check } from '../ui/bits.js'
+import { SkeletonBlock, SkeletonRows } from '../ui/Skeleton.js'
 import { Icon } from '../ui/icons.js'
 
 // Shopping surface (issue #443). A thin view over the planner-api BFF:
@@ -24,6 +25,11 @@ import { Icon } from '../ui/icons.js'
 // the auto-assigned category. Items are grouped under category headers in a
 // fixed display order. All persistence lives in Lists via the BFF.
 // The list itself is not deletable — it is system-managed.
+//
+// Auto-categorize on/off is controlled by the `shoppingAutoCategorize`
+// planner setting (toggled in SettingsPage). The BFF reads that setting on
+// item create and forwards it to lists-api — this page does not need to
+// know about it; `createShoppingItem` needs no client-side flag.
 
 function errMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message
@@ -187,7 +193,6 @@ export function ShoppingPage() {
       <div className="pg-head">
         <div>
           <h1>Shopping</h1>
-          <div className="sub">Your personal shopping list.</div>
         </div>
       </div>
 
@@ -198,7 +203,10 @@ export function ShoppingPage() {
       )}
 
       {loadingList ? (
-        <p className="meta" style={{ color: 'var(--ink-mute)' }}>Loading…</p>
+        <div role="status" aria-busy="true" aria-label="Loading shopping list">
+          <SkeletonBlock height={44} style={{ marginBottom: 12 }} />
+          <SkeletonRows count={5} height={46} bare />
+        </div>
       ) : (
         <div style={{ display: 'grid', gap: 12, minWidth: 0 }}>
           <form style={{ display: 'flex', gap: 8 }} onSubmit={onCreateItem}>
@@ -209,7 +217,7 @@ export function ShoppingPage() {
               value={newItemTitle}
               onChange={(e) => setNewItemTitle(e.target.value)}
             />
-            <button className="pl-btn" style={{ padding: '0 16px' }} type="submit">
+            <button className="pl-btn grow" type="submit">
               <Icon name="plus" size={13} />
               Add
             </button>
@@ -222,8 +230,8 @@ export function ShoppingPage() {
             {doneCount > 0 && (
               <button
                 type="button"
-                className="pl-btn ghost"
-                style={{ padding: '7px 11px', marginLeft: 'auto' }}
+                className="pl-btn ghost sm"
+                style={{ marginLeft: 'auto' }}
                 onClick={() => void onClearChecked()}
                 disabled={clearing}
               >
@@ -233,7 +241,7 @@ export function ShoppingPage() {
           </div>
 
           {loadingItems ? (
-            <p className="meta" style={{ color: 'var(--ink-mute)' }}>Loading…</p>
+            <SkeletonRows count={5} height={46} label="Loading shopping list" />
           ) : items.length === 0 ? (
             <p className="meta" style={{ color: 'var(--ink-mute)' }}>
               Nothing here yet — add an item above.
@@ -289,7 +297,7 @@ export function ShoppingPage() {
                           </span>
                           <button
                             type="button"
-                            className="pl-donebtn"
+                            className="pl-iconbtn danger"
                             onClick={() => void onDelete(item)}
                             aria-label={`Delete ${item.title}`}
                             title="Delete"

@@ -133,6 +133,48 @@ function makeFakeLists(): { client: ListsClient } {
       if (idx === -1) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
       items.splice(idx, 1)
     },
+    deleteList: async (listId: string, actor: string) => {
+      const idx = lists.findIndex((l) => l.id === listId)
+      if (idx === -1 || (lists[idx].scopeType === 'list_group' && !ownsGroup(actor, lists[idx].scopeId))) {
+        throw new ListsClientError(404, 'not_found', 'List not found.')
+      }
+      lists.splice(idx, 1)
+    },
+    moveListItem: async (listId: string, itemId: string, targetListId: string, actor: string) => {
+      // Model the lists-api move contract the BFF relies on: actor must own
+      // both lists, target must exist + differ, item must belong to source.
+      const source = listOf(listId)
+      const target = listOf(targetListId)
+      if (!source || (source.scopeType === 'list_group' && !ownsGroup(actor, source.scopeId))) {
+        throw new ListsClientError(404, 'not_found', 'List not found.')
+      }
+      if (!target || (target.scopeType === 'list_group' && !ownsGroup(actor, target.scopeId))) {
+        throw new ListsClientError(404, 'not_found', 'List not found.')
+      }
+      const it = items.find((x) => x.id === itemId && x.listId === listId)
+      if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
+      it.listId = targetListId
+      return it
+    },
+    findItemInScope: async (
+      scope: { scopeType: string; scopeId: string },
+      itemId: string,
+      actor: string,
+    ) => {
+      // Model the lists-api contract: actor must be a member of the scope;
+      // return the live item whose parent list lives in that exact scope,
+      // else null (a foreign item, or one in another scope, resolves to null).
+      if (scope.scopeType === 'list_group' && !ownsGroup(actor, scope.scopeId)) {
+        throw new ListsClientError(404, 'list_not_found', 'List not found.')
+      }
+      const it = items.find((x) => x.id === itemId)
+      if (!it) return null
+      const list = listOf(it.listId)
+      if (!list || list.scopeType !== scope.scopeType || list.scopeId !== scope.scopeId) {
+        return null
+      }
+      return it
+    },
   } as unknown as ListsClient
 
   return { client }
@@ -284,17 +326,15 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
 
   it('hides the notes list from GET /lists (task rail)', async () => {
     const bearer = await loginAs('user_n6')
-    // Provision a real task list AND a note for the same user.
-    await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: 'Chores' }),
-    })
+    // Create a note for the user (provisions the notes list + personal group).
     await postNote(bearer, { title: 'A note' })
 
+    // GET /lists resolves the single canonical Tasks list (#543) — the notes
+    // list must NOT appear among the task-rail lists.
     const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
     const rows = (await res.json()) as ListDto[]
-    expect(rows.map((l) => l.name)).toEqual(['Chores'])
+    expect(rows).toHaveLength(1)
+    expect(rows[0].listType).toBe('tasks')
     expect(rows.some((l) => l.listType === 'notes')).toBe(false)
   })
 
@@ -310,5 +350,230 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
     // the undated backlog. The filter keeps it out entirely.
     expect(body.undated).toEqual([])
     expect(body.dated).toEqual([])
+  })
+
+  // --- folders (#549) ----------------------------------------------
+
+  function postFolder(bearer: string, body: unknown) {
+    return app.request('http://localhost/api/v1/ui/notes/folders', {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify(body),
+    })
+  }
+  function getFolders(bearer: string) {
+    return app.request('http://localhost/api/v1/ui/notes/folders', { headers: headers(bearer) })
+  }
+
+  interface FolderDto {
+    id: string
+    name: string
+    isDefault: boolean
+  }
+  interface NoteRow {
+    id: string
+    title: string
+    folderId: string
+  }
+
+  it('GET /notes/folders returns [] before any note exists', async () => {
+    const bearer = await loginAs('user_f1')
+    const res = await getFolders(bearer)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual([])
+  })
+
+  it('creating a folder provisions the default Notes folder + the new one', async () => {
+    const bearer = await loginAs('user_f2')
+    const res = await postFolder(bearer, { name: 'Work' })
+    expect(res.status).toBe(201)
+    const folders = (await (await getFolders(bearer)).json()) as FolderDto[]
+    // Default 'Notes' (oldest, isDefault) + the new 'Work' folder.
+    expect(folders).toHaveLength(2)
+    expect(folders.filter((f) => f.isDefault)).toHaveLength(1)
+    expect(folders.find((f) => f.isDefault)!.name).toBe('Notes')
+    expect(folders.some((f) => f.name === 'Work' && !f.isDefault)).toBe(true)
+  })
+
+  it('rejects a duplicate folder name (case-insensitive) with 409', async () => {
+    const bearer = await loginAs('user_f3')
+    expect((await postFolder(bearer, { name: 'Work' })).status).toBe(201)
+    const dup = await postFolder(bearer, { name: ' work ' })
+    expect(dup.status).toBe(409)
+  })
+
+  it('refuses to delete a non-empty folder (409)', async () => {
+    const bearer = await loginAs('user_f4')
+    const folder = (await (await postFolder(bearer, { name: 'Work' })).json()) as FolderDto
+    // Put a note in it via move.
+    const note = (await (await postNote(bearer, { title: 'n' })).json()) as NoteRow
+    const moved = await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ folderId: folder.id }),
+    })
+    expect(moved.status).toBe(200)
+    const del = await app.request(`http://localhost/api/v1/ui/notes/folders/${folder.id}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+    expect(del.status).toBe(409)
+  })
+
+  it('refuses to delete the default Notes folder (409)', async () => {
+    const bearer = await loginAs('user_f5')
+    await postNote(bearer, { title: 'n' }) // provisions the default folder
+    const folders = (await (await getFolders(bearer)).json()) as FolderDto[]
+    const def = folders.find((f) => f.isDefault)!
+    const del = await app.request(`http://localhost/api/v1/ui/notes/folders/${def.id}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+    expect(del.status).toBe(409)
+  })
+
+  it('deletes an empty non-default folder (204)', async () => {
+    const bearer = await loginAs('user_f6')
+    const folder = (await (await postFolder(bearer, { name: 'Temp' })).json()) as FolderDto
+    const del = await app.request(`http://localhost/api/v1/ui/notes/folders/${folder.id}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+    expect(del.status).toBe(204)
+    const folders = (await (await getFolders(bearer)).json()) as FolderDto[]
+    expect(folders.some((f) => f.id === folder.id)).toBe(false)
+  })
+
+  it('moves a note between folders via PATCH { folderId }', async () => {
+    const bearer = await loginAs('user_f7')
+    const folder = (await (await postFolder(bearer, { name: 'Work' })).json()) as FolderDto
+    const note = (await (await postNote(bearer, { title: 'movable' })).json()) as NoteRow
+    const res = await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ folderId: folder.id }),
+    })
+    expect(res.status).toBe(200)
+    // The note now reads under the Work folder filter, not the default.
+    const inWork = (await (
+      await app.request(`http://localhost/api/v1/ui/notes?folderId=${folder.id}`, {
+        headers: headers(bearer),
+      })
+    ).json()) as NoteRow[]
+    expect(inWork.map((n) => n.id)).toEqual([note.id])
+  })
+
+  it('404s a move to a folder the actor does not own', async () => {
+    const bearer = await loginAs('user_f8')
+    const note = (await (await postNote(bearer, { title: 'n' })).json()) as NoteRow
+    const res = await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ folderId: 'lst_not_mine' }),
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /notes returns notes across all folders, each tagged with folderId', async () => {
+    const bearer = await loginAs('user_f9')
+    const work = (await (await postFolder(bearer, { name: 'Work' })).json()) as FolderDto
+    const a = (await (await postNote(bearer, { title: 'default-note' })).json()) as NoteRow
+    const b = (await (await postNote(bearer, { title: 'to-move' })).json()) as NoteRow
+    await app.request(`http://localhost/api/v1/ui/notes/${b.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ folderId: work.id }),
+    })
+    const all = (await (
+      await app.request('http://localhost/api/v1/ui/notes', { headers: headers(bearer) })
+    ).json()) as NoteRow[]
+    const byId = new Map(all.map((n) => [n.id, n.folderId]))
+    expect(byId.get(a.id)).toBeDefined()
+    expect(byId.get(b.id)).toBe(work.id)
+    expect(byId.get(a.id)).not.toBe(work.id)
+  })
+
+  it('?folderId 404s a folder the actor does not own', async () => {
+    const bearer = await loginAs('user_f10')
+    await postNote(bearer, { title: 'n' })
+    const res = await app.request('http://localhost/api/v1/ui/notes?folderId=lst_nope', {
+      headers: headers(bearer),
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('still hides EVERY notes folder from the task rail', async () => {
+    const bearer = await loginAs('user_f11')
+    await postFolder(bearer, { name: 'Work' }) // default + Work both notes-type
+    const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    const rows = (await res.json()) as ListDto[]
+    expect(rows.some((l) => l.listType === 'notes')).toBe(false)
+  })
+
+  // --- #559 hardening ----------------------------------------------
+
+  it('maps a Lists 409 on folder create to folder_name_taken (race backstop)', async () => {
+    const fake = makeFakeLists()
+    const realCreate = fake.client.createList.bind(fake.client)
+    // The default 'Notes' folder still provisions normally; only the racing
+    // 'Recipes' create loses the lists_notes_folder_name_uq race and 409s —
+    // modelling the concurrent create that slipped past the BFF pre-check.
+    fake.client.createList = (async (input: { name: string }, actor: string) => {
+      if (input.name === 'Recipes') {
+        throw new ListsClientError(409, 'list_name_conflict', 'A list with that name already exists in this scope.')
+      }
+      return realCreate(input as never, actor)
+    }) as ListsClient['createList']
+    const raceApp = buildApp({
+      env,
+      logger: undefined,
+      repos,
+      services: { ...baseServices(), listsClient: fake.client },
+    })
+    const bearer = await loginAs('user_race')
+    const res = await raceApp.request('http://localhost/api/v1/ui/notes/folders', {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ name: 'Recipes' }),
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe('folder_name_taken')
+  })
+
+  it('404s a notes PATCH/DELETE for an in-scope item that is not a notes folder', async () => {
+    const fake = makeFakeLists()
+    const guardApp = buildApp({
+      env,
+      logger: undefined,
+      repos,
+      services: { ...baseServices(), listsClient: fake.client },
+    })
+    const bearer = await loginAs('user_guard')
+    // Provision the default 'Notes' folder so listNotesFolders is non-empty.
+    await guardApp.request('http://localhost/api/v1/ui/notes', {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ title: 'seed' }),
+    })
+    // Force the scoped lookup to resolve the id to an item in a NON-notes list
+    // (e.g. the personal tasks list, which shares the scope). The notes routes
+    // must still 404 it — only notes folders are addressable here (#559).
+    fake.client.findItemInScope = (async () => ({
+      id: 'lit_task',
+      listId: 'lst_tasks_not_a_folder',
+      title: 't',
+      notes: null,
+    })) as ListsClient['findItemInScope']
+    const patch = await guardApp.request('http://localhost/api/v1/ui/notes/lit_task', {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ title: 'hijack' }),
+    })
+    expect(patch.status).toBe(404)
+    const del = await guardApp.request('http://localhost/api/v1/ui/notes/lit_task', {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+    expect(del.status).toBe(404)
   })
 })

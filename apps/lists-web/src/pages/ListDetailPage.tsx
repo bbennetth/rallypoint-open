@@ -2,8 +2,6 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
-  createItem,
-  deleteItem,
   deleteList,
   getList,
   listFieldDefs,
@@ -22,6 +20,16 @@ import {
   type ListItemDto,
   type ListStatusDto,
 } from '../lib/api.js'
+import { getDb } from '../lib/offline/db.js'
+import {
+  readListSnapshot,
+  readPendingOps,
+  writeListSnapshot,
+} from '../lib/offline/cache-accessors.js'
+import { applyOpToItems, applyOpsToItems } from '../lib/offline/outbox-reducers.js'
+import { newTempId, type OutboxOp } from '../lib/offline/outbox-ops.js'
+import { enqueueItemOp } from '../lib/offline/engine.js'
+import { subscribeRefresh } from '../lib/offline/refresh-bus.js'
 import { TaskBoard } from '../components/TaskBoard.js'
 import { ShareDrawer } from '../components/ShareDrawer.js'
 import { FieldManagerDrawer } from '../components/FieldManagerDrawer.js'
@@ -186,10 +194,23 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
           readOnly = false
         }
       }
+      // Write the whole page through to the offline cache, then fold any
+      // still-pending outbox ops over the server truth so a just-made
+      // optimistic edit isn't clobbered by this refetch.
+      const db = getDb(selfUserId)
+      void writeListSnapshot(db, listId, {
+        list,
+        items: page.items,
+        fieldDefs: defs.items,
+        labels: labelPage.items,
+        statuses,
+        readOnly,
+      })
+      const pending = await readPendingOps(db, listId)
       setState({
         status: 'ready',
         list,
-        items: page.items,
+        items: applyOpsToItems(page.items, pending, selfUserId),
         fieldDefs: defs.items,
         statuses,
         labels: labelPage.items,
@@ -222,6 +243,26 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
         setMoveTargets([])
       }
     } catch (err) {
+      // Offline: rehydrate the page from the cached snapshot (folding pending
+      // ops on top) instead of a hard error. Only when actually offline — an
+      // online failure (e.g. 404 deleted list) should still surface.
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        const db = getDb(selfUserId)
+        const snap = await readListSnapshot(db, listId)
+        if (snap) {
+          const pending = await readPendingOps(db, listId)
+          setState({
+            status: 'ready',
+            list: snap.list,
+            items: applyOpsToItems(snap.items, pending, selfUserId),
+            fieldDefs: snap.fieldDefs,
+            statuses: snap.statuses,
+            labels: snap.labels,
+            readOnly: snap.readOnly,
+          })
+          return
+        }
+      }
       setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
     }
   }
@@ -264,8 +305,36 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     })
   }, [listId, selfUserId])
 
+  // The outbox flusher publishes on this bus after it drains (e.g. an offline
+  // create just flushed and got its real id) — refetch silently to reconcile.
+  useEffect(() => subscribeRefresh(() => void loadRef.current({ silent: true })), [])
+
   function reportError(err: unknown) {
     setActionError(err instanceof ApiError ? `${err.code}: ${err.message}` : 'Action failed.')
+  }
+
+  // Apply an item op optimistically to the in-memory list so the UI updates
+  // instantly, then persist it to the outbox (which flushes when online). The
+  // optimistic apply mirrors what `load()` will reconstruct from cache+pending,
+  // so an offline reload shows the same state.
+  function applyOptimistic(op: OutboxOp) {
+    setState((prev) =>
+      prev.status === 'ready' ? { ...prev, items: applyOpToItems(prev.items, op, selfUserId) } : prev,
+    )
+  }
+
+  async function runItemOp(op: OutboxOp) {
+    if (!listId) return
+    setActionError(null)
+    applyOptimistic(op)
+    try {
+      await enqueueItemOp(selfUserId, op)
+    } catch (err) {
+      // Persisting to IndexedDB failed (quota / private mode) — fall back to a
+      // resync so the UI doesn't drift from a change we couldn't queue.
+      reportError(err)
+      void load({ silent: true })
+    }
   }
 
   async function handleDeleteList() {
@@ -289,16 +358,17 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     const fieldDefs = state.status === 'ready' ? state.fieldDefs : []
     if (missingRequiredFieldIds(fieldDefs, newCustomFields).length > 0) return
     setAdding(true)
-    setActionError(null)
+    const customFields = Object.keys(newCustomFields).length > 0 ? newCustomFields : undefined
     try {
-      const customFields = Object.keys(newCustomFields).length > 0 ? newCustomFields : undefined
-      await createItem(listId, { title: newTitle, ...(customFields ? { customFields } : {}) })
+      await runItemOp({
+        type: 'item:create',
+        listId,
+        tmpId: newTempId(),
+        input: { title: newTitle, ...(customFields ? { customFields } : {}) },
+      })
       setNewTitle('')
       setNewCustomFields({})
       setAddResetKey((k) => k + 1)
-      await load()
-    } catch (err) {
-      reportError(err)
     } finally {
       setAdding(false)
     }
@@ -313,34 +383,22 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     })
   }
 
+  // Item edits go through the outbox: optimistic apply + queued PATCH that
+  // flushes on reconnect. The legacy `silent` option is moot now (no reload),
+  // kept in the signature so the many call sites don't need touching.
   async function patch(
     itemId: string,
     fields: Parameters<typeof updateItem>[2],
-    opts: { silent?: boolean } = {},
+    _opts: { silent?: boolean } = {},
   ) {
     if (!listId) return
-    setActionError(null)
-    try {
-      await updateItem(listId, itemId, fields)
-      // A silent reload keeps the ready view mounted — used by the inline
-      // label picker so toggling a label doesn't blank the page and snap the
-      // <details> disclosure shut between toggles.
-      await load(opts.silent ? { silent: true } : {})
-    } catch (err) {
-      reportError(err)
-    }
+    await runItemOp({ type: 'item:update', listId, itemId, patch: fields })
   }
 
   async function handleDelete(itemId: string) {
     if (!listId) return
-    setActionError(null)
-    try {
-      await deleteItem(listId, itemId)
-      setLastDeleted(itemId)
-      await load()
-    } catch (err) {
-      reportError(err)
-    }
+    setLastDeleted(itemId)
+    await runItemOp({ type: 'item:delete', listId, itemId })
   }
 
   async function handleUndo() {
@@ -421,10 +479,14 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
   // in-flight guard stops a fast double-Enter from creating two children.
   async function handleAddSubItem(parentId: string, title: string) {
     if (!listId || addingSub || title.trim().length === 0) return
-    setActionError(null)
     setAddingSub(true)
     try {
-      await createItem(listId, { title: title.trim(), parentId })
+      await runItemOp({
+        type: 'item:create',
+        listId,
+        tmpId: newTempId(),
+        input: { title: title.trim(), parentId },
+      })
       setAddSubParent(null)
       // Make sure the new child is visible.
       setCollapsed((prev) => {
@@ -433,9 +495,6 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
         next.delete(parentId)
         return next
       })
-      await load()
-    } catch (err) {
-      reportError(err)
     } finally {
       setAddingSub(false)
     }

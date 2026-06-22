@@ -34,3 +34,54 @@ registerRoute(
     sameOrigin && isCacheableImage(request.destination, url.pathname),
   new CacheFirst({ cacheName: 'image-cache' }),
 )
+
+// --- Web Push (planner-owned notifications) -------------------------
+// The planner-api notifications cron sends a JSON payload { title, body?, url }.
+// Show it as a notification; clicking it focuses an open planner tab (or opens
+// one) and navigates to the deep link.
+interface PushPayload {
+  title?: string
+  body?: string
+  url?: string
+}
+
+self.addEventListener('push', (event) => {
+  let payload: PushPayload = {}
+  try {
+    payload = (event.data?.json() as PushPayload) ?? {}
+  } catch {
+    const text = event.data?.text()
+    if (text) payload = { body: text }
+  }
+  const options: NotificationOptions = {
+    icon: '/icons/rallypt-192.png',
+    badge: '/icons/rallypt-192.png',
+    data: { url: payload.url ?? '/' },
+    ...(payload.body ? { body: payload.body } : {}),
+  }
+  event.waitUntil(self.registration.showNotification(payload.title ?? 'Rallypoint', options))
+})
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  const data = event.notification.data as { url?: string } | undefined
+  const url = data?.url ?? '/'
+  event.waitUntil(
+    (async () => {
+      // Only controlled windows can be focused/navigated; if none exist (or
+      // the only tab is uncontrolled, e.g. mid-SW-update) fall through to
+      // openWindow so the click always lands somewhere.
+      const windows = await self.clients.matchAll({ type: 'window' })
+      for (const client of windows) {
+        if ('focus' in client) {
+          await client.focus()
+          if (url !== '/' && 'navigate' in client) {
+            await client.navigate(url).catch(() => undefined)
+          }
+          return
+        }
+      }
+      await self.clients.openWindow(url)
+    })(),
+  )
+})

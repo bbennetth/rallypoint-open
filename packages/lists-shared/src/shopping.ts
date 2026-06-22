@@ -5,7 +5,10 @@
 // The set of list types that are system-managed (auto-provisioned, non-deletable).
 // Guarded at the lists-api DELETE boundary so no client can delete these.
 // Extend this set if new system-managed types are added in the future.
-export const SYSTEM_MANAGED_LIST_TYPES = new Set(['shopping', 'notes'] as const)
+export const SYSTEM_MANAGED_LIST_TYPES = new Set(['shopping', 'notes', 'chores', 'diary'] as const)
+// The element type of SYSTEM_MANAGED_LIST_TYPES — call sites narrow a list's
+// listType to this before `.has()` so the set membership check type-checks.
+export type SystemManagedListType = 'shopping' | 'notes' | 'chores' | 'diary'
 
 // The v1 category taxonomy (locked). Stored as the `rp:category` key in
 // an item's custom_fields blob. The server sets it server-side (bypasses

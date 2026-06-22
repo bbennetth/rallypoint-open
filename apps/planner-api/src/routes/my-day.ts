@@ -7,6 +7,8 @@ import { requireSession } from '../middleware/session.js'
 import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
 import { bestEffort, proxyEvents, proxyLists } from '../lib/sdk-error.js'
 import { listPersonalTaskLists } from '../lib/personal-scope.js'
+import { fetchChoresFeedItems } from '../lib/chores-feed.js'
+import { resolveRecurrenceDues } from '../lib/recurrence-time.js'
 import { mergeSharedGroupEvents, sharedEventIdSet } from '../lib/shared-merge.js'
 import { zonedDayWindow } from '../lib/day-window.js'
 import { composeMyDay } from '../lib/my-day.js'
@@ -28,7 +30,7 @@ export const myDayRoutes = new Hono<HonoApp>()
     // Per-user rate limit: 60 requests per minute.
     await applyPerUserRateLimit(c, { userId: actor, route: 'my-day', limit: 60, windowSeconds: 60 })
 
-    const { listsClient, eventsClient } = c.var.services
+    const { listsClient, eventsClient, settings } = c.var.services
 
     const dateParsed = calendarDateField.safeParse(c.req.query('date'))
     if (!dateParsed.success)
@@ -44,12 +46,16 @@ export const myDayRoutes = new Hono<HonoApp>()
     // independent). Tasks have no server-side date filter (listItems returns a
     // whole list), so composeMyDay does the authoritative [start, end)
     // filtering for both; the events from/to is a payload optimisation only.
-    const [personalLists, events, userEvents] = await Promise.all([
+    const [personalLists, choreItems, events, userEvents] = await Promise.all([
       proxyLists(async () => {
         const lists = await listPersonalTaskLists(listsClient, actor)
         const perList = await Promise.all(lists.map((l) => listsClient.listItems(l.id)))
         return { lists, items: perList.flat() }
       }),
+      // Chores are additive and gated by the showChoresInFeeds setting — a
+      // chores/settings hiccup degrades to [] so it never drops the actor's
+      // tasks + events. Items carry their listId so the UI can badge them.
+      bestEffort(() => fetchChoresFeedItems(listsClient, settings, actor), []),
       proxyEvents(() =>
         eventsClient.listPersonalEvents({ actor, from: window.start, to: window.end }),
       ),
@@ -60,7 +66,12 @@ export const myDayRoutes = new Hono<HonoApp>()
 
     // Tasks come from the actor's personal (planner-origin) lists only —
     // RPL lists no longer flow into Planner (#531 separation).
-    const tasks = personalLists.items
+    // Append chores items (toggle-gated; [] when off) so they appear in the
+    // My Day agenda alongside tasks. composeMyDay stays signature-stable.
+    // Recurring dues are floating local wall-clocks — resolve them into the
+    // request tz so a "10:30" chore windows + renders at 10:30 local, not the
+    // raw UTC stamp (see resolveRecurrenceDues).
+    const tasks = resolveRecurrenceDues([...personalLists.items, ...choreItems], timezone)
 
     // Planner-flagged group events: best-effort so an events-api hiccup never
     // drops the actor's own events. Merge with already-reachable events, dedup

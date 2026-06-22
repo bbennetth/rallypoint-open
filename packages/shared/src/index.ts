@@ -65,6 +65,19 @@ export const SHARED_SETTINGS_NAMESPACE = 'shared' as const
 // as bulk storage.
 export const SETTINGS_MAX_BYTES = 16 * 1024
 
+// The signed-in user's RPID profile, folded into each app's session probe
+// (GET /api/v1/ui/session) by the BFF for the user bar. `username` is the
+// (non-unique) display name. Any field may be null when RPID has no value
+// (or the fold-in degraded). Canonical here so the four *-api probe handlers
+// and web-kit's browser session client share one definition (#456).
+export interface SessionProfile {
+  username: string | null
+  first_name: string | null
+  last_name: string | null
+  picture_url: string | null
+  email: string | null
+}
+
 export * from './validators.js'
 export * from './avatar-constraints.js'
 export * from './avatar-geometry.js'

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 // lists — the core Lists primitive (design resolution: one core row,
 // two list types). id is a prefix-tagged ULID (`lst_<ulid>`) minted
@@ -42,6 +42,19 @@ export const lists = sqliteTable(
   (t) => ({
     scopeIdx: index('lists_scope_idx').on(t.tenantId, t.scopeType, t.scopeId),
     createdByIdx: index('lists_created_by_idx').on(t.createdBy),
+    // lists_notes_folder_name_uq: partial unique on (scope_id, name) for LIVE
+    // `notes`-type lists only — the DB backstop for the Planner notes-folder
+    // name race (#559), where two concurrent POSTs both pass the app-level
+    // folderNameTaken pre-check and create duplicate folders. Scoped to
+    // list_type='notes' so it never constrains tasks/standard/shopping lists,
+    // which legitimately allow duplicate names in a scope. Partial on
+    // deleted_at IS NULL so a deleted folder's name can be reused. Mirrors
+    // the list_groups_created_by_name_uq pattern (case-sensitive, like that
+    // index); the app's folderNameTaken stays the case-insensitive guard for
+    // the non-racing path.
+    notesFolderNameUq: uniqueIndex('lists_notes_folder_name_uq')
+      .on(t.scopeId, t.name)
+      .where(sql`${t.deletedAt} is null and ${t.listType} = 'notes'`),
   }),
 )
 

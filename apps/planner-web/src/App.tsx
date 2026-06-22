@@ -7,6 +7,7 @@ import { TasksPage } from './pages/TasksPage.js'
 import { ShoppingPage } from './pages/ShoppingPage.js'
 import { EventsPage } from './pages/EventsPage.js'
 import { NotesPage } from './pages/NotesPage.js'
+import { DiaryPage } from './pages/DiaryPage.js'
 import { SettingsPage } from './pages/SettingsPage.js'
 
 export function App() {
@@ -56,6 +57,8 @@ export function App() {
           </RequireSession>
         }
       />
+      {/* Chores folded into the Tasks page (Tasks | Chores sub-view). */}
+      <Route path="/chores" element={<Navigate to="/tasks" replace />} />
       <Route
         path="/events"
         element={
@@ -68,6 +71,8 @@ export function App() {
           </RequireSession>
         }
       />
+      {/* Calendar folded into My Day (Agenda · Month · Week lens). */}
+      <Route path="/calendar" element={<Navigate to="/me" replace />} />
       <Route
         path="/notes"
         element={
@@ -75,6 +80,18 @@ export function App() {
             {() => (
               <AppChrome>
                 <NotesPage />
+              </AppChrome>
+            )}
+          </RequireSession>
+        }
+      />
+      <Route
+        path="/diary"
+        element={
+          <RequireSession>
+            {() => (
+              <AppChrome>
+                <DiaryPage />
               </AppChrome>
             )}
           </RequireSession>

@@ -21,9 +21,15 @@ import {
 // are exposed from here — the list is fully managed by the BFF.
 //
 // Category auto-assignment (categorize() in lists-shared) happens inside
-// lists-api on item create — the BFF doesn't touch it. Clients may override
-// the auto-assigned category via item PATCH by including
+// lists-api on item create — the BFF passes the `autoCategorize` flag from
+// the user's planner settings (`shoppingAutoCategorize`). When the setting
+// is false the flag is forwarded as false and lists-api skips the keyword
+// assignment. Clients may override any category via item PATCH by including
 // { customFields: { 'rp:category': '<category>' } }.
+
+// Setting key for the shopping auto-categorize preference (stored in the
+// 'planner' namespace of the RPID generic user-settings store).
+const SETTING_AUTO_CATEGORIZE = 'shoppingAutoCategorize'
 
 // Ownership + type guard for write routes. lists-api's loadListForActor
 // checks group membership but NOT list type, so without this guard an actor
@@ -73,17 +79,35 @@ export const shoppingRoutes = new Hono<HonoApp>()
   // BFF guards list ownership AND list type before forwarding: lists-api
   // checks group membership but NOT list type, so without this guard an actor
   // could create items (triggering shopping auto-categorization) on their own
-  // tasks or notes list via this path. Auto-categorization happens server-side
-  // in lists-api (categorize()) — the BFF doesn't touch it.
+  // tasks or notes list via this path. Auto-categorization is controlled by
+  // the user's `shoppingAutoCategorize` planner setting (true = on, false =
+  // off). The flag is forwarded to lists-api as `autoCategorize` so the
+  // keyword assignment can be skipped server-side. When the setting is absent
+  // (new users) the default is true (existing behavior).
   .post('/api/v1/ui/shopping/:listId/items', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const listId = c.req.param('listId')
     const lists = c.var.services.listsClient
     const parsed = CreateListItemSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+
+    // Read the user's auto-categorize preference from the planner settings
+    // store. Default to true (on) when the key is absent.
+    let autoCategorize = true
+    try {
+      const settings = await c.var.services.settings.get(actor, 'planner')
+      if (settings[SETTING_AUTO_CATEGORIZE] === false) {
+        autoCategorize = false
+      }
+    } catch {
+      // Settings fetch failure is non-fatal — fall back to default (on).
+    }
+
     const created = await proxyLists(async () => {
       await assertIsActorShoppingList(lists, actor, listId)
-      return lists.createListItem(listId, parsed.data, actor)
+      // autoCategorize is always settings-derived (server-side authority);
+      // it overwrites any client-supplied value in the body.
+      return lists.createListItem(listId, { ...parsed.data, autoCategorize }, actor)
     })
     return c.json(created, 201)
   })

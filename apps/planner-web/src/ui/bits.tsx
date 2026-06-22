@@ -77,8 +77,7 @@ export function EventEditPencil({ slug }: { slug: string }) {
   return (
     <button
       type="button"
-      className="pl-btn ghost"
-      style={{ padding: '5px 7px' }}
+      className="pl-iconbtn"
       title="Edit in RP Events"
       aria-label="Edit in RP Events"
       onClick={() =>

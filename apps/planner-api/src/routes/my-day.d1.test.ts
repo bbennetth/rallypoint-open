@@ -12,6 +12,7 @@ import type {
   ListItemDto,
   ListsClient,
 } from '@rallypoint/lists-client'
+import { PERSONAL_GROUP_NAME_LEGACY } from '../lib/personal-scope.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
 import { buildD1Repos, createDb } from '../repos/d1/index.js'
@@ -34,23 +35,34 @@ const ISO = '2026-06-01T00:00:00.000Z'
 
 interface FakeLists {
   client: ListsClient
-  seedTask(actor: string, item: { id: string; title?: string; dueDate: string | null }): void
+  seedTask(
+    actor: string,
+    item: {
+      id: string
+      title?: string
+      dueDate: string | null
+      completed?: boolean
+      completedAt?: string | null
+      seriesId?: string | null
+    },
+  ): void
 }
 
-// A minimal Lists SDK: one personal `list_group` ("My Tasks") per actor and a
-// single list under it, materialised lazily as tasks are seeded. Only the read
-// methods My Day touches are implemented.
+// A minimal Lists SDK: one personal `list_group` per actor and a single list
+// under it, materialised lazily as tasks are seeded. The group is seeded with
+// the legacy name to model the pre-migration rollout state; selectPersonalGroup
+// matches either name. Only the read methods My Day touches are implemented.
 function makeFakeLists(): FakeLists {
   const groups: GroupDto[] = []
   const lists: ListDto[] = []
   const itemsByList = new Map<string, ListItemDto[]>()
 
   function ensureList(actor: string): string {
-    let group = groups.find((g) => g.createdBy === actor && g.name === 'My Tasks')
+    let group = groups.find((g) => g.createdBy === actor && g.name === PERSONAL_GROUP_NAME_LEGACY)
     if (!group) {
       group = {
         id: `grp_${actor}`,
-        name: 'My Tasks',
+        name: PERSONAL_GROUP_NAME_LEGACY,
         description: null,
         createdBy: actor,
         createdAt: ISO,
@@ -94,13 +106,16 @@ function makeFakeLists(): FakeLists {
         title: item.title ?? item.id,
         notes: null,
         assignedTo: null,
-        completed: false,
-        completedAt: null,
+        completed: item.completed ?? false,
+        completedAt: item.completedAt ?? null,
         status: null,
+        statusId: null,
+        parentId: null,
         priority: null,
         dueDate: item.dueDate,
         position: items.length,
         customFields: {},
+        seriesId: item.seriesId ?? null,
         createdBy: actor,
         createdAt: ISO,
         updatedAt: ISO,
@@ -112,7 +127,10 @@ function makeFakeLists(): FakeLists {
 interface FakeEvents {
   client: EventsClient
   calls: { actor: string; from?: string; to?: string }[]
-  seedEvent(actor: string, ev: { id: string; name?: string; startAt: string | null }): void
+  seedEvent(
+    actor: string,
+    ev: { id: string; name?: string; startAt: string | null; endAt?: string | null; allDay?: boolean },
+  ): void
   seedUserEvent(actor: string, ev: { eventId: string; days: UserEventDto['days'] }): void
   /** Seed a group event flagged "show in planner" for the given actor. */
   seedPlannerGroupEvent(actor: string, ev: { eventId: string; days: UserEventDto['days'] }): void
@@ -156,7 +174,8 @@ function makeFakeEvents(): FakeEvents {
         name: ev.name ?? ev.id,
         description: null,
         startAt: ev.startAt,
-        endAt: null,
+        endAt: ev.endAt ?? null,
+        allDay: ev.allDay ?? false,
         timezone: 'UTC',
         locationLabel: null,
         privacyMode: 'private',
@@ -197,7 +216,7 @@ function makeFakeEvents(): FakeEvents {
 interface MyDayResponse {
   date: string
   timezone: string
-  tasks: { id: string }[]
+  tasks: { id: string; dueDate: string | null }[]
   events: { id: string }[]
   eventDays: { eventId: string; date: string; owned: boolean; shared?: boolean }[]
 }
@@ -314,7 +333,13 @@ describe('D1 integration — Planner My Day BFF', () => {
 
   it('merges only the tasks and events that fall on the day, sorted', async () => {
     const bearer = await loginAs('user_b')
-    lists.seedTask('user_b', { id: 'yesterday', dueDate: '2026-06-02T23:00:00.000Z' })
+    // Completed-yesterday: overdue but done → does not roll into today.
+    lists.seedTask('user_b', {
+      id: 'yesterday-done',
+      dueDate: '2026-06-02T23:00:00.000Z',
+      completed: true,
+      completedAt: '2026-06-02T23:30:00.000Z',
+    })
     lists.seedTask('user_b', { id: 't-late', dueDate: '2026-06-03T18:00:00.000Z' })
     lists.seedTask('user_b', { id: 't-early', dueDate: '2026-06-03T08:00:00.000Z' })
     lists.seedTask('user_b', { id: 'undated', dueDate: null })
@@ -326,6 +351,68 @@ describe('D1 integration — Planner My Day BFF', () => {
     const body = (await res.json()) as MyDayResponse
     expect(body.tasks.map((t) => t.id)).toEqual(['t-early', 't-late'])
     expect(body.events.map((e) => e.id)).toEqual(['e-am', 'e-pm'])
+  })
+
+  it('surfaces a multi-day event on a day between its start and end', async () => {
+    const bearer = await loginAs('user_b')
+    // A trip Jun 2 → Jun 4: querying Jun 3 (a middle day) must include it, even
+    // though it neither starts nor ends that day.
+    events.seedEvent('user_b', {
+      id: 'trip',
+      startAt: '2026-06-02T09:00:00.000Z',
+      endAt: '2026-06-04T17:00:00.000Z',
+    })
+    const res = await get(bearer, 'date=2026-06-03&tz=UTC')
+    const body = (await res.json()) as MyDayResponse
+    expect(body.events.map((e) => e.id)).toEqual(['trip'])
+  })
+
+  it('rolls an overdue open task forward into today, ahead of today’s items', async () => {
+    const bearer = await loginAs('user_roll')
+    lists.seedTask('user_roll', { id: 'overdue', dueDate: '2026-06-01T09:00:00.000Z' })
+    lists.seedTask('user_roll', { id: 'today', dueDate: '2026-06-03T09:00:00.000Z' })
+
+    const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as MyDayResponse
+    expect(body.tasks.map((t) => t.id)).toEqual(['overdue', 'today'])
+  })
+
+  it('does not show a recurring chore twice when its next occurrence is also today', async () => {
+    const bearer = await loginAs('user_dup')
+    lists.seedTask('user_dup', {
+      id: 'occ-overdue',
+      seriesId: 'lse_chore',
+      dueDate: '2026-06-02T07:00:00.000Z',
+    })
+    lists.seedTask('user_dup', {
+      id: 'occ-today',
+      seriesId: 'lse_chore',
+      dueDate: '2026-06-03T07:00:00.000Z',
+    })
+
+    const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as MyDayResponse
+    expect(body.tasks.map((t) => t.id)).toEqual(['occ-today'])
+  })
+
+  it('resolves a recurring item’s floating due into the request tz (10:30 stays 10:30 local)', async () => {
+    const bearer = await loginAs('user_tz')
+    // A chore stamped at a floating 10:30 (UTC components = intended local time)
+    // plus a one-off due at a genuine absolute instant (local midnight in PDT).
+    lists.seedTask('user_tz', {
+      id: 'chore',
+      seriesId: 'lse_chore',
+      dueDate: '2026-06-03T10:30:00.000Z',
+    })
+    lists.seedTask('user_tz', { id: 'one-off', dueDate: '2026-06-03T07:00:00.000Z' })
+
+    const body = (await (
+      await get(bearer, 'date=2026-06-03&tz=America/Los_Angeles')
+    ).json()) as MyDayResponse
+    const chore = body.tasks.find((t) => t.id === 'chore')
+    const oneOff = body.tasks.find((t) => t.id === 'one-off')
+    // 10:30 floating → 10:30 PDT (−7) → 17:30Z, so the client renders 10:30 local.
+    expect(chore?.dueDate).toBe('2026-06-03T17:30:00.000Z')
+    // The one-off (seriesId null) is a real instant — passed through untouched.
+    expect(oneOff?.dueDate).toBe('2026-06-03T07:00:00.000Z')
   })
 
   it('resolves the day window in the requested timezone', async () => {
@@ -352,6 +439,25 @@ describe('D1 integration — Planner My Day BFF', () => {
       from: '2026-06-03T05:00:00.000Z',
       to: '2026-06-04T05:00:00.000Z',
     })
+  })
+
+  it('forwards a 23-hour window on the US spring-forward day (DST boundary)', async () => {
+    // 2026-03-08: America/New_York jumps 02:00→03:00, so the local day is only
+    // 23h of real time. Midnight is EST (−05:00) but the next midnight is EDT
+    // (−04:00), so the half-open window is [05:00Z, next-day 04:00Z). This
+    // proves the DST resolution holds through the real Hono handler, not just
+    // the day-window unit test.
+    const bearer = await loginAs('user_dst')
+    await get(bearer, 'date=2026-03-08&tz=America/New_York')
+    expect(events.calls).toHaveLength(1)
+    expect(events.calls[0]).toEqual({
+      actor: 'user_dst',
+      from: '2026-03-08T05:00:00.000Z',
+      to: '2026-03-09T04:00:00.000Z',
+    })
+    const hours =
+      (Date.parse(events.calls[0]!.to!) - Date.parse(events.calls[0]!.from!)) / 3_600_000
+    expect(hours).toBe(23)
   })
 
   it("does not surface another user's tasks or events", async () => {

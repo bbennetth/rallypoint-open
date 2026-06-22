@@ -24,11 +24,124 @@ body {
 /* ============================================================
    MY DAY
    ============================================================ */
+
+/* View-switcher toolbar row (Agenda/Month/Week). Lives below the title on
+   its own row so the switcher never moves between views. The agenda status
+   line sits on the right; in calendar views the row is just the seg control,
+   but its height is unchanged, so toggling views causes no layout shift. */
+.md-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.md-status {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+  /* Shrink + ellipsize rather than wrapping to a second row, which would add
+     header height the calendar views don't have (a between-views shift). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 600px) {
+  /* On narrow phones let the status line drop below the seg rather than
+     squeeze it; left-align it under the switcher. */
+  .md-status {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+}
+
+/* Weather strip card — a fixed height across its loading/manual/ready phases
+   so it's one row that never resizes between states. It grows only when the
+   hourly breakdown is expanded (`.expanded`); the summary row stays put. */
+.wx-card {
+  height: 56px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 14px;
+}
+.wx-card.expanded {
+  height: auto;
+  overflow: visible;
+}
+/* The always-visible summary row holds the fixed height. */
+.wx-summary {
+  flex: 0 0 56px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+/* Compact the summary row's icon buttons (ready-state expand +
+   change-location, and the manual form's "use my location" pin) and tighten
+   the row gap so the conditions line keeps room for UV before it ellipsizes
+   — the shared .pl-iconbtn is a 44px touch target on mobile, which otherwise
+   crowds out "· UV n …". Override holds at all widths since this selector
+   outranks the bare .pl-iconbtn rule (incl. its media query). */
+.wx-summary .pl-iconbtn {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+}
+/* Setup row: label · input · Show · pin, all on one line (no wrap). */
+.wx-form {
+  gap: 8px;
+}
+/* Manual card grows only to show an error line beneath the form; with no
+   error the 56px summary row is the whole card, matching the other states. */
+.wx-card-manual {
+  height: auto;
+  overflow: visible;
+}
+.wx-error {
+  padding: 0 14px 10px;
+  font-size: 12px;
+  color: var(--hot, #b3261e);
+}
+/* Expanded hourly area: the metric selector + a horizontal scroll of hours. */
+.wx-hourly-wrap {
+  border-top: 1.5px solid var(--line);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wx-hourly {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.wx-hour {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 40px;
+}
+.wx-hour .h {
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.wx-hour .v {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1;
+}
+
 .md-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  margin-bottom: 22px;
+  margin-bottom: 14px;
 }
 .pl-stat {
   border: 1.5px solid var(--line);
@@ -56,7 +169,7 @@ body {
   .md-stats {
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
   }
   .md-stats .pl-stat:last-child {
     grid-column: 1 / -1;
@@ -72,40 +185,12 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-  margin-bottom: 20px;
+  margin-bottom: 14px;
 }
 @media (max-width: 1023px) {
   .md-allday {
     grid-template-columns: 1fr;
   }
-}
-
-/* progress ring */
-.pl-ring {
-  position: relative;
-}
-.pl-ring svg {
-  transform: rotate(-90deg);
-}
-.pl-ring .num {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-.pl-ring .num b {
-  font-family: var(--font-display);
-  font-size: 17px;
-  color: var(--ink);
-  line-height: 1;
-}
-.pl-ring .num span {
-  font-family: var(--font-mono);
-  font-size: 8px;
-  color: var(--ink-mute);
-  letter-spacing: 0.1em;
 }
 
 /* schedule timeline */
@@ -245,23 +330,6 @@ body {
   text-transform: uppercase;
   color: var(--ink-mute);
 }
-.cal-nav-btn {
-  all: unset;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border: 1.5px solid var(--line);
-  color: var(--ink-dim);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.cal-nav-btn:hover {
-  border-color: var(--ink-dim);
-  color: var(--ink);
-}
 
 /* 7-column grid used by both month and week views. */
 .cal-grid {
@@ -271,7 +339,7 @@ body {
 }
 /* In week mode the cells can be taller since there's only one row. */
 .cal-grid--week .cal-cell {
-  min-height: 120px;
+  height: 140px;
 }
 
 /* Day-of-week header cells (Sun/Mon/Tue…). */
@@ -286,12 +354,16 @@ body {
   padding: 4px 0 6px;
 }
 
-/* Individual day cell. */
+/* Individual day cell. Fixed height (not min-height) so a day with events
+   never grows taller than an empty day — CSS Grid stretches every cell in a
+   row to the tallest, so a content-driven cell would otherwise resize its
+   whole row. Overflow is clipped; the "+N more" badge signals hidden items. */
 .cal-cell {
   background: var(--surface);
   border: 1.5px solid var(--line);
   padding: 6px 7px;
-  min-height: 80px;
+  height: 108px;
+  overflow: hidden;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -328,12 +400,15 @@ body {
   flex-shrink: 0;
 }
 
-/* Container for item chips + overflow badge inside a cell. */
+/* Container for item chips + overflow badge inside a cell. Fills the cell's
+   remaining height and clips, so extra items never push the cell taller. */
 .cal-items {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  flex: 1 1 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Compact item chip inside a cell. */
@@ -383,7 +458,7 @@ body {
   }
   .cal-cell {
     padding: 4px 3px;
-    min-height: 56px;
+    height: 78px;
   }
   .cal-chip {
     font-size: 9px;
@@ -557,6 +632,13 @@ body {
   gap: 26px;
   align-items: start;
 }
+/* Reserve a floor for the detail pane (all three variants — EventDetail,
+   HolidayDetail, and the empty/select state — render a <section>) so the
+   pane doesn't collapse to a single line while loading or when nothing is
+   selected, which would jump the mobile single-column stack. */
+.ev-grid > section {
+  min-height: 200px;
+}
 @media (max-width: 1023px) {
   .ev-grid {
     grid-template-columns: 1fr;
@@ -578,12 +660,12 @@ body {
   box-sizing: border-box;
   cursor: pointer;
   display: grid;
-  gap: 6px;
-  padding: 12px 13px;
+  gap: 5px;
+  padding: 10px 12px;
   border: 1.5px solid var(--line);
   border-left: 1.5px solid var(--line);
   background: var(--surface);
-  min-height: 60px;
+  min-height: 52px;
   width: 100%;
   text-align: left;
 }
@@ -594,6 +676,16 @@ body {
   border-left: 3px solid var(--accent);
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+/* Holiday rows share the event-row shape but are read-only: no hover
+   highlight (they aren't selectable), with a faintly tinted left edge to
+   distinguish them from events at a glance. */
+.ev-rail-item.is-holiday {
+  border-left: 3px solid var(--line);
+  background: var(--surface-2, var(--surface));
+}
+.ev-rail-item.is-holiday:hover {
+  border-color: var(--line);
 }
 .ev-rail-name {
   font-size: 13.5px;
@@ -639,6 +731,32 @@ body {
 }
 
 /* ============================================================
+   SKELETONS — loading placeholders (replace bare "Loading…" text)
+   ============================================================ */
+/* A subtle opacity pulse on a neutral block. Sized by the inline styles of
+   <SkeletonBlock>/<SkeletonRows> to approximate the loaded layout so content
+   swapping in causes (near-)zero layout shift. */
+.pl-skel {
+  background: var(--line);
+  animation: pl-skel-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pl-skel-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl-skel {
+    animation: none;
+    opacity: 0.45;
+  }
+}
+
+/* ============================================================
    STANDALONE PAGES (landing / SSO callback) — no app chrome
    ============================================================ */
 .page-pad {
@@ -673,10 +791,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.pl-btn.ghost.pl-note-view {
-  padding: 5px 11px;
-  font-size: 10px;
-}
 /* Full-note view (drawer). */
 .pl-note-view-title {
   font-family: var(--font-body);
@@ -687,7 +801,9 @@ body {
 }
 .pl-note-text {
   font-family: var(--font-body);
-  font-size: 14px;
+  /* 16px is the floor below which iOS Safari auto-zooms on focus — this
+     class lands on the note-body <textarea>, so don't undercut it. */
+  font-size: 16px;
   line-height: 1.6;
   color: var(--ink-dim);
   white-space: pre-wrap;
@@ -705,22 +821,4 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-mute);
-}
-.pl-note-del {
-  all: unset;
-  box-sizing: border-box;
-  cursor: pointer;
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1.5px solid var(--line);
-  color: var(--ink-dim);
-  font-size: 16px;
-  line-height: 1;
-}
-.pl-note-del:hover {
-  border-color: var(--acid);
-  color: var(--acid);
 }

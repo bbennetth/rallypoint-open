@@ -21,7 +21,16 @@ import { viewConfigField } from './views.js'
 // None of these adds a column — the discriminator lives in the one core
 // `lists` row (DB column is plain text, no check constraint, so adding a
 // type needs no migration). Task-only columns stay null on non-task types.
-export const LIST_TYPES = ['tasks', 'standard', 'shopping', 'notes'] as const
+// `chores` is a tasks-shaped list (carries priority + dueDate so recurring
+// occurrences land on a date) given its own discriminator so the Planner
+// Chores tab can route to it and every task surface can hide it (#546). Like
+// shopping/notes it is system-managed (auto-provisioned, non-deletable).
+// `diary` is a standard-shaped list whose items are dated journal entries
+// (title = optional heading, the generic `notes` column = body, dueDate = the
+// entry's day) with mood + arbitrary metrics captured in custom fields; its
+// own discriminator lets the Planner Diary tab route to it and every task
+// surface hide it. System-managed like chores/notes/shopping.
+export const LIST_TYPES = ['tasks', 'standard', 'shopping', 'notes', 'chores', 'diary'] as const
 export const listTypeField = z.enum(LIST_TYPES)
 export type ListType = (typeof LIST_TYPES)[number]
 
@@ -305,6 +314,12 @@ export const CreateListItemSchema = z.object({
   // Labels (RPL v1.0.0 slice 12). Full set of label ids to attach on
   // create; omit to create with no labels.
   labelIds: labelIdsField.optional(),
+  // Auto-categorize flag for shopping lists (issue #542). When false, the
+  // server skips the keyword-based auto-categorization and stores no
+  // rp:category on create (the item appears under 'other' until manually set).
+  // Omitted or true → categorize as normal (backward-compat default).
+  // Only meaningful for shopping lists; the server ignores it for other types.
+  autoCategorize: z.boolean().optional(),
 })
 export type CreateListItemInput = z.infer<typeof CreateListItemSchema>
 
@@ -350,6 +365,15 @@ export const UpdateListItemSchema = z
     }
   })
 export type UpdateListItemInput = z.infer<typeof UpdateListItemSchema>
+
+// POST /api/v1/sdk/lists/:listId/items/:itemId/move — the explicit
+// cross-list move surface (#549). Only the target list is supplied; the
+// source list + item are path params. Referential integrity (target exists,
+// actor access, item shape) is enforced app-side.
+export const MoveListItemSchema = z.object({
+  targetListId: moveTargetListIdField,
+})
+export type MoveListItemInput = z.infer<typeof MoveListItemSchema>
 
 // --- Bulk item actions (Lists v2 slice 6) ----------------------------
 

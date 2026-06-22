@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { BrandLockup } from '@rallypoint/ui'
+import { AppBrandLockup } from '@rallypoint/ui'
 import { ThemeToggle } from './ThemeToggle.js'
 
 // Shared layout shell for every auth page. Centered Ink card on the
@@ -29,8 +29,16 @@ export function AuthCard({ title, subtitle, children, footer }: AuthCardProps) {
     >
       <div style={{ width: '100%', maxWidth: '28rem', display: 'grid', gap: 24 }}>
         <header className="flex items-center justify-between gap-4">
-          <Link to="/" style={{ textDecoration: 'none' }}>
-            <BrandLockup size={22} />
+          <Link
+            to="/"
+            style={{
+              textDecoration: 'none',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 9,
+            }}
+          >
+            <AppBrandLockup size="desktop" />
           </Link>
           <ThemeToggle />
         </header>

@@ -275,6 +275,25 @@ export interface ListsClient {
   ): Promise<ListItemDto>
   // Soft-delete an item.
   deleteListItem(listId: string, itemId: string, actor: string): Promise<void>
+  // Move an item from `listId` to `targetListId` (the explicit cross-list
+  // move surface — #549). Field values not meaningful in the target are
+  // cleaned server-side; position is re-appended at the target's end.
+  // Returns the updated item DTO (now bearing the target listId).
+  moveListItem(
+    listId: string,
+    itemId: string,
+    targetListId: string,
+    actor: string,
+  ): Promise<ListItemDto>
+  // Find an item by id among ALL the actor's lists in a scope, returning the
+  // live item DTO (which carries its parent listId) or `null` when no such
+  // live item is in the scope. Lets a caller resolve an item to its parent
+  // list without a per-list items fan-out (#559). `actor` is sent as x-actor.
+  findItemInScope(
+    scope: { scopeType: ScopeType; scopeId: string },
+    itemId: string,
+    actor: string,
+  ): Promise<ListItemDto | null>
   // --- series (recurring items) -------------------------------------
   // Create a recurring series for a list. `actor` is the user_<ulid>
   // the calling app has already authorized; sent as x-actor header.
@@ -437,6 +456,33 @@ export function createListsClient(config: ListsClientConfig): ListsClient {
         undefined,
         { 'x-actor': actor },
       )
+    },
+    moveListItem(listId, itemId, targetListId, actor) {
+      return request<ListItemDto>(
+        'POST',
+        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/move`,
+        { targetListId },
+        { 'x-actor': actor },
+      )
+    },
+    async findItemInScope(scope, itemId, actor) {
+      try {
+        return await request<ListItemDto>(
+          'GET',
+          `/api/v1/sdk/scopes/${encodeURIComponent(scope.scopeType)}/${encodeURIComponent(scope.scopeId)}/items/${encodeURIComponent(itemId)}`,
+          undefined,
+          { 'x-actor': actor },
+        )
+      } catch (err) {
+        // A genuine "no such live item in this scope" is item_not_found → null.
+        // Any other error — including the zero-key SDK gate-miss (a generic
+        // not_found the BFF remaps to 502) — propagates unchanged so a
+        // misconfigured deploy never masquerades as a missing item.
+        if (err instanceof ListsClientError && err.status === 404 && err.code === 'item_not_found') {
+          return null
+        }
+        throw err
+      }
     },
     createListItemSeries(listId, input, actor) {
       return request<ListItemSeriesDto>(

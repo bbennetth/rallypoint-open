@@ -52,6 +52,9 @@ export interface EventRecord {
   // hasn't recorded where they bought tickets.
   ticketPlatform: string | null
   ticketAccountEmail: string | null
+  // Issue #545: first-class all-day flag. null = pre-migration row (use inference);
+  // false = timed; true = all-day.
+  allDay: boolean | null
 }
 
 export interface CreateEventInput {
@@ -75,6 +78,8 @@ export interface CreateEventInput {
   // Slice 3b (ticket platform metadata).
   ticketPlatform?: string | null | undefined
   ticketAccountEmail?: string | null | undefined
+  // Issue #545: explicit all-day flag.
+  allDay?: boolean | null | undefined
 }
 
 // Patch fields. `undefined` = leave alone; `null` = clear (for
@@ -103,6 +108,8 @@ export interface PatchEventInput {
   // Slice 3b (ticket platform metadata).
   ticketPlatform?: string | null | undefined
   ticketAccountEmail?: string | null | undefined
+  // Issue #545: explicit all-day flag. undefined = not set; null = inherit from inference.
+  allDay?: boolean | null | undefined
 }
 
 export interface ListEventsOptions {

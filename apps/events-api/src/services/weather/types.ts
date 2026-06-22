@@ -44,6 +44,17 @@ export interface WeatherForecastDto {
     sunrise: string | null // ISO-8601
     sunset: string | null
   }>
+  // Opt-in per-hour series (set `includeHourly` on the input). Omitted
+  // entirely for the event-weather path so the persisted blob doesn't grow;
+  // only the coordinate-forecast SDK endpoint requests it.
+  hourly?: Array<{
+    time: string // ISO-8601 local (timezone-aligned, no offset)
+    temperature: number | null
+    uvIndex: number | null
+    weatherCode: number | null
+    isDay: boolean | null
+    precipitationProbability: number | null
+  }>
 }
 
 export interface AirQualityDto {
@@ -74,6 +85,10 @@ export interface WeatherProviderInput {
   endDate: string | null
   // IANA timezone. Open-Meteo uses this to align "daily" buckets.
   timezone: string
+  // When true, the provider also fetches a per-hour series (temperature,
+  // UV, condition code, precip probability) into `forecast.hourly`. Off by
+  // default so the event-weather path keeps its compact persisted shape.
+  includeHourly?: boolean
 }
 
 export interface WeatherProvider {

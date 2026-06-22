@@ -2,17 +2,34 @@ import { describe, it, expect } from 'vitest'
 import type { GroupDto, ListDto, ListsClient } from '@rallypoint/lists-client'
 import {
   PERSONAL_GROUP_NAME,
+  PERSONAL_GROUP_NAME_LEGACY,
   SHOPPING_LIST_NAME,
+  TASKS_LIST_NAME,
   selectPersonalGroup,
   resolvePersonalScope,
   listPersonalLists,
   selectNotesList,
+  selectNotesLists,
   excludeNotesList,
   selectShoppingList,
   selectShoppingLists,
   excludeShoppingLists,
   listPersonalTaskLists,
   resolveShoppingList,
+  selectTasksList,
+  selectNonCanonicalTaskLists,
+  findTasksList,
+  resolveTasksList,
+  CHORES_LIST_NAME,
+  selectChoresList,
+  excludeChoresLists,
+  findChoresList,
+  resolveChoresList,
+  DIARY_LIST_NAME,
+  selectDiaryList,
+  excludeDiaryLists,
+  findDiaryList,
+  resolveDiaryList,
 } from './personal-scope.js'
 
 // Pure unit coverage for the stateless personal-scope resolver. The Lists
@@ -117,6 +134,40 @@ describe('selectPersonalGroup', () => {
     ]
     expect(selectPersonalGroup(groups, actor)?.id).toBe('lgr_old')
   })
+
+  // --- expand/contract dual-name window (issue #544) ---
+
+  it('matches the new name "Planner" (post-migration)', () => {
+    const groups = [group({ id: 'lgr_new_name', createdBy: actor, name: PERSONAL_GROUP_NAME })]
+    expect(selectPersonalGroup(groups, actor)?.id).toBe('lgr_new_name')
+  })
+
+  it('matches the legacy name "My Tasks" (pre-migration rollout window)', () => {
+    const groups = [
+      group({ id: 'lgr_legacy', createdBy: actor, name: PERSONAL_GROUP_NAME_LEGACY }),
+    ]
+    expect(selectPersonalGroup(groups, actor)?.id).toBe('lgr_legacy')
+  })
+
+  it('picks the oldest when both old and new names coexist (collision during rollout)', () => {
+    // A user who had a 'My Tasks' group (not yet renamed by migration) AND
+    // somehow also has a 'Planner' group — oldest wins regardless of name.
+    const groups = [
+      group({
+        id: 'lgr_planner_newer',
+        createdBy: actor,
+        name: PERSONAL_GROUP_NAME,
+        createdAt: '2026-05-01T00:00:00.000Z',
+      }),
+      group({
+        id: 'lgr_mytasks_older',
+        createdBy: actor,
+        name: PERSONAL_GROUP_NAME_LEGACY,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ]
+    expect(selectPersonalGroup(groups, actor)?.id).toBe('lgr_mytasks_older')
+  })
 })
 
 describe('resolvePersonalScope', () => {
@@ -220,6 +271,40 @@ describe('excludeNotesList', () => {
     const lists = [list({ id: 'lst_1' }), list({ id: 'lst_2' })]
     expect(excludeNotesList(lists).map((l) => l.id)).toEqual(['lst_1', 'lst_2'])
   })
+
+  it('excludes EVERY notes folder, not just the default (#549)', () => {
+    const lists = [
+      list({ id: 'lst_task' }),
+      list({ id: 'lst_n1', listType: 'notes' }),
+      list({ id: 'lst_n2', listType: 'notes' }),
+    ]
+    // All notes-type folders are dropped from task surfaces — the filter keys
+    // off listType, so adding more notes lists never leaks any into Tasks.
+    expect(excludeNotesList(lists).map((l) => l.id)).toEqual(['lst_task'])
+  })
+})
+
+describe('selectNotesLists (#549 folders)', () => {
+  it('returns [] when there are no notes lists', () => {
+    expect(selectNotesLists([list({ id: 'lst_1' })])).toEqual([])
+  })
+
+  it('returns every notes folder, oldest first', () => {
+    const lists = [
+      list({ id: 'lst_new', listType: 'notes', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_task' }),
+      list({ id: 'lst_old', listType: 'notes', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectNotesLists(lists).map((l) => l.id)).toEqual(['lst_old', 'lst_new'])
+  })
+
+  it('breaks createdAt ties deterministically by id', () => {
+    const lists = [
+      list({ id: 'lst_b', listType: 'notes', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_a', listType: 'notes', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectNotesLists(lists).map((l) => l.id)).toEqual(['lst_a', 'lst_b'])
+  })
 })
 
 describe('selectShoppingList', () => {
@@ -297,6 +382,108 @@ describe('listPersonalTaskLists', () => {
   })
 })
 
+describe('selectTasksList', () => {
+  it('returns null when there are no task lists', () => {
+    expect(selectTasksList([])).toBeNull()
+    expect(selectTasksList([list({ id: 'lst_n', listType: 'notes' })])).toBeNull()
+  })
+
+  it('returns the sole task list', () => {
+    expect(selectTasksList([list({ id: 'lst_t' })])?.id).toBe('lst_t')
+  })
+
+  it('excludes notes + shopping before picking', () => {
+    const lists = [
+      list({ id: 'lst_n', listType: 'notes', createdAt: '2025-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_s', listType: 'shopping', createdAt: '2025-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_t', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    // Even though notes/shopping are older, the canonical TASK list is lst_t.
+    expect(selectTasksList(lists)?.id).toBe('lst_t')
+  })
+
+  it('picks the OLDEST task list as canonical', () => {
+    const lists = [
+      list({ id: 'lst_new', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_old', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_mid', createdAt: '2026-03-01T00:00:00.000Z' }),
+    ]
+    expect(selectTasksList(lists)?.id).toBe('lst_old')
+  })
+})
+
+describe('selectNonCanonicalTaskLists', () => {
+  it('returns [] when there is one or zero task lists', () => {
+    expect(selectNonCanonicalTaskLists([])).toEqual([])
+    expect(selectNonCanonicalTaskLists([list({ id: 'lst_t' })])).toEqual([])
+  })
+
+  it('returns every task list except the oldest, oldest-first', () => {
+    const lists = [
+      list({ id: 'lst_new', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_old', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_mid', createdAt: '2026-03-01T00:00:00.000Z' }),
+      list({ id: 'lst_n', listType: 'notes' }),
+    ]
+    expect(selectNonCanonicalTaskLists(lists).map((l) => l.id)).toEqual(['lst_mid', 'lst_new'])
+  })
+
+  it('breaks createdAt ties deterministically by id', () => {
+    const lists = [
+      list({ id: 'lst_b', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_a', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_c', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    // lst_a is canonical (oldest tie → smallest id); rest oldest-first by id.
+    expect(selectNonCanonicalTaskLists(lists).map((l) => l.id)).toEqual(['lst_b', 'lst_c'])
+  })
+})
+
+describe('findTasksList', () => {
+  const actor = 'user_alice'
+
+  it('returns null when the actor has no personal group', async () => {
+    const { client } = makeFake({ groups: [] })
+    expect(await findTasksList(client, actor)).toBeNull()
+  })
+
+  it('returns the canonical (oldest) task list, never provisioning', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({
+      groups: [personal],
+      lists: [
+        list({ id: 'lst_new', scopeId: 'lgr_p', createdAt: '2026-05-01T00:00:00.000Z' }),
+        list({ id: 'lst_old', scopeId: 'lgr_p', createdAt: '2026-01-01T00:00:00.000Z' }),
+      ],
+    })
+    expect((await findTasksList(client, actor))?.id).toBe('lst_old')
+    expect(createdLists).toHaveLength(0)
+  })
+})
+
+describe('resolveTasksList (provision-only paths)', () => {
+  const actor = 'user_alice'
+
+  it('provisions a Tasks list on first call (fresh user, no merge)', async () => {
+    const { client, created, createdLists } = makeFake({ groups: [] })
+    const result = await resolveTasksList(client, actor)
+    expect(created).toHaveLength(1) // personal group
+    expect(createdLists).toHaveLength(1) // the Tasks list
+    expect(result.listType).toBe('tasks')
+    expect(result.name).toBe(TASKS_LIST_NAME)
+    expect(result.visibility).toBe('all')
+  })
+
+  it('returns the existing sole task list without provisioning or merging', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const existing = list({ id: 'lst_t', scopeId: 'lgr_p' })
+    const { client, createdLists } = makeFake({ groups: [personal], lists: [existing] })
+    const result = await resolveTasksList(client, actor)
+    expect(result.id).toBe('lst_t')
+    expect(createdLists).toHaveLength(0)
+  })
+})
+
 describe('resolveShoppingList', () => {
   const actor = 'user_alice'
 
@@ -342,5 +529,234 @@ describe('resolveShoppingList', () => {
     // All three calls return the same list id.
     expect(first.id).toBe(second.id)
     expect(second.id).toBe(third.id)
+  })
+})
+
+// --- chores list (#546) ------------------------------------------------
+
+describe('selectChoresList', () => {
+  it('returns null when there is no chores list', () => {
+    expect(selectChoresList([])).toBeNull()
+    expect(selectChoresList([list({ id: 'lst_t' })])).toBeNull()
+  })
+
+  it('picks the chores-type list', () => {
+    const lists = [list({ id: 'lst_t' }), list({ id: 'lst_c', listType: 'chores' })]
+    expect(selectChoresList(lists)?.id).toBe('lst_c')
+  })
+
+  it('picks the OLDEST on the unlikely duplicate', () => {
+    const lists = [
+      list({ id: 'lst_new', listType: 'chores', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_old', listType: 'chores', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectChoresList(lists)?.id).toBe('lst_old')
+  })
+})
+
+describe('excludeChoresLists', () => {
+  it('drops chores-type lists, keeps the rest', () => {
+    const lists = [
+      list({ id: 'lst_t', listType: 'tasks' }),
+      list({ id: 'lst_c', listType: 'chores' }),
+      list({ id: 'lst_n', listType: 'notes' }),
+    ]
+    expect(excludeChoresLists(lists).map((l) => l.id)).toEqual(['lst_t', 'lst_n'])
+  })
+
+  it('is a no-op when there is no chores list', () => {
+    const lists = [list({ id: 'lst_1' }), list({ id: 'lst_2', listType: 'notes' })]
+    expect(excludeChoresLists(lists).map((l) => l.id)).toEqual(['lst_1', 'lst_2'])
+  })
+})
+
+describe('listPersonalTaskLists excludes chores', () => {
+  const actor = 'user_alice'
+
+  it('filters out the chores list alongside notes + shopping', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const taskList = list({ id: 'lst_t' })
+    const choresList = list({ id: 'lst_c', listType: 'chores' })
+    const { client } = makeFake({ groups: [personal], lists: [taskList, choresList] })
+    const result = await listPersonalTaskLists(client, actor)
+    expect(result.map((l) => l.id)).toEqual(['lst_t'])
+  })
+})
+
+describe('chores never swallowed by the #543 canonical-Tasks merge', () => {
+  it('selectTasksList ignores a chores list even when it is the oldest', () => {
+    const lists = [
+      list({ id: 'lst_c', listType: 'chores', createdAt: '2025-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_t', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    // Even though the chores list is older, the canonical TASK list is lst_t.
+    expect(selectTasksList(lists)?.id).toBe('lst_t')
+  })
+
+  it('selectNonCanonicalTaskLists never includes a chores list among merge sources', () => {
+    const lists = [
+      list({ id: 'lst_old', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_new', listType: 'tasks', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_c', listType: 'chores', createdAt: '2026-02-01T00:00:00.000Z' }),
+    ]
+    // lst_old is canonical; only lst_new is a merge source — the chores list
+    // (lst_c) is excluded so the merge cannot fold it into Tasks.
+    expect(selectNonCanonicalTaskLists(lists).map((l) => l.id)).toEqual(['lst_new'])
+  })
+})
+
+describe('findChoresList', () => {
+  const actor = 'user_alice'
+
+  it('returns null when the actor has no personal group', async () => {
+    const { client } = makeFake({ groups: [] })
+    expect(await findChoresList(client, actor)).toBeNull()
+  })
+
+  it('returns the chores list without provisioning', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({
+      groups: [personal],
+      lists: [list({ id: 'lst_c', scopeId: 'lgr_p', listType: 'chores' })],
+    })
+    expect((await findChoresList(client, actor))?.id).toBe('lst_c')
+    expect(createdLists).toHaveLength(0)
+  })
+})
+
+describe('resolveChoresList', () => {
+  const actor = 'user_alice'
+
+  it('provisions a chores list (and the group) on first access', async () => {
+    const { client, created, createdLists } = makeFake({ groups: [] })
+    const result = await resolveChoresList(client, actor)
+    expect(created).toHaveLength(1) // personal group
+    expect(createdLists).toHaveLength(1)
+    expect(result.listType).toBe('chores')
+    expect(result.name).toBe(CHORES_LIST_NAME)
+  })
+
+  it('is idempotent: repeated calls return the SAME chores list', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({ groups: [personal] })
+    const first = await resolveChoresList(client, actor)
+    const second = await resolveChoresList(client, actor)
+    expect(createdLists).toHaveLength(1)
+    expect(first.id).toBe(second.id)
+  })
+})
+
+// --- diary list (Phase B) ----------------------------------------------
+
+describe('selectDiaryList', () => {
+  it('returns null when there is no diary list', () => {
+    expect(selectDiaryList([])).toBeNull()
+    expect(selectDiaryList([list({ id: 'lst_t' })])).toBeNull()
+  })
+
+  it('picks the diary-type list', () => {
+    const lists = [list({ id: 'lst_t' }), list({ id: 'lst_d', listType: 'diary' })]
+    expect(selectDiaryList(lists)?.id).toBe('lst_d')
+  })
+
+  it('picks the OLDEST on the unlikely duplicate', () => {
+    const lists = [
+      list({ id: 'lst_new', listType: 'diary', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_old', listType: 'diary', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectDiaryList(lists)?.id).toBe('lst_old')
+  })
+})
+
+describe('excludeDiaryLists', () => {
+  it('drops diary-type lists, keeps the rest', () => {
+    const lists = [
+      list({ id: 'lst_t', listType: 'tasks' }),
+      list({ id: 'lst_d', listType: 'diary' }),
+      list({ id: 'lst_n', listType: 'notes' }),
+    ]
+    expect(excludeDiaryLists(lists).map((l) => l.id)).toEqual(['lst_t', 'lst_n'])
+  })
+
+  it('is a no-op when there is no diary list', () => {
+    const lists = [list({ id: 'lst_1' }), list({ id: 'lst_2', listType: 'notes' })]
+    expect(excludeDiaryLists(lists).map((l) => l.id)).toEqual(['lst_1', 'lst_2'])
+  })
+})
+
+describe('listPersonalTaskLists excludes diary', () => {
+  const actor = 'user_alice'
+
+  it('filters out the diary list alongside notes + shopping + chores', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const taskList = list({ id: 'lst_t' })
+    const diaryList = list({ id: 'lst_d', listType: 'diary' })
+    const choresList = list({ id: 'lst_c', listType: 'chores' })
+    const { client } = makeFake({ groups: [personal], lists: [taskList, diaryList, choresList] })
+    const result = await listPersonalTaskLists(client, actor)
+    expect(result.map((l) => l.id)).toEqual(['lst_t'])
+  })
+})
+
+describe('diary never swallowed by the #543 canonical-Tasks merge', () => {
+  it('selectTasksList ignores a diary list even when it is the oldest', () => {
+    const lists = [
+      list({ id: 'lst_d', listType: 'diary', createdAt: '2025-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_t', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectTasksList(lists)?.id).toBe('lst_t')
+  })
+
+  it('selectNonCanonicalTaskLists never includes a diary list among merge sources', () => {
+    const lists = [
+      list({ id: 'lst_old', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_new', listType: 'tasks', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_d', listType: 'diary', createdAt: '2026-02-01T00:00:00.000Z' }),
+    ]
+    expect(selectNonCanonicalTaskLists(lists).map((l) => l.id)).toEqual(['lst_new'])
+  })
+})
+
+describe('findDiaryList', () => {
+  const actor = 'user_alice'
+
+  it('returns null when the actor has no personal group', async () => {
+    const { client } = makeFake({ groups: [] })
+    expect(await findDiaryList(client, actor)).toBeNull()
+  })
+
+  it('returns the diary list without provisioning', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({
+      groups: [personal],
+      lists: [list({ id: 'lst_d', scopeId: 'lgr_p', listType: 'diary' })],
+    })
+    expect((await findDiaryList(client, actor))?.id).toBe('lst_d')
+    expect(createdLists).toHaveLength(0)
+  })
+})
+
+describe('resolveDiaryList', () => {
+  const actor = 'user_alice'
+
+  it('provisions a diary list (and the group) on first access, flagged created', async () => {
+    const { client, created, createdLists } = makeFake({ groups: [] })
+    const result = await resolveDiaryList(client, actor)
+    expect(created).toHaveLength(1) // personal group
+    expect(createdLists).toHaveLength(1)
+    expect(result.created).toBe(true)
+    expect(result.list.listType).toBe('diary')
+    expect(result.list.name).toBe(DIARY_LIST_NAME)
+  })
+
+  it('is idempotent: repeated calls return the SAME diary list, created=false on warm calls', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({ groups: [personal] })
+    const first = await resolveDiaryList(client, actor)
+    const second = await resolveDiaryList(client, actor)
+    expect(createdLists).toHaveLength(1)
+    expect(first.created).toBe(true)
+    expect(second.created).toBe(false)
+    expect(first.list.id).toBe(second.list.id)
   })
 })

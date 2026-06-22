@@ -16,10 +16,18 @@ export function deriveStatus(startAt: string | null): 'PAST' | 'TODAY' | 'SOON' 
 /**
  * Full date+time range label for the event detail card.
  * e.g. "Jun 12, 2026, 9:30 AM – 11:00 AM" or "Jun 12, 2026, 9:30 AM"
+ * When allDay=true, shows date-only (no time component).
  */
-export function formatWhen(startAt: string | null, endAt: string | null): string {
+export function formatWhen(startAt: string | null, endAt: string | null, allDay?: boolean): string {
   if (!startAt) return 'No date set'
   const start = new Date(startAt)
+  if (allDay) {
+    const dateStr = start.toLocaleDateString([], { dateStyle: 'medium' })
+    if (!endAt) return dateStr
+    const end = new Date(endAt)
+    const endDateStr = end.toLocaleDateString([], { dateStyle: 'medium' })
+    return `${dateStr} – ${endDateStr}`
+  }
   const startStr = start.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
   if (!endAt) return startStr
   const end = new Date(endAt)
@@ -29,11 +37,13 @@ export function formatWhen(startAt: string | null, endAt: string | null): string
 
 /**
  * Short date+time label for rail cards.
- * e.g. "Jun 12, 9:30 AM" or "No date"
+ * e.g. "Jun 12, 9:30 AM" or "Jun 12" (for all-day) or "No date"
+ * When allDay=true, shows date only (no time).
  */
-export function formatWhenShort(startAt: string | null): string {
+export function formatWhenShort(startAt: string | null, allDay?: boolean): string {
   if (!startAt) return 'No date'
   const d = new Date(startAt)
   if (Number.isNaN(d.getTime())) return 'No date'
+  if (allDay) return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
   return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }

@@ -58,6 +58,8 @@ export function makeNoopListsClient(): ListsClient {
     deleteList: fail('deleteList') as unknown as ListsClient['deleteList'],
     createListItem: fail('createListItem') as unknown as ListsClient['createListItem'],
     updateListItem: fail('updateListItem') as unknown as ListsClient['updateListItem'],
+    moveListItem: fail('moveListItem') as unknown as ListsClient['moveListItem'],
+    findItemInScope: fail('findItemInScope') as unknown as ListsClient['findItemInScope'],
     deleteListItem: fail('deleteListItem') as unknown as ListsClient['deleteListItem'],
     createListItemSeries: fail('createListItemSeries') as unknown as ListsClient['createListItemSeries'],
     listSeries: fail('listSeries') as unknown as ListsClient['listSeries'],

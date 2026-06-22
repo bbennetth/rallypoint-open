@@ -498,6 +498,89 @@ describe('D1 integration — SDK personal events', () => {
     expect(results[0]?.deleted_at).toBeNull()
   })
 
+
+  // --- allDay flag (issue #545) ----------------------------------------
+
+  it('creates an event with allDay=true → DTO has allDay=true, DB has all_day=1', async () => {
+    const actor = `user_${ulid()}`
+    const res = await app.request('http://localhost/api/v1/sdk/personal-events', {
+      method: 'POST',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'All day event', allDay: true }),
+    })
+    expect(res.status).toBe(201)
+    const dto = (await res.json()) as Record<string, unknown>
+    expect(dto.allDay).toBe(true)
+
+    // Confirm DB column
+    const { results } = await env.DB.prepare('SELECT all_day FROM events WHERE id = ?')
+      .bind(dto.id as string).all()
+    expect(results[0]?.all_day).toBe(1)
+  })
+
+  it('creates an event with allDay=false → DTO has allDay=false', async () => {
+    const actor = `user_${ulid()}`
+    const res = await app.request('http://localhost/api/v1/sdk/personal-events', {
+      method: 'POST',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Timed event', allDay: false, startAt: '2026-06-04T09:00:00Z' }),
+    })
+    expect(res.status).toBe(201)
+    const dto = (await res.json()) as Record<string, unknown>
+    expect(dto.allDay).toBe(false)
+  })
+
+  it('creates an event without allDay → infers from startAt (midnight=true, non-midnight=false)', async () => {
+    const actor = `user_${ulid()}`
+
+    // Midnight UTC → inferred allDay=true
+    const midnightRes = await app.request('http://localhost/api/v1/sdk/personal-events', {
+      method: 'POST',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Midnight event', startAt: '2026-06-04T00:00:00Z' }),
+    })
+    expect(midnightRes.status).toBe(201)
+    expect(((await midnightRes.json()) as Record<string, unknown>).allDay).toBe(true)
+
+    // Non-midnight → inferred allDay=false
+    const timedRes = await app.request('http://localhost/api/v1/sdk/personal-events', {
+      method: 'POST',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Timed inferred', startAt: '2026-06-04T10:30:00Z' }),
+    })
+    expect(timedRes.status).toBe(201)
+    expect(((await timedRes.json()) as Record<string, unknown>).allDay).toBe(false)
+  })
+
+  it('PATCH sets allDay=true on an existing event', async () => {
+    const actor = `user_${ulid()}`
+    const id = await createPersonal(actor, { name: 'Was timed', startAt: '2026-06-04T09:00:00Z' })
+
+    const res = await app.request(`http://localhost/api/v1/sdk/personal-events/${id}`, {
+      method: 'PATCH',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ allDay: true }),
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).allDay).toBe(true)
+  })
+
+  it('PATCH with allDay=null reverts to inference', async () => {
+    const actor = `user_${ulid()}`
+    // Create with explicit allDay=true
+    const id = await createPersonal(actor, { name: 'Explicit all-day', allDay: true, startAt: '2026-06-04T09:30:00Z' })
+
+    // Clear with null → reverts to inference from startAt (09:30 → false)
+    const res = await app.request(`http://localhost/api/v1/sdk/personal-events/${id}`, {
+      method: 'PATCH',
+      headers: { ...sdkHeaders({ 'x-actor': actor }), 'content-type': 'application/json' },
+      body: JSON.stringify({ allDay: null }),
+    })
+    expect(res.status).toBe(200)
+    // Inference: 09:30 UTC is not midnight → allDay=false
+    expect(((await res.json()) as Record<string, unknown>).allDay).toBe(false)
+  })
+
   // --- Regression: public SDK events surface still works without bearer --
 
   it('GET /api/v1/sdk/events/:slug still works without a bearer (content-gated regression)', async () => {
@@ -600,4 +683,5 @@ describe('D1 integration — SDK personal events', () => {
     expect(clearDto.ticketPlatform).toBeNull()
     expect(clearDto.ticketAccountEmail).toBeNull()
   })
+
 })

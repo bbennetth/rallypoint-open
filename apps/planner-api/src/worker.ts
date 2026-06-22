@@ -4,6 +4,7 @@ import { parseEnv, type Env } from './env.js'
 import { buildLogger, type Logger } from './logger.js'
 import { buildD1Repos, createDb } from './repos/d1/index.js'
 import { buildServices } from './services/index.js'
+import { runNotificationTick } from './lib/notifications.js'
 import type { Repos } from './repos/types.js'
 import type { Services } from './services/types.js'
 
@@ -18,10 +19,12 @@ import type { Services } from './services/types.js'
 //     PLANNER_UI_ORIGIN, RPID_API_URL, LISTS_API_URL, EVENTS_API_URL, …)
 //     that feed parseEnv.
 //
-// planner is a pure BFF: it proxies lists/events/RPID over HTTP and
-// owns only the sessions store. It has NO realtime/Durable Object, NO
-// object store, and NO background pruner — so this Worker is fetch-only
-// (no `scheduled` handler, no Durable Object export).
+// planner is a BFF: it proxies lists/events/RPID over HTTP. It has NO
+// realtime/Durable Object and NO object store. As the owner of its own push
+// notifications (each app owns its notifications), it DOES carry two infra
+// tables (push_subscriptions, scheduled_notifications) and a `scheduled` cron
+// handler that drains the notification queue — the documented exception to
+// the otherwise fetch-only / no-domain-table BFF posture.
 
 interface WorkerEnv {
   DB: D1Database
@@ -90,5 +93,22 @@ export default {
       })
     }
     return app.fetch(request, env, ctx)
+  },
+
+  // Cron Trigger (wrangler.toml [triggers].crons, every minute) — drain the
+  // due push notifications and deliver them via Web Push. Idempotent and
+  // racy-safe: each row is marked sent once delivered, so overlapping ticks
+  // don't double-send the same notification to the same device twice in a way
+  // that matters (a row already sent drops out of listDue).
+  async scheduled(_event: unknown, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+    const d = ensureDeps(env)
+    ctx.waitUntil(
+      runNotificationTick(d.repos, d.services.webPush, new Date()).then(
+        (result) => {
+          if (result.due > 0) d.logger.info(result, 'notification tick')
+        },
+        (err: unknown) => d.logger.error({ err }, 'notification tick failed'),
+      ),
+    )
   },
 }

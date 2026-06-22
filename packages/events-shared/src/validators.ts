@@ -158,6 +158,8 @@ export const CreatePersonalEventSchema = z
     locationLabel: eventLocationLabelField,
     ticketPlatform: ticketPlatformField,
     ticketAccountEmail: ticketAccountEmailField,
+    // Issue #545: explicit all-day flag.
+    allDay: z.boolean().optional(),
   })
   .refine(
     (v) => {
@@ -187,6 +189,8 @@ export const PatchPersonalEventSchema = z
     locationLabel: eventLocationLabelField,
     ticketPlatform: ticketPlatformField,
     ticketAccountEmail: ticketAccountEmailField,
+    // Issue #545: explicit all-day flag. null clears an explicit value back to inference.
+    allDay: z.boolean().nullable().optional(),
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {

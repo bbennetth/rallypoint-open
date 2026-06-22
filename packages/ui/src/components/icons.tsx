@@ -50,6 +50,8 @@ export type IconName =
   | 'more'
   | 'cart'
   | 'trash'
+  | 'calendar'
+  | 'gear'
 
 const PATHS: Record<IconName, JSX.Element> = {
   myday: (
@@ -167,6 +169,24 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M2.5 4h11M6 4V2.6h4V4M4 4l.7 9.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4" />
       <path d="M6.6 6.8v4.6M9.4 6.8v4.6" />
+    </>
+  ),
+  // Calendar / month page: framed grid with a header band, two binding posts,
+  // and a row of day dots. Distinct from `upcoming` (single dot) and `grid`.
+  calendar: (
+    <>
+      <rect x="2" y="3.5" width="12" height="10.5" />
+      <path d="M2 7h12" />
+      <path d="M5.5 1.6v2.8M10.5 1.6v2.8" />
+      <circle cx="5.5" cy="10" r=".8" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="10" r=".8" fill="currentColor" stroke="none" />
+      <circle cx="10.5" cy="10" r=".8" fill="currentColor" stroke="none" />
+    </>
+  ),
+  gear: (
+    <>
+      <circle cx="8" cy="8" r="2" />
+      <path d="M8 1.4v2.1M8 12.5v2.1M1.4 8h2.1M12.5 8h2.1M3.3 3.3l1.5 1.5M11.2 11.2l1.5 1.5M12.7 3.3l-1.5 1.5M4.8 11.2l-1.5 1.5" />
     </>
   ),
 }

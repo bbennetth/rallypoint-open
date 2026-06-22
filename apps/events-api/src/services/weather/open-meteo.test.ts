@@ -51,12 +51,70 @@ describe('createOpenMeteoProvider', () => {
     expect(forecast).toContain('start_date=2026-06-01')
     expect(forecast).toContain('end_date=2026-06-03')
     expect(forecast).toContain('uv_index_max')
+    // No hourly series unless explicitly requested (keeps the event-weather
+    // path's persisted blob compact).
+    expect(forecast).not.toContain('hourly=')
 
     const aq = urls.find((u) => u.includes('air-quality'))!
     expect(aq).toContain('us_aqi')
     expect(aq).toContain('pm2_5')
 
     expect(result.airQuality?.current?.usAqi).toBe(42)
+    expect(result.forecast?.hourly).toBeUndefined()
+  })
+
+  it('requests + maps the hourly series only when includeHourly is set', async () => {
+    let forecastUrl = ''
+    const fetchImpl = makeFakeFetch((req) => {
+      if (req.url.includes('air-quality')) {
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      forecastUrl = req.url
+      return new Response(
+        JSON.stringify({
+          current: { temperature_2m: 18 },
+          daily: { time: ['2026-06-01'], uv_index_max: [6] },
+          hourly: {
+            time: ['2026-06-01T00:00', '2026-06-01T01:00'],
+            temperature_2m: [15, 16],
+            uv_index: [0, 1],
+            weather_code: [1, 61],
+            is_day: [0, 1],
+            precipitation_probability: [10, 80],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+    const provider = createOpenMeteoProvider({
+      forecastUrl: 'https://api.open-meteo.com/v1/forecast',
+      airQualityUrl: 'https://air-quality-api.open-meteo.com/v1/air-quality',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    const r = await provider.getEventWeather({
+      lat: 0,
+      lng: 0,
+      startDate: '2026-06-01',
+      endDate: '2026-06-01',
+      timezone: 'UTC',
+      includeHourly: true,
+    })
+
+    expect(forecastUrl).toContain('hourly=')
+    expect(forecastUrl).toContain('uv_index')
+    expect(forecastUrl).toContain('precipitation_probability')
+    expect(r.forecast?.hourly).toHaveLength(2)
+    expect(r.forecast?.hourly?.[0]).toEqual({
+      time: '2026-06-01T00:00',
+      temperature: 15,
+      uvIndex: 0,
+      weatherCode: 1,
+      isDay: false,
+      precipitationProbability: 10,
+    })
+    expect(r.forecast?.hourly?.[1]!.isDay).toBe(true)
+    expect(r.forecast?.hourly?.[1]!.precipitationProbability).toBe(80)
   })
 
   it('returns partial results when one of the two upstream calls fails', async () => {

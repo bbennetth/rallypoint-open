@@ -2,7 +2,7 @@
 // create a group before making a list, so the page auto-provisions one
 // writable "home" group on first visit (#531 follow-up).
 //
-// The Planner-provisioned personal group ("My Tasks", origin='planner')
+// The Planner-provisioned personal group ("Planner", origin='planner'; formerly "My Tasks" — renamed by migration 0010)
 // shows up in the same group listing but is read-only in the Lists app
 // (#531), so it does NOT count as a place to make lists — the default
 // must be a writable, Lists-owned group.
@@ -10,7 +10,7 @@
 import type { GroupDto } from './api.js'
 
 // Reserved display name for the auto-provisioned default Lists group
-// (parallel to Planner's "My Tasks"). createGroup is conflict-tolerant on
+// (parallel to Planner's "Planner" group). createGroup is conflict-tolerant on
 // (created_by, name), so re-provisioning is idempotent.
 export const DEFAULT_GROUP_NAME = 'My Lists'
 
@@ -23,7 +23,7 @@ export function isWritableGroup(g: GroupOriginLike): boolean {
 }
 
 // True when the user has no writable group — the trigger to auto-provision
-// the default one. Having only the Planner "My Tasks" group still counts as
+// the default one. Having only the Planner "Planner" group still counts as
 // needing a default, since lists can't be created there.
 export function needsDefaultGroup(groups: readonly GroupOriginLike[]): boolean {
   return !groups.some(isWritableGroup)

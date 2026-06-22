@@ -77,6 +77,15 @@ const EnvSchema = z.object({
   PLANNER_CSRF_COOKIE_NAME: z.string().min(1).optional(),
   PLANNER_SSO_STATE_COOKIE_NAME: z.string().min(1).optional(),
 
+  // VAPID keys for Web Push (planner-owned notifications). The public key
+  // is the browser applicationServerKey (also shipped to planner-web as
+  // VITE_VAPID_PUBLIC_KEY); the private key signs the VAPID JWT and is a
+  // secret. Subject is the contact URI (mailto:/https). Required in
+  // production; dev defaults supplied post-parse so the local stack boots.
+  VAPID_PUBLIC_KEY: z.string().min(1).optional(),
+  VAPID_PRIVATE_KEY: z.string().min(1).optional(),
+  VAPID_SUBJECT: z.string().min(1).optional(),
+
   // Build metadata — set by the Dockerfile at image-build time.
   BUILD_VERSION: z.string().default('dev'),
   BUILD_COMMIT: z.string().default('dev'),
@@ -94,12 +103,18 @@ export type Env = Omit<
   | 'PLANNER_SESSION_COOKIE_NAME'
   | 'PLANNER_CSRF_COOKIE_NAME'
   | 'PLANNER_SSO_STATE_COOKIE_NAME'
+  | 'VAPID_PUBLIC_KEY'
+  | 'VAPID_PRIVATE_KEY'
+  | 'VAPID_SUBJECT'
 > & {
   PLANNER_API_KEY: string
   PLANNER_SESSION_KEY_V1: string
   PLANNER_SESSION_COOKIE_NAME: string
   PLANNER_CSRF_COOKIE_NAME: string
   PLANNER_SSO_STATE_COOKIE_NAME: string
+  VAPID_PUBLIC_KEY: string
+  VAPID_PRIVATE_KEY: string
+  VAPID_SUBJECT: string
 }
 
 // Dev-only fallbacks for the two required secrets. Production refuses
@@ -110,6 +125,15 @@ export type Env = Omit<
 // the SAME key or RPID 403s the exchange).
 const DEV_API_KEY = 'dev-planner-api-key-do-not-use-in-production-32+chars'
 const DEV_SESSION_KEY_V1 = 'dev-planner-session-key-v1-0000000000000'
+
+// Dev-only VAPID keypair (P-256). Local-stack stand-in so Web Push works
+// end-to-end without provisioning real keys; production refuses to boot
+// without explicit VAPID_* secrets. NOT a secret — regenerate for any real
+// deployment with `npx tsx scripts/gen-vapid-keys.ts`.
+const DEV_VAPID_PUBLIC_KEY =
+  'BMtiizjeUZ7oRAzgJkYldtNsBFin0L1VdojVUccJqDzYjoOE0mkyQJ35H-4y2A4-gASqZh1A3ae2ADWzmSw_0so'
+const DEV_VAPID_PRIVATE_KEY = 'VARin9jVKIK8tfhdZNhgdOJs7vOILzNz68HkFuDS_Yk'
+const DEV_VAPID_SUBJECT = 'mailto:dev@rallypt.dev'
 
 export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const result = EnvSchema.safeParse(source)
@@ -125,10 +149,16 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const apiKey = parsed.PLANNER_API_KEY ?? (isProd ? undefined : DEV_API_KEY)
   const sessionKeyV1 =
     parsed.PLANNER_SESSION_KEY_V1 ?? (isProd ? undefined : DEV_SESSION_KEY_V1)
-  if (!apiKey || !sessionKeyV1) {
+  const vapidPublicKey = parsed.VAPID_PUBLIC_KEY ?? (isProd ? undefined : DEV_VAPID_PUBLIC_KEY)
+  const vapidPrivateKey = parsed.VAPID_PRIVATE_KEY ?? (isProd ? undefined : DEV_VAPID_PRIVATE_KEY)
+  const vapidSubject = parsed.VAPID_SUBJECT ?? (isProd ? undefined : DEV_VAPID_SUBJECT)
+  if (!apiKey || !sessionKeyV1 || !vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
     const missing = [
       !apiKey ? 'PLANNER_API_KEY' : null,
       !sessionKeyV1 ? 'PLANNER_SESSION_KEY_V1' : null,
+      !vapidPublicKey ? 'VAPID_PUBLIC_KEY' : null,
+      !vapidPrivateKey ? 'VAPID_PRIVATE_KEY' : null,
+      !vapidSubject ? 'VAPID_SUBJECT' : null,
     ]
       .filter(Boolean)
       .join(', ')
@@ -139,6 +169,9 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
     ...parsed,
     PLANNER_API_KEY: apiKey,
     PLANNER_SESSION_KEY_V1: sessionKeyV1,
+    VAPID_PUBLIC_KEY: vapidPublicKey,
+    VAPID_PRIVATE_KEY: vapidPrivateKey,
+    VAPID_SUBJECT: vapidSubject,
     PLANNER_SESSION_COOKIE_NAME:
       parsed.PLANNER_SESSION_COOKIE_NAME ?? (isProd ? '__Host-rpp_session' : 'rpp_session'),
     PLANNER_CSRF_COOKIE_NAME:

@@ -248,8 +248,8 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const bearer = await loginAs('user_shop_rail')
     // Provision the shopping list via GET /shopping/list.
     await req(bearer, 'GET', '/api/v1/ui/shopping/list')
-    // Also create a task list.
-    await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'My tasks' })
+    // Also provision the canonical tasks list (#543: GET resolves it).
+    await req(bearer, 'GET', '/api/v1/ui/lists')
 
     const tasksRes = await req(bearer, 'GET', '/api/v1/ui/lists')
     expect(tasksRes.status).toBe(200)
@@ -317,10 +317,10 @@ describe('D1 integration — Planner Shopping BFF', () => {
     // The shopping items GET must reject a list that isn't THE user's shopping list.
     const bearer = await loginAs('user_shop_typecheck01')
 
-    // Create a tasks list via the tasks endpoint.
-    const tasksRes = await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'My tasks' })
-    expect(tasksRes.status).toBe(201)
-    const tasksListId = ((await tasksRes.json()) as Record<string, unknown>).id as string
+    // Resolve the canonical tasks list (#543: GET provisions + returns it).
+    const tasksRes = await req(bearer, 'GET', '/api/v1/ui/lists')
+    expect(tasksRes.status).toBe(200)
+    const tasksListId = ((await tasksRes.json()) as Array<Record<string, unknown>>)[0].id as string
 
     // Attempt to read its items via the shopping items endpoint — must 404.
     const itemsRes = await req(bearer, 'GET', `/api/v1/ui/shopping/${tasksListId}/items`)
@@ -347,10 +347,10 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const bearer = await loginAs('user_shop_xtype_post')
     // Ensure a shopping list exists for this actor.
     await req(bearer, 'GET', '/api/v1/ui/shopping/list')
-    // Create a tasks list in the actor's personal scope.
-    const tasksRes = await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'Shopping xtype tasks' })
-    expect(tasksRes.status).toBe(201)
-    const tasksListId = ((await tasksRes.json()) as Record<string, unknown>).id as string
+    // Resolve the canonical tasks list (#543: GET provisions + returns it).
+    const tasksRes = await req(bearer, 'GET', '/api/v1/ui/lists')
+    expect(tasksRes.status).toBe(200)
+    const tasksListId = ((await tasksRes.json()) as Array<Record<string, unknown>>)[0].id as string
 
     // Attempt to create a shopping item on the tasks list — must 404.
     const res = await req(bearer, 'POST', `/api/v1/ui/shopping/${tasksListId}/items`, {
@@ -364,9 +364,9 @@ describe('D1 integration — Planner Shopping BFF', () => {
     // Ensure a shopping list and a tasks list both exist for this actor.
     const shopRes = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
     const shopListId = ((await shopRes.json()) as Record<string, unknown>).id as string
-    const tasksRes = await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'Shopping xtype tasks' })
-    expect(tasksRes.status).toBe(201)
-    const tasksListId = ((await tasksRes.json()) as Record<string, unknown>).id as string
+    const tasksRes = await req(bearer, 'GET', '/api/v1/ui/lists')
+    expect(tasksRes.status).toBe(200)
+    const tasksListId = ((await tasksRes.json()) as Array<Record<string, unknown>>)[0].id as string
 
     // Add a real shopping item so we have a valid itemId to attempt to patch.
     const itemRes = await req(bearer, 'POST', `/api/v1/ui/shopping/${shopListId}/items`, {
@@ -390,9 +390,9 @@ describe('D1 integration — Planner Shopping BFF', () => {
     // Ensure both list types exist for this actor.
     const shopRes = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
     const shopListId = ((await shopRes.json()) as Record<string, unknown>).id as string
-    const tasksRes = await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'Shopping xtype tasks' })
-    expect(tasksRes.status).toBe(201)
-    const tasksListId = ((await tasksRes.json()) as Record<string, unknown>).id as string
+    const tasksRes = await req(bearer, 'GET', '/api/v1/ui/lists')
+    expect(tasksRes.status).toBe(200)
+    const tasksListId = ((await tasksRes.json()) as Array<Record<string, unknown>>)[0].id as string
 
     // Add a real shopping item.
     const itemRes = await req(bearer, 'POST', `/api/v1/ui/shopping/${shopListId}/items`, {
@@ -416,13 +416,160 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const shopRes = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
     expect(shopRes.status).toBe(200)
     const shopListId = ((await shopRes.json()) as Record<string, unknown>).id as string
-    // Create a tasks list to make the fixture realistic.
-    await req(bearer, 'POST', '/api/v1/ui/lists', { name: 'Some tasks list' })
+    // Provision the canonical tasks list to make the fixture realistic.
+    await req(bearer, 'GET', '/api/v1/ui/lists')
 
     const res = await req(bearer, 'POST', `/api/v1/ui/shopping/${shopListId}/items`, {
       title: 'Butter',
     })
     expect(res.status).toBe(201)
     expect(((await res.json()) as Record<string, unknown>).title).toBe('Butter')
+  })
+
+  // --- autoCategorize setting round-trip (issue #542) -------------------
+
+  it('BFF passes autoCategorize:false to lists-api when shoppingAutoCategorize is off', async () => {
+    // This test builds a fresh app with a Lists stub that records the
+    // autoCategorize flag on each createListItem call.
+    const capturedFlags: Array<boolean | undefined> = []
+    const { client: trackingClient } = makeFakeLists()
+    const origCreate = trackingClient.createListItem.bind(trackingClient)
+    const trackingClientWithSpy: ListsClient = {
+      ...trackingClient,
+      createListItem: async (listId, input, actor) => {
+        capturedFlags.push(input.autoCategorize)
+        return origCreate(listId, input, actor)
+      },
+    }
+
+    // Build an app variant where settings returns shoppingAutoCategorize: false
+    // for the 'planner' namespace.
+    const customApp = buildApp({
+      env,
+      logger: undefined,
+      repos,
+      services: {
+        ...baseServices(),
+        listsClient: trackingClientWithSpy,
+        settings: {
+          get: async (_userId: string, namespace: string) => {
+            if (namespace === 'planner') return { shoppingAutoCategorize: false }
+            return {}
+          },
+          patch: async () => ({}),
+        },
+      },
+    })
+
+    const userId = 'user_shop_autocat_off'
+    const rawBearer = generateRawToken(PLANNER_SESSION_BEARER_PREFIX)
+    const idHash = hashToken(rawBearer)
+    const sealed = encryptBearer({
+      plaintext: userId,
+      aad: idHash,
+      env: { PLANNER_SESSION_KEY_V1: env.PLANNER_SESSION_KEY_V1 },
+      keyVersion: env.PLANNER_SESSION_KEY_VERSION,
+    })
+    await repos.sessions.create({
+      idHash,
+      userId,
+      rpidBearerCiphertext: sealed.ciphertext,
+      rpidBearerNonce: sealed.nonce,
+      rpidBearerKeyVersion: sealed.keyVersion,
+      absoluteExpiresAt: new Date(Date.now() + 3_600_000),
+      ipHash: '',
+      uaHash: '',
+    })
+    const h = {
+      cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${rawBearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
+      'x-rp-csrf': CSRF,
+      'content-type': 'application/json',
+    }
+
+    // Provision the shopping list.
+    const listRes = await customApp.request('http://localhost/api/v1/ui/shopping/list', {
+      headers: h,
+    })
+    expect(listRes.status).toBe(200)
+    const listId = ((await listRes.json()) as Record<string, unknown>).id as string
+
+    // Create an item — the BFF should forward autoCategorize: false.
+    const itemRes = await customApp.request(`http://localhost/api/v1/ui/shopping/${listId}/items`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ title: 'Milk' }),
+    })
+    expect(itemRes.status).toBe(201)
+
+    // The captured flag should be false (BFF forwarded the setting).
+    expect(capturedFlags.at(-1)).toBe(false)
+  })
+
+  it('BFF passes autoCategorize:true (default) when setting is absent', async () => {
+    // Default behavior: settings returns {} (no shoppingAutoCategorize key),
+    // BFF should forward autoCategorize: true.
+    const capturedFlags: Array<boolean | undefined> = []
+    const { client: trackingClient } = makeFakeLists()
+    const origCreate = trackingClient.createListItem.bind(trackingClient)
+    const trackingClientWithSpy: ListsClient = {
+      ...trackingClient,
+      createListItem: async (listId, input, actor) => {
+        capturedFlags.push(input.autoCategorize)
+        return origCreate(listId, input, actor)
+      },
+    }
+
+    const customApp = buildApp({
+      env,
+      logger: undefined,
+      repos,
+      services: {
+        ...baseServices(),
+        listsClient: trackingClientWithSpy,
+        // settings returns empty (no shoppingAutoCategorize key) → default true
+        settings: { get: async () => ({}), patch: async () => ({}) },
+      },
+    })
+
+    const userId = 'user_shop_autocat_default'
+    const rawBearer = generateRawToken(PLANNER_SESSION_BEARER_PREFIX)
+    const idHash = hashToken(rawBearer)
+    const sealed = encryptBearer({
+      plaintext: userId,
+      aad: idHash,
+      env: { PLANNER_SESSION_KEY_V1: env.PLANNER_SESSION_KEY_V1 },
+      keyVersion: env.PLANNER_SESSION_KEY_VERSION,
+    })
+    await repos.sessions.create({
+      idHash,
+      userId,
+      rpidBearerCiphertext: sealed.ciphertext,
+      rpidBearerNonce: sealed.nonce,
+      rpidBearerKeyVersion: sealed.keyVersion,
+      absoluteExpiresAt: new Date(Date.now() + 3_600_000),
+      ipHash: '',
+      uaHash: '',
+    })
+    const h = {
+      cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${rawBearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
+      'x-rp-csrf': CSRF,
+      'content-type': 'application/json',
+    }
+
+    const listRes = await customApp.request('http://localhost/api/v1/ui/shopping/list', {
+      headers: h,
+    })
+    expect(listRes.status).toBe(200)
+    const listId = ((await listRes.json()) as Record<string, unknown>).id as string
+
+    const itemRes = await customApp.request(`http://localhost/api/v1/ui/shopping/${listId}/items`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ title: 'Bread' }),
+    })
+    expect(itemRes.status).toBe(201)
+
+    // Default (no setting) → autoCategorize: true forwarded.
+    expect(capturedFlags.at(-1)).toBe(true)
   })
 })

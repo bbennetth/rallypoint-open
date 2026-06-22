@@ -13,6 +13,9 @@ import {
   type ListDto,
 } from '../lib/api.js'
 import { shouldRefetch, subscribeScopeStream } from '../lib/realtime.js'
+import { getDb, purgeUserDb } from '../lib/offline/db.js'
+import { engine } from '../lib/offline/engine.js'
+import { readScopeLists, scopeKey, writeScopeLists } from '../lib/offline/cache-accessors.js'
 import { partitionByOrigin } from '../lib/list-origin.js'
 import { DEFAULT_GROUP_NAME, needsDefaultGroup, selectDefaultGroupId } from '../lib/default-group.js'
 
@@ -97,10 +100,22 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
       return
     }
     if (!opts.silent) setState({ status: 'loading' })
+    const db = getDb(selfUserId)
+    const key = scopeKey(SCOPE_TYPE, scope)
     try {
       const page = await listLists({ scopeType: SCOPE_TYPE, scopeId: scope })
+      void writeScopeLists(db, key, page.items)
       setState({ status: 'ready', items: page.items })
     } catch (err) {
+      // Offline: serve the last-known list-of-lists for this scope rather than
+      // a hard error, so the user can still navigate into a cached list.
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        const cached = await readScopeLists(db, key)
+        if (cached) {
+          setState({ status: 'ready', items: cached })
+          return
+        }
+      }
       setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
     }
   }
@@ -179,6 +194,10 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
 
   async function handleSignOut() {
     try {
+      // Clear this user's offline cache + outbox before dropping the session
+      // (shared-device safety) — see AppChrome.handleSignout.
+      engine.dispose(selfUserId)
+      await purgeUserDb(selfUserId)
       await signout()
     } finally {
       window.location.assign('/')

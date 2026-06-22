@@ -138,6 +138,8 @@ export interface PersonalEventDto {
   description: string | null
   startAt: string | null
   endAt: string | null
+  /** Issue #545: true = all-day event; false = timed event. Resolved server-side with inference fallback. */
+  allDay: boolean
   timezone: string
   locationLabel: string | null
   privacyMode: string
@@ -159,6 +161,8 @@ export interface CreatePersonalEventInput {
   locationLabel?: string | null | undefined
   ticketPlatform?: string | undefined
   ticketAccountEmail?: string | undefined
+  /** Issue #545: true = all-day; false = timed; omit to let the server infer. */
+  allDay?: boolean | undefined
 }
 
 // Sparse patch of an owned personal event. Omitted = leave alone; `null`
@@ -171,6 +175,8 @@ export interface PatchPersonalEventInput {
   locationLabel?: string | null | undefined
   ticketPlatform?: string | null | undefined
   ticketAccountEmail?: string | null | undefined
+  /** Issue #545: true = all-day; false = timed; null reverts to inference; omit to leave unchanged. */
+  allDay?: boolean | null | undefined
 }
 
 // --- user (group) events DTOs (RPP) ---------------------------------
@@ -197,6 +203,75 @@ export interface UserEventDto {
   startDate: string | null
   endDate: string | null
   days: UserEventDayDto[]
+}
+
+// --- Holidays DTO (US federal, no DB) --------------------------------
+
+export interface HolidayDto {
+  id: string
+  name: string
+  date: string          // YYYY-MM-DD canonical date
+  observedDate: string  // YYYY-MM-DD with Sat→Fri, Sun→Mon shift
+}
+
+// --- Weather forecast DTOs (coordinate forecast surface) -------------
+// Mirrors the wire shape events-api serializes (its
+// services/weather/types.ts). Kept inline so the client stays decoupled
+// from server internals; the shapes are pinned by this package's tests.
+
+export interface WeatherForecastDto {
+  units: { temperature: 'C'; precipitation: 'mm'; windSpeed: 'km/h' }
+  current: {
+    temperature: number | null
+    apparentTemperature: number | null
+    windSpeed: number | null
+    weatherCode: number | null
+    isDay: boolean | null
+  } | null
+  daily: Array<{
+    date: string // YYYY-MM-DD
+    temperatureMax: number | null
+    temperatureMin: number | null
+    precipitationSum: number | null
+    precipitationProbabilityMax: number | null
+    windSpeedMax: number | null
+    uvIndexMax: number | null
+    weatherCode: number | null
+    sunrise: string | null
+    sunset: string | null
+  }>
+  // Opt-in per-hour series — present only on the coordinate-forecast endpoint
+  // (My Day), which requests it; the event-weather path leaves it undefined.
+  hourly?: Array<{
+    time: string // ISO-8601 local
+    temperature: number | null
+    uvIndex: number | null
+    weatherCode: number | null
+    isDay: boolean | null
+    precipitationProbability: number | null
+  }>
+}
+
+export interface AirQualityDto {
+  current: {
+    usAqi: number | null
+    europeanAqi: number | null
+    pm2_5: number | null
+    pm10: number | null
+    ozone: number | null
+    dust: number | null
+  } | null
+  daily: Array<{
+    date: string
+    usAqiMax: number | null
+    pm2_5Mean: number | null
+    pm10Mean: number | null
+  }>
+}
+
+export interface ForecastResponse {
+  forecast: WeatherForecastDto | null
+  airQuality: AirQualityDto | null
 }
 
 export interface EventsClientConfig {
@@ -279,6 +354,23 @@ export interface EventsClient {
   // silently drop out of the response.
   listPlannerGroupEvents(opts: { actor: string }): Promise<UserEventDto[]>
 
+  // --- Holidays (US federal, no auth required beyond the key) ---------
+  // Returns holidays whose observedDate falls in [from, to] (YYYY-MM-DD).
+  // Window capped at 3 years server-side.
+  listHolidays(params: { from: string; to: string }): Promise<HolidayDto[]>
+
+  // --- Coordinate forecast (API-key gated) ----------------------------
+  // Current + daily forecast for a raw lat/lng. `date` (YYYY-MM-DD) narrows
+  // the window to that day; omit for the provider's default ~7-day window.
+  // Requires `apiKey` (PLANNER_API_KEY). Forecast/airQuality may be null when
+  // the provider call partially fails.
+  getForecast(opts: {
+    lat: number
+    lng: number
+    tz: string
+    date?: string | undefined
+  }): Promise<ForecastResponse>
+
   // --- Ticket-file attachments (Slice 3, migrated to R2 bindings #409) ---
   // Single-step upload: POST multipart/form-data (file + optional fileName)
   // to the Worker, which validates inline and stores in R2. No presign step.
@@ -357,11 +449,11 @@ export function createEventsClient(config: EventsClientConfig): EventsClient {
 
     // --- personal events (Slice 2) -----------------------------------
 
-    createPersonalEvent({ actor, name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail }) {
+    createPersonalEvent({ actor, name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay }) {
       return request<PersonalEventDto>(
         'POST',
         '/api/v1/sdk/personal-events',
-        { name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail },
+        { name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay },
         { 'x-actor': actor },
       )
     },
@@ -476,6 +568,22 @@ export function createEventsClient(config: EventsClientConfig): EventsClient {
         { 'x-actor': actor },
       )
       return res.items
+    },
+
+    // --- holidays --------------------------------------------------------
+
+    async listHolidays({ from, to }) {
+      const res = await request<{ holidays: HolidayDto[] }>(
+        'GET',
+        `/api/v1/sdk/holidays?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      )
+      return res.holidays
+    },
+
+    getForecast({ lat, lng, tz, date }) {
+      const qs = new URLSearchParams({ lat: String(lat), lng: String(lng), tz })
+      if (date) qs.set('date', date)
+      return request<ForecastResponse>('GET', `/api/v1/sdk/weather?${qs.toString()}`)
     },
 
     async downloadTicket({ actor, eventId, ticketId }) {

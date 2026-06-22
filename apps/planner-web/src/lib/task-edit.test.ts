@@ -6,22 +6,34 @@ import {
   taskEditState,
   type TaskEditState,
 } from './task-edit.js'
-import { dateInputToInstant, instantToDateInput } from './planner-helpers.js'
+import { combineDueDateTime, dateInputToInstant, instantToDateInput } from './planner-helpers.js'
 
-const base: TaskEditState = { title: 'Walk the dog', priority: null, dueInput: '' }
+const base: TaskEditState = { title: 'Walk the dog', priority: null, dueInput: '', dueTimeInput: '' }
 
 describe('taskEditState', () => {
-  it('maps a task into the editable baseline, converting dueDate to input form', () => {
+  it('maps a task into the editable baseline, splitting a date-only due', () => {
     const due = dateInputToInstant('2026-06-15')!
     expect(taskEditState({ title: 'T', priority: 'high', dueDate: due })).toEqual({
       title: 'T',
       priority: 'high',
       dueInput: '2026-06-15',
+      dueTimeInput: '',
     })
     expect(taskEditState({ title: 'T', priority: null, dueDate: null })).toEqual({
       title: 'T',
       priority: null,
       dueInput: '',
+      dueTimeInput: '',
+    })
+  })
+
+  it('pre-fills the time input for a timed due', () => {
+    const timed = combineDueDateTime('2026-06-15', '14:30')!
+    expect(taskEditState({ title: 'T', priority: null, dueDate: timed })).toEqual({
+      title: 'T',
+      priority: null,
+      dueInput: '2026-06-15',
+      dueTimeInput: '14:30',
     })
   })
 })
@@ -42,7 +54,6 @@ describe('buildTaskPatch', () => {
     expect(buildTaskPatch(base, { ...base, title: '  Feed the dog  ' })).toEqual({
       title: 'Feed the dog',
     })
-    // Emptying the title is not a save — a task keeps its last real title.
     expect(buildTaskPatch(base, { ...base, title: '   ' })).toBeNull()
   })
 
@@ -58,6 +69,16 @@ describe('buildTaskPatch', () => {
     expect(buildTaskPatch(withDue, { ...withDue, dueInput: '' })).toEqual({ dueDate: null })
   })
 
+  it('combines date + time into a timed instant, and a time-only change re-emits dueDate', () => {
+    const patch = buildTaskPatch(base, { ...base, dueInput: '2026-06-15', dueTimeInput: '14:30' })
+    expect(patch).toEqual({ dueDate: combineDueDateTime('2026-06-15', '14:30') })
+
+    const dated: TaskEditState = { ...base, dueInput: '2026-06-15' }
+    expect(buildTaskPatch(dated, { ...dated, dueTimeInput: '09:00' })).toEqual({
+      dueDate: combineDueDateTime('2026-06-15', '09:00'),
+    })
+  })
+
   it('clearing priority back to null is a change', () => {
     const withPri: TaskEditState = { ...base, priority: 'low' }
     expect(buildTaskPatch(withPri, { ...withPri, priority: null })).toEqual({ priority: null })
@@ -70,15 +91,24 @@ describe('applyPatchToState', () => {
     expect(next.title).toBe('New')
     expect(next.priority).toBeNull()
     expect(next.dueInput).toBe('2026-07-01')
+    expect(next.dueTimeInput).toBe('')
   })
 
-  it('round-trips a cleared due date', () => {
-    const withDue: TaskEditState = { ...base, dueInput: '2026-07-01' }
-    expect(applyPatchToState(withDue, { dueDate: null }).dueInput).toBe('')
+  it('round-trips a timed due then a cleared due', () => {
+    const timedPatch = { dueDate: combineDueDateTime('2026-07-01', '08:15') }
+    const timed = applyPatchToState(base, timedPatch)
+    expect(timed.dueInput).toBe('2026-07-01')
+    expect(timed.dueTimeInput).toBe('08:15')
+    expect(applyPatchToState(timed, { dueDate: null }).dueTimeInput).toBe('')
   })
 
   it('successive diffs against the advanced baseline are empty', () => {
-    const draft: TaskEditState = { title: 'New', priority: 'high', dueInput: '2026-07-01' }
+    const draft: TaskEditState = {
+      title: 'New',
+      priority: 'high',
+      dueInput: '2026-07-01',
+      dueTimeInput: '14:30',
+    }
     const patch = buildTaskPatch(base, draft)!
     const next = applyPatchToState(base, patch)
     expect(buildTaskPatch(next, draft)).toBeNull()
@@ -102,7 +132,6 @@ describe('pickDefaultList', () => {
   })
 })
 
-// Sanity: the input<->instant round-trip the editor relies on.
 describe('due-date round-trip', () => {
   it('instantToDateInput(dateInputToInstant(x)) === x', () => {
     expect(instantToDateInput(dateInputToInstant('2026-06-15'))).toBe('2026-06-15')

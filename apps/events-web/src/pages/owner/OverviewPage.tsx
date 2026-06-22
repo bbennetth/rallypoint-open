@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { useEventOutlet } from './_event-outlet.js'
 import { WeatherSection } from '../PublicEventPage.js'
 import { getEventWeather } from '../../lib/api.js'
+import { formatEventDay } from '../../lib/date-format.js'
 
 // Owner-side Overview tab. At-a-glance stat cards + weather + a
 // pointer to where to edit deeper config. Slim by design — most of
@@ -151,6 +152,8 @@ function privacyLabel(mode: string | null | undefined): string {
 
 function dateRange(start: string | null, end: string | null): string {
   if (!start && !end) return '—'
-  if (start && end && start !== end) return `${start} → ${end}`
-  return start ?? end ?? '—'
+  if (start && end && start !== end) {
+    return `${formatEventDay(start, 'medium')} → ${formatEventDay(end, 'medium')}`
+  }
+  return formatEventDay(start ?? end, 'medium')
 }

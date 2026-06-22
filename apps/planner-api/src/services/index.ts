@@ -5,6 +5,7 @@ import { createIdClientService } from './id-client.js'
 import { createRpidSsoService } from './rpid-sso.js'
 import { createSettingsClientService } from './settings.js'
 import { createProfilesClientService } from './profiles.js'
+import { createWebPushService } from './push.js'
 import type { Services } from './types.js'
 
 // `opts` carries optional service-binding fetchers from the Worker entry
@@ -51,6 +52,13 @@ export function buildServices(
       baseUrl: env.EVENTS_API_URL,
       apiKey: env.PLANNER_API_KEY,
       ...eventsFetchOpt,
+    }),
+    webPush: createWebPushService({
+      vapid: {
+        publicKey: env.VAPID_PUBLIC_KEY,
+        privateKey: env.VAPID_PRIVATE_KEY,
+        subject: env.VAPID_SUBJECT,
+      },
     }),
   }
 }

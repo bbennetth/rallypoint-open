@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { ulid } from 'ulid'
-import { CreateListSchema, scopeTypeField, scopeIdField, SYSTEM_MANAGED_LIST_TYPES } from '@rallypoint/lists-shared'
+import { CreateListSchema, scopeTypeField, scopeIdField, SYSTEM_MANAGED_LIST_TYPES, type SystemManagedListType } from '@rallypoint/lists-shared'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import type { ListInviteRecord, ListRecord, ListShareRecord } from '../repos/types.js'
@@ -119,7 +119,7 @@ export const listsRoutes = new Hono<HonoApp>()
   .delete('/api/v1/ui/lists/:listId', async (c) => {
     const userId = c.var.session!.userId
     const list = await loadListForWrite(c, c.req.param('listId'))
-    if (SYSTEM_MANAGED_LIST_TYPES.has(list.listType as 'shopping' | 'notes')) {
+    if (SYSTEM_MANAGED_LIST_TYPES.has(list.listType as SystemManagedListType)) {
       throw errors.conflict(
         'system_managed_list',
         'System-managed lists cannot be deleted.',

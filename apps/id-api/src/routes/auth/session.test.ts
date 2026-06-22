@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildApp } from '../../build-app.js'
 import { parseEnv } from '../../env.js'
 import { buildInMemoryRepos } from '../../repos/memory.js'
@@ -539,20 +539,34 @@ describe('POST /api/v1/sdk/session/reauth', () => {
   })
 
   it('429s once the per-user attempt budget is exhausted', async () => {
-    const { app, repos, passwordHasher } = buildReauthApp()
-    const userId = await createUser(repos)
-    await withPassword(repos, passwordHasher, userId)
-    // Limit is 10 per window; the 11th attempt trips it.
-    let last = 0
-    for (let i = 0; i < 11; i++) {
-      const res = await app.request('/api/v1/sdk/session/reauth', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${EVENTS_KEY}` },
-        body: JSON.stringify({ user_id: userId, password: 'wrong' }),
-      })
-      last = res.status
+    // Pin the clock for the whole loop. The limiter buckets by wall-clock
+    // window (windowStartMs over fixed 10-min epoch buckets). On a real
+    // clock, if the 11 attempts happen to straddle a window boundary, the
+    // 11th lands in a fresh window where the sliding-window blend rounds to
+    // exactly the limit (floor(1 + 10·(1−ε/window)) = 10 ≤ 10) and slips
+    // through as a wrong-password 401 instead of a 429 — a rare CI flake.
+    // Freezing Date keeps all 11 attempts in one window. Only Date is faked,
+    // so argon2 + async still run on real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-06-13T12:05:00.000Z'))
+    try {
+      const { app, repos, passwordHasher } = buildReauthApp()
+      const userId = await createUser(repos)
+      await withPassword(repos, passwordHasher, userId)
+      // Limit is 10 per window; the 11th attempt trips it.
+      let last = 0
+      for (let i = 0; i < 11; i++) {
+        const res = await app.request('/api/v1/sdk/session/reauth', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${EVENTS_KEY}` },
+          body: JSON.stringify({ user_id: userId, password: 'wrong' }),
+        })
+        last = res.status
+      }
+      expect(last).toBe(429)
+    } finally {
+      vi.useRealTimers()
     }
-    expect(last).toBe(429)
   })
 })
 

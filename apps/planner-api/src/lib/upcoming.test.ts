@@ -17,6 +17,7 @@ function task(over: Partial<ListItemDto> & { id: string }): ListItemDto {
     status: null,
     priority: null,
     dueDate: null,
+    seriesId: null,
     position: 0,
     customFields: {},
     createdBy: 'user_a',
@@ -88,6 +89,52 @@ describe('composeUpcoming', () => {
     })
     expect(ids(out.dated)).toEqual(['t-today', 'e-future', 't-future'])
     expect(ids(out.undated).sort()).toEqual(['e-undated', 't-undated'])
+  })
+
+  it('keeps a multi-day event already underway (started before today, still running)', () => {
+    // The event started Jun 1 but runs through Jun 5 — it still has days to show
+    // in the forward feed, so it is NOT dropped as "past" the way a point event
+    // with a past startAt would be. The client expands it across its days.
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [],
+      events: [event({ id: 'ongoing', startAt: '2026-06-01T09:00:00.000Z', endAt: '2026-06-05T17:00:00.000Z' })],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['ongoing'])
+  })
+
+  it('drops an event that ended entirely in the past', () => {
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [],
+      events: [event({ id: 'done', startAt: '2026-06-01T09:00:00.000Z', endAt: '2026-06-02T17:00:00.000Z' })],
+      userEvents: [],
+    })
+    expect(out.dated).toEqual([])
+    expect(out.undated).toEqual([])
+  })
+
+  it('keeps an all-day event reaching its inclusive last day (endAt = window start day)', () => {
+    // All-day end is local midnight of the last covered day; +DAY_MS in
+    // eventReachesForward keeps that final day in range. Querying the start of
+    // 2026-06-04 (FROM_JUN4), a conference 06-02 → 06-04 still has the 4th to show.
+    const FROM_JUN4 = '2026-06-04T00:00:00.000Z'
+    const out = composeUpcoming({
+      date: '2026-06-04',
+      timezone: 'UTC',
+      fromInstant: FROM_JUN4,
+      tasks: [],
+      events: [
+        event({ id: 'conf', allDay: true, startAt: '2026-06-02T00:00:00.000Z', endAt: '2026-06-04T00:00:00.000Z' }),
+      ],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['conf'])
   })
 
   it('includes today (start instant is inclusive — half-open lower bound)', () => {
@@ -274,5 +321,81 @@ describe('composeUpcoming', () => {
     const item = out.dated.find((i) => i.kind === 'eventDay')
     expect(item?.kind).toBe('eventDay')
     if (item?.kind === 'eventDay') expect(item.eventDay.owned).toBe(true)
+  })
+})
+
+// ── recurring-series occurrence cap ─────────────────────────────────────────
+
+describe('capSeriesOccurrences (via composeUpcoming)', () => {
+  const dueOn = (day: string) => `2026-06-${day}T12:00:00.000Z`
+
+  it('limits one series to its next 2 occurrences, soonest kept', () => {
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [
+        task({ id: 't3', seriesId: 'srs_a', dueDate: dueOn('10') }),
+        task({ id: 't1', seriesId: 'srs_a', dueDate: dueOn('04') }),
+        task({ id: 't2', seriesId: 'srs_a', dueDate: dueOn('07') }),
+      ],
+      events: [],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['t1', 't2'])
+  })
+
+  it('caps each series independently and leaves non-series items alone', () => {
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [
+        task({ id: 'a1', seriesId: 'srs_a', dueDate: dueOn('04') }),
+        task({ id: 'a2', seriesId: 'srs_a', dueDate: dueOn('05') }),
+        task({ id: 'a3', seriesId: 'srs_a', dueDate: dueOn('06') }),
+        task({ id: 'b1', seriesId: 'srs_b', dueDate: dueOn('04') }),
+        task({ id: 'b2', seriesId: 'srs_b', dueDate: dueOn('05') }),
+        task({ id: 'b3', seriesId: 'srs_b', dueDate: dueOn('06') }),
+        task({ id: 'oneoff', dueDate: dueOn('20') }),
+      ],
+      events: [],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['a1', 'b1', 'a2', 'b2', 'oneoff'])
+  })
+
+  it('past occurrences do not consume the cap (already dropped by the window)', () => {
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [
+        task({ id: 'past', seriesId: 'srs_a', dueDate: '2026-06-01T12:00:00.000Z' }),
+        task({ id: 'n1', seriesId: 'srs_a', dueDate: dueOn('04') }),
+        task({ id: 'n2', seriesId: 'srs_a', dueDate: dueOn('05') }),
+      ],
+      events: [],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['n1', 'n2'])
+  })
+
+  it('series with 2 or fewer occurrences are unaffected; undated never capped', () => {
+    const out = composeUpcoming({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      fromInstant: FROM,
+      tasks: [
+        task({ id: 's1', seriesId: 'srs_a', dueDate: dueOn('04') }),
+        task({ id: 'u1', seriesId: 'srs_a' }), // no dueDate → undated bucket
+        task({ id: 'u2', seriesId: 'srs_a' }),
+        task({ id: 'u3', seriesId: 'srs_a' }),
+      ],
+      events: [],
+      userEvents: [],
+    })
+    expect(ids(out.dated)).toEqual(['s1'])
+    expect(out.undated.length).toBe(3)
   })
 })

@@ -26,6 +26,9 @@ export interface AppChromeProps {
   brand?: (ctx: { size: 'desktop' | 'mobile'; showToast: (msg: string) => void }) => ReactNode
   /** User-menu slot, rendered in both sidebar (desktop) and top bar (mobile). */
   userMenu?: (ctx: { size: 'desktop' | 'mobile' }) => ReactNode
+  /** Optional action button rendered immediately to the left of the avatar —
+   *  in the mobile top bar and the desktop sidebar foot (e.g. a calendar button). */
+  topAction?: (ctx: { size: 'desktop' | 'mobile' }) => ReactNode
   /** Optional floating action button (e.g. planner's quick-add). */
   fab?: (ctx: { showToast: (msg: string) => void }) => ReactNode
   // Forwarded ref onto the scroll container `<main class="plapp-main">`.
@@ -76,7 +79,7 @@ interface SwipeStart {
   t: number
 }
 
-export function AppChrome({ nav, subLabel, brand, userMenu, fab, mainRef, mainOverlay, children }: AppChromeProps) {
+export function AppChrome({ nav, subLabel, brand, userMenu, topAction, fab, mainRef, mainOverlay, children }: AppChromeProps) {
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const swipeStart = useRef<SwipeStart | null>(null)
@@ -154,14 +157,24 @@ export function AppChrome({ nav, subLabel, brand, userMenu, fab, mainRef, mainOv
             </NavLink>
           ))}
         </nav>
-        {userMenu && <div className="pl-side-foot">{userMenu({ size: 'desktop' })}</div>}
+        {(userMenu || topAction) && (
+          <div className="pl-side-foot">
+            {topAction?.({ size: 'desktop' })}
+            {userMenu?.({ size: 'desktop' })}
+          </div>
+        )}
       </aside>
 
       <div className="plapp-body">
-        {(brand || userMenu) && (
+        {(brand || userMenu || topAction) && (
           <div className="pl-topbar">
             {brand?.({ size: 'mobile', showToast })}
-            {userMenu?.({ size: 'mobile' })}
+            {(topAction || userMenu) && (
+              <div className="pl-topbar-trail">
+                {topAction?.({ size: 'mobile' })}
+                {userMenu?.({ size: 'mobile' })}
+              </div>
+            )}
           </div>
         )}
 

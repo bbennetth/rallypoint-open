@@ -37,6 +37,7 @@ import { weatherRoutes } from './routes/weather.js'
 import { setStarsRoutes } from './routes/set-stars.js'
 import { requireSdkKey } from './middleware/app-api-key.js'
 import { plannerPrefsUiRoutes, plannerPrefsSdkRoutes } from './routes/planner-prefs.js'
+import { sdkHolidaysRoutes } from './routes/sdk-holidays.js'
 
 export interface BuildAppDeps {
   env: Env
@@ -145,6 +146,11 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   // share NO middleware with /api/v1/ui/* (no session, no CSRF, no
   // origin allowlist). Gating is content-side (public_page_config
   // + privacy_mode); see routes/sdk-events.ts and routes/public-html.ts.
+  // The coordinate forecast (`GET /api/v1/sdk/weather`) is API-key gated —
+  // it isn't tied to a public event, so without the key it would be an open
+  // Open-Meteo proxy. The event-scoped weather endpoints in weatherRoutes stay
+  // public (gated content-side by event privacy), so the gate is path-exact.
+  app.use('/api/v1/sdk/weather', requireSdkKey)
   app.route('/', weatherRoutes)
   app.route('/', sdkEventsRoutes)
   app.route('/', publicHtmlRoutes)
@@ -166,6 +172,10 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.use('/api/v1/sdk/events/:eventId/planner-pref', requireSdkKey)
   app.use('/api/v1/sdk/planner-events', requireSdkKey)
   app.route('/', plannerPrefsSdkRoutes)
+
+  // Holidays SDK route — key-gated, no DB dependency (pure computation).
+  app.use('/api/v1/sdk/holidays', requireSdkKey)
+  app.route('/', sdkHolidaysRoutes)
 
   app.notFound((c) =>
     c.json({ error: ANTI_FINGERPRINT_NOT_FOUND }, 404),

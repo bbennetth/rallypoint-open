@@ -1,12 +1,34 @@
 import { useState, type FormEvent } from 'react'
-import { ApiError, deleteTaskSeries, updateTaskSeries, type RecurringSeriesDto } from '../lib/api.js'
+import {
+  ApiError,
+  deleteChoreSeries,
+  deleteTaskSeries,
+  updateChoreSeries,
+  updateTaskSeries,
+  type TaskSeriesDto,
+  type UpdateTaskSeriesInput,
+} from '../lib/api.js'
+import type { SeriesSurface } from '../lib/series-lookup.js'
 import { buildSeriesPatch, type TermMode } from '../lib/series-patch.js'
 import { PriorityPicker } from './PriorityPicker.js'
 
-// Detail + edit form for a recurring task series, rendered inside an Ink Drawer.
+// Detail + edit form for a recurring series, rendered inside an Ink Drawer.
 // Edits the rule (freq/interval/byDay/dtstart/until/count/timeOfDay) and
 // first-class fields (title/notes/priority). Calls onChanged() + onClose() after
 // a successful write or delete so the host page refetches.
+//
+// `surface` selects which BFF series endpoints to hit — Tasks and Chores have
+// parallel-but-separate /series routes, so the same form drives both.
+
+interface SeriesApi {
+  update: (listId: string, seriesId: string, patch: UpdateTaskSeriesInput) => Promise<TaskSeriesDto>
+  remove: (listId: string, seriesId: string) => Promise<void>
+}
+
+const SERIES_API: Record<SeriesSurface, SeriesApi> = {
+  tasks: { update: updateTaskSeries, remove: deleteTaskSeries },
+  chores: { update: updateChoreSeries, remove: deleteChoreSeries },
+}
 
 const WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'] as const
 const DAY_LABEL: Record<string, string> = {
@@ -24,7 +46,7 @@ function errMessage(err: unknown): string {
   return 'Something went wrong. Please try again.'
 }
 
-function termMode(series: RecurringSeriesDto): TermMode {
+function termMode(series: TaskSeriesDto): TermMode {
   if (series.until) return 'until'
   if (series.count != null) return 'count'
   return 'none'
@@ -32,13 +54,16 @@ function termMode(series: RecurringSeriesDto): TermMode {
 
 export function SeriesEdit({
   series,
+  surface,
   onChanged,
   onClose,
 }: {
-  series: RecurringSeriesDto
+  series: TaskSeriesDto
+  surface: SeriesSurface
   onChanged: () => void
   onClose: () => void
 }) {
+  const api = SERIES_API[surface]
   const [title, setTitle] = useState(series.title)
   const [notes, setNotes] = useState(series.notes ?? '')
   const [priority, setPriority] = useState<string | null>(series.priority)
@@ -84,7 +109,7 @@ export function SeriesEdit({
     setError(null)
     try {
       if (Object.keys(result.patch).length > 0) {
-        await updateTaskSeries(series.listId, series.id, result.patch)
+        await api.update(series.listId, series.id, result.patch)
       }
       onChanged()
       onClose()
@@ -100,7 +125,7 @@ export function SeriesEdit({
     setBusy(true)
     setError(null)
     try {
-      await deleteTaskSeries(series.listId, series.id)
+      await api.remove(series.listId, series.id)
       onChanged()
       onClose()
     } catch (err) {
@@ -234,8 +259,8 @@ export function SeriesEdit({
               disabled={busy}
               onClick={() => setMode(m)}
               aria-pressed={mode === m}
-              className={mode === m ? 'pl-btn' : 'pl-btn ghost'}
-              style={{ flex: 1, fontSize: 12, padding: '4px 8px' }}
+              className={mode === m ? 'pl-btn sm' : 'pl-btn ghost sm'}
+              style={{ flex: 1 }}
             >
               {m === 'none' ? 'Never' : m === 'until' ? 'On date' : 'After N'}
             </button>

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `lists_notes_folder_name_uq` ON `lists` (`scope_id`,`name`) WHERE "lists"."deleted_at" is null and "lists"."list_type" = 'notes';

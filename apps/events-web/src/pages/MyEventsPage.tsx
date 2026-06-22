@@ -9,15 +9,17 @@ import {
   type EventDto,
   type EventListPage,
 } from '../lib/api.js'
+import { formatEventDay } from '../lib/date-format.js'
 
 type LoadState =
   | { status: 'loading' }
   | { status: 'ready'; page: EventListPage }
   | { status: 'error'; error: ApiError | Error }
 
+// start_date / end_date are date-only calendar days — render them as the day
+// they name, not a viewer-shifted one. See lib/date-format.formatEventDay.
 function formatDate(d: string | null): string {
-  if (!d) return '—'
-  return new Date(d).toLocaleDateString(undefined, { dateStyle: 'medium' })
+  return formatEventDay(d, 'medium')
 }
 
 export function MyEventsPage() {

@@ -75,6 +75,7 @@ function rowToEvent(
       : 0,
     ticketPlatform: row.ticketPlatform ?? null,
     ticketAccountEmail: row.ticketAccountEmail ?? null,
+    allDay: row.allDay ?? null,
   }
 }
 
@@ -118,6 +119,7 @@ export class D1EventRepo implements EventRepo {
           endAt: input.endAt ?? null,
           ticketPlatform: input.ticketPlatform ?? null,
           ticketAccountEmail: input.ticketAccountEmail ?? null,
+          ...(input.allDay !== undefined ? { allDay: input.allDay } : {}),
         })
         .returning()
       return rowToEvent(row!)
@@ -201,6 +203,7 @@ export class D1EventRepo implements EventRepo {
     if (fields.features !== undefined) set.features = fields.features
     if (fields.ticketPlatform !== undefined) set.ticketPlatform = fields.ticketPlatform
     if (fields.ticketAccountEmail !== undefined) set.ticketAccountEmail = fields.ticketAccountEmail
+    if (fields.allDay !== undefined) set.allDay = fields.allDay
 
     try {
       const [row] = await this.db.update(events).set(set).where(eq(events.id, id)).returning()

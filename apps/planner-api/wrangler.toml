@@ -1,10 +1,12 @@
 # planner-api as a Cloudflare Worker (#313, Phase 5). `wrangler deploy --env qa`
 # -> planner.rallypt.dev, `--env prod` -> planner.rallypt.app. Entry is
-# src/worker.ts (`{ fetch }` only); the Node server.ts is retired.
+# src/worker.ts (`{ fetch, scheduled }`); the Node server.ts is retired.
 #
-# planner is a pure BFF: it proxies lists/events/RPID over HTTP and owns
-# only the sessions store. So this Worker is fetch-only — NO Durable Object
-# (no realtime), NO [triggers] (no cron), NO R2 (no object store).
+# planner is a BFF: it proxies lists/events/RPID over HTTP. It has NO Durable
+# Object (no realtime) and NO R2 (no object store). As the owner of its own
+# push notifications it carries a [triggers] cron + two infra tables
+# (push_subscriptions, scheduled_notifications) — the documented exception to
+# the otherwise fetch-only / no-domain-table BFF posture.
 #
 # Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
 # CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
@@ -12,6 +14,9 @@
 # Real secrets via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
 #   PLANNER_API_KEY
 #   PLANNER_SESSION_KEY_V1
+#   VAPID_PUBLIC_KEY      (also shipped to planner-web as VITE_VAPID_PUBLIC_KEY)
+#   VAPID_PRIVATE_KEY
+#   VAPID_SUBJECT         (contact URI, e.g. mailto:ops@rallypt.app)
 
 name = "rallypoint-planner"
 main = "src/worker.ts"
@@ -29,9 +34,9 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*"]
 
-# planner has no realtime (no Durable Object), no object store (no R2), and
-# no background pruner (no cron) — so there is NO [[migrations]],
-# [[durable_objects.bindings]], [triggers], or [[r2_buckets]] block.
+# planner has no realtime (no Durable Object) and no object store (no R2),
+# so there is NO [[durable_objects.bindings]] or [[r2_buckets]] block. It
+# DOES carry a [triggers] cron (below) for the notification drain.
 
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
 # dev-safe defaults for the secrets and the BFF target URLs.
@@ -41,6 +46,12 @@ PLANNER_UI_ORIGIN = "http://localhost:5177"
 RPID_API_URL = "http://localhost:8080"
 LISTS_API_URL = "http://localhost:8082"
 EVENTS_API_URL = "http://localhost:8081"
+
+# Notification drain — every minute, so a timed notification fires within ~1
+# minute of its due instant (1 min is Cloudflare's cron floor). Restated per
+# env below (crons do not inherit into named envs).
+[triggers]
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -57,6 +68,9 @@ migrations_dir = "../../packages/planner-db/migrations"
 # because every consumed var is restated).
 [env.qa]
 vars = { NODE_ENV = "production", PLANNER_UI_ORIGIN = "https://planner.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", LISTS_API_URL = "https://lists.rallypt.dev", EVENTS_API_URL = "https://events.rallypt.dev" }
+
+[env.qa.triggers]
+crons = ["* * * * *"]
 
 [[env.qa.d1_databases]]
 binding = "DB"
@@ -90,6 +104,9 @@ custom_domain = true
 # ---- Prod: planner.rallypt.app --------------------------------------
 [env.prod]
 vars = { NODE_ENV = "production", PLANNER_UI_ORIGIN = "https://planner.rallypt.app", RPID_API_URL = "https://id.rallypt.app", LISTS_API_URL = "https://lists.rallypt.app", EVENTS_API_URL = "https://events.rallypt.app" }
+
+[env.prod.triggers]
+crons = ["* * * * *"]
 
 [[env.prod.d1_databases]]
 binding = "DB"

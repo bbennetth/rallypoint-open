@@ -13,7 +13,7 @@ what runs the hosted product is what's here.
 > ([money.rallypt.app](https://money.rallypt.app)), and planner
 > ([planner.rallypt.app](https://planner.rallypt.app)).
 
-Released from `rallypoint` `v1.0.4`. Licensed **Apache-2.0**.
+Released from `rallypoint` `v1.0.5`. Licensed **Apache-2.0**.
 
 ## Stack
 
@@ -42,9 +42,12 @@ a web SPA.
 apps/
   <domain>-api/   Cloudflare Worker (Hono) + its wrangler.toml
   <domain>-web/   Vite + React SPA
+  www/            apex marketing site (static-assets Worker, no D1/auth)
+  lists-mcp/      Model Context Protocol Worker over the Lists SDK
 packages/
   shared, crypto, db, object-store, realtime, logger   shared libraries
   ui, web-kit                                           shared front-end kit
+  web-push                                              Workers-safe Web Push sender
   <domain>-db, <domain>-shared, <domain>-client         per-domain libs + SDKs
 e2e/              end-to-end specs
 scripts/          local dev + tooling
@@ -52,12 +55,17 @@ scripts/          local dev + tooling
 
 ## Local development
 
-You need Node.js 22, Docker (Compose v2), and the `wrangler` CLI.
+You need Node.js 22 and the `wrangler` CLI — no Docker. The local stack
+is fully Cloudflare-native: R2 runs on Miniflare in-process and email is
+printed to the API log (`MAILER=log`) rather than a mail sidecar.
 
 ```sh
 npm install
-npm run dev:stack   # runs scripts/dev.sh: boots local sidecars (Docker) + starts the Workers via `wrangler dev`
+npm run dev:stack   # runs scripts/dev.sh: applies local D1 migrations, then boots every Worker via `wrangler dev` plus the Vite UIs
 ```
+
+There is no seed user — sign up at <http://localhost:5173> to create one.
+Verification and password-reset links print in the `[id-api]` log.
 
 Useful commands:
 

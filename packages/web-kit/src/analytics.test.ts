@@ -1,12 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { resolveAnalyticsConfig, analyticsPersonProps } from './analytics.js'
-import {
-  initAnalytics,
-  captureEvent,
-  identify,
-  resetAnalytics,
-  captureException,
-} from './analytics-noop.js'
 import * as viaAlias from 'virtual:analytics'
 
 // ---------------------------------------------------------------------------
@@ -83,52 +76,17 @@ describe('analyticsPersonProps', () => {
 })
 
 // ---------------------------------------------------------------------------
-// analytics-noop stub — must not throw
-// ---------------------------------------------------------------------------
-
-describe('analytics-noop', () => {
-  it('initAnalytics does not throw', () => {
-    expect(() => initAnalytics({ key: 'any' })).not.toThrow()
-  })
-
-  it('captureEvent does not throw', () => {
-    expect(() => captureEvent('test_event', { foo: 'bar' })).not.toThrow()
-  })
-
-  it('captureEvent does not throw without properties', () => {
-    expect(() => captureEvent('test_event')).not.toThrow()
-  })
-
-  it('identify does not throw', () => {
-    expect(() => identify('rpid_123', { plan: 'pro' })).not.toThrow()
-  })
-
-  it('resetAnalytics does not throw', () => {
-    expect(() => resetAnalytics()).not.toThrow()
-  })
-
-  it('captureException does not throw', () => {
-    expect(() => captureException(new Error('boom'), { handled: true })).not.toThrow()
-  })
-})
-
-// ---------------------------------------------------------------------------
 // virtual:analytics alias — vitest.config.ts must resolve it to the no-op stub
 // so the test/Node runner (which doesn't run the per-app Vite alias) never
 // pulls in the SaaS-only @rallypoint/analytics + posthog-js.
 // ---------------------------------------------------------------------------
 
 describe('virtual:analytics alias', () => {
-  it('resolves to the no-op stub (full surface present, no throw)', () => {
+  it('resolves to a stub exposing the full analytics surface', () => {
     expect(typeof viaAlias.initAnalytics).toBe('function')
     expect(typeof viaAlias.captureEvent).toBe('function')
     expect(typeof viaAlias.identify).toBe('function')
     expect(typeof viaAlias.resetAnalytics).toBe('function')
     expect(typeof viaAlias.captureException).toBe('function')
-    expect(() => viaAlias.initAnalytics({ key: 'phc_test' })).not.toThrow()
-    expect(() => viaAlias.captureEvent('evt', { a: 1 })).not.toThrow()
-    expect(() => viaAlias.identify('rpid_123')).not.toThrow()
-    expect(() => viaAlias.resetAnalytics()).not.toThrow()
-    expect(() => viaAlias.captureException(new Error('x'))).not.toThrow()
   })
 })

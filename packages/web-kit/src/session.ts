@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import type { SessionProfile } from '@rallypoint/shared'
 import { ApiError } from './csrf.js'
+
+// Re-exported so browser consumers keep importing `SessionProfile` from
+// `@rallypoint/web-kit`; the canonical definition lives in
+// `@rallypoint/shared` so the *-api session probes share it (#456).
+export type { SessionProfile }
 
 // Shared cross-subdomain SSO bootstrap + session probe for the
 // Rallypoint web apps (design §3.13). Neither events-api nor lists-api
@@ -51,17 +57,6 @@ export interface SessionConfig {
   // Injectable so the SSO bounce is unit-testable without stubbing the
   // non-configurable jsdom `location`.
   navigate?: (url: string) => void
-}
-
-// The signed-in user's RPID profile, folded into the session probe by the
-// app's BFF for the user bar. `username` is the (non-unique) display name.
-// Any field may be null when RPID has no value (or the fold-in degraded).
-export interface SessionProfile {
-  username: string | null
-  first_name: string | null
-  last_name: string | null
-  picture_url: string | null
-  email: string | null
 }
 
 export interface SessionState {

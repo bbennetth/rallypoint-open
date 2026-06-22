@@ -4,6 +4,7 @@ import { lists, listItems, listInvites, listShares } from '@rallypoint/lists-db'
 import type { ListType, ScopeType, Visibility } from '@rallypoint/lists-shared'
 import type { CreateListInput, ListRecord, ListRepo, ListScope } from '../types.js'
 import type { Db } from './db.js'
+import { mapUniqueViolation } from './_errors.js'
 
 type Stmt = BatchItem<'sqlite'>
 
@@ -31,21 +32,28 @@ export class D1ListRepo implements ListRepo {
   constructor(private readonly db: Db) {}
 
   async create(input: CreateListInput): Promise<ListRecord> {
-    const rows = await this.db
-      .insert(lists)
-      .values({
-        id: input.id,
-        tenantId: input.tenantId,
-        scopeType: input.scopeType,
-        scopeId: input.scopeId,
-        listType: input.listType,
-        name: input.name,
-        visibility: input.visibility,
-        color: input.color ?? null,
-        createdBy: input.createdBy,
-      })
-      .returning()
-    return rowToList(rows[0]!)
+    try {
+      const rows = await this.db
+        .insert(lists)
+        .values({
+          id: input.id,
+          tenantId: input.tenantId,
+          scopeType: input.scopeType,
+          scopeId: input.scopeId,
+          listType: input.listType,
+          name: input.name,
+          visibility: input.visibility,
+          color: input.color ?? null,
+          createdBy: input.createdBy,
+        })
+        .returning()
+      return rowToList(rows[0]!)
+    } catch (err) {
+      // Surface the lists_notes_folder_name_uq partial unique index (notes
+      // folders, #559) as a typed UniqueConstraintError so the SDK create
+      // route can map it to a 409. Non-unique errors pass through unchanged.
+      throw mapUniqueViolation(err)
+    }
   }
 
   async findById(id: string): Promise<ListRecord | null> {

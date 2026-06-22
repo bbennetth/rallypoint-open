@@ -136,11 +136,34 @@ textarea {
   background-clip: padding-box;
 }
 
-/* Inputs ≥ 16px prevents iOS Safari from auto-zooming on focus. */
-input,
+/* Inputs ≥ 16px so iOS/iPadOS Safari never auto-zooms on focus. The
+   selector MUST mirror the normalize block's `input:not(...)` shape above:
+   that block sets `font: inherit`, and the shorthand also resets
+   font-size, at specificity (0,2,1). A bare `input { font-size: 16px }`
+   (0,0,1) is therefore out-ranked — the input ignores the 16px and instead
+   inherits its container's size (e.g. Planner's 11px `.pl-fab-label` in the
+   quick-add flyout), which re-arms the focus-zoom. Matching (0,2,1) + later
+   source order lets the 16px win on every device, no `!important` needed. */
+input:not([type='checkbox']):not([type='radio']),
 textarea,
 select {
   font-size: 16px;
+}
+
+/* Belt-and-suspenders for touch-capable devices: an inline
+   `style={{ fontSize }}` (specificity 1,0,0,0) or an `!important` app rule
+   still out-ranks the rule above. `!important` here reclaims the 16px floor
+   wherever the device has a coarse pointer. Use `any-pointer` (not
+   `pointer`) so an iPad driven by a trackpad — which reports a *fine*
+   primary pointer yet still has a touchscreen that zooms — is covered too.
+   Desktop (mouse-only) keeps its intended sizes; checkbox/radio carry no
+   text to zoom. */
+@media (any-pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
 /* Safe area helpers. `safe-x` covers the side notch / Dynamic Island

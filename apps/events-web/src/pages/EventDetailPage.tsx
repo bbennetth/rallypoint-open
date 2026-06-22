@@ -22,12 +22,16 @@ import {
 import { LineupEditor } from '../ui/LineupEditor.js'
 import { SessionsEditor } from '../ui/SessionsEditor.js'
 import { WeatherSection } from './PublicEventPage.js'
+import { formatEventDay } from '../lib/date-format.js'
 
 type LoadState =
   | { status: 'loading' }
   | { status: 'ready'; event: EventDto }
   | { status: 'error'; code: string; message: string }
 
+// For real timestamps (created_at / updated_at / deleted_at) — render the local
+// calendar date of the instant. Event start_date / end_date are date-only and
+// use formatEventDay instead (so they don't shift a day across timezones).
 function formatDate(d: string | null): string {
   if (!d) return '—'
   return new Date(d).toLocaleDateString(undefined, { dateStyle: 'long' })
@@ -653,9 +657,9 @@ export function EventDetailPage({ userId }: { userId: string }) {
           <dt className="text-white/40">Timezone</dt>
           <dd>{event.timezone}</dd>
           <dt className="text-white/40">Start</dt>
-          <dd>{formatDate(event.start_date)}</dd>
+          <dd>{formatEventDay(event.start_date)}</dd>
           <dt className="text-white/40">End</dt>
-          <dd>{formatDate(event.end_date)}</dd>
+          <dd>{formatEventDay(event.end_date)}</dd>
           {event.location_label && (
             <>
               <dt className="text-white/40">Location</dt>

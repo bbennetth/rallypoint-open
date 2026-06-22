@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button, EmptyState } from '@rallypoint/ui'
 import { ApiError, getEvent, type EventDto } from '../../lib/api.js'
+import { formatEventDay } from '../../lib/date-format.js'
 
 // Phase 4 of platform/v-1.1 (#16). Landed at by a viewer-role
 // attendee right after they accept an event invite (see
@@ -142,8 +143,10 @@ function DecisionCard({ title, body }: { title: string; body: string }) {
 
 function dateRange(start: string | null, end: string | null): string {
   if (!start && !end) return 'Date TBA'
-  if (start && end && start !== end) return `${start} → ${end}`
-  return start ?? end ?? 'Date TBA'
+  if (start && end && start !== end) {
+    return `${formatEventDay(start, 'medium')} → ${formatEventDay(end, 'medium')}`
+  }
+  return formatEventDay(start ?? end, 'medium')
 }
 
 function formatCountdown(start: string | null): string | null {

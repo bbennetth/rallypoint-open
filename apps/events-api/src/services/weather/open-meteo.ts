@@ -45,6 +45,17 @@ const FORECAST_CURRENT_VARS = [
   'is_day',
 ].join(',')
 
+// Opt-in per-hour series. Only requested when the input sets `includeHourly`
+// (the coordinate-forecast SDK endpoint for My Day); the event-weather path
+// never asks for it, so persisted blobs stay compact.
+const FORECAST_HOURLY_VARS = [
+  'temperature_2m',
+  'uv_index',
+  'weather_code',
+  'is_day',
+  'precipitation_probability',
+].join(',')
+
 const AIR_QUALITY_CURRENT_VARS = [
   'us_aqi',
   'european_aqi',
@@ -70,6 +81,7 @@ export function createOpenMeteoProvider(config: OpenMeteoConfig): WeatherProvide
       temperature_unit: 'celsius',
       precipitation_unit: 'mm',
     })
+    if (input.includeHourly) qs.set('hourly', FORECAST_HOURLY_VARS)
     if (input.startDate) qs.set('start_date', input.startDate)
     if (input.endDate) qs.set('end_date', input.endDate)
     if (config.commercialApiKey) qs.set('apikey', config.commercialApiKey)
@@ -137,6 +149,14 @@ interface OpenMeteoForecastResponse {
     sunrise?: string[]
     sunset?: string[]
   }
+  hourly?: {
+    time?: string[]
+    temperature_2m?: number[]
+    uv_index?: number[]
+    weather_code?: number[]
+    is_day?: number[]
+    precipitation_probability?: number[]
+  }
 }
 
 interface OpenMeteoAirQualityResponse {
@@ -159,7 +179,8 @@ interface OpenMeteoAirQualityResponse {
 function mapForecast(r: OpenMeteoForecastResponse): WeatherForecastDto {
   const c = r.current
   const d = r.daily
-  return {
+  const h = r.hourly
+  const dto: WeatherForecastDto = {
     units: { temperature: 'C', precipitation: 'mm', windSpeed: 'km/h' },
     current: c
       ? {
@@ -183,6 +204,21 @@ function mapForecast(r: OpenMeteoForecastResponse): WeatherForecastDto {
       sunset: d?.sunset?.[i] ?? null,
     })),
   }
+  // Only present when hourly was requested (and the provider returned it).
+  if (h?.time) {
+    dto.hourly = h.time.map((time, i) => {
+      const isDay = h.is_day?.[i]
+      return {
+        time,
+        temperature: h.temperature_2m?.[i] ?? null,
+        uvIndex: h.uv_index?.[i] ?? null,
+        weatherCode: h.weather_code?.[i] ?? null,
+        isDay: isDay === undefined ? null : isDay === 1,
+        precipitationProbability: h.precipitation_probability?.[i] ?? null,
+      }
+    })
+  }
+  return dto
 }
 
 function mapAirQuality(r: OpenMeteoAirQualityResponse): AirQualityDto {

@@ -42,6 +42,16 @@ export async function getSession(): Promise<SessionDto> {
   return session
 }
 
+// Read the full settings document for a namespace. Used by the Settings page
+// to load existing preferences on mount without a full session refresh.
+export async function getSettings(namespace: string): Promise<Record<string, unknown>> {
+  const res = await request<{ settings: Record<string, unknown> }>(
+    'GET',
+    `/api/v1/ui/settings/${encodeURIComponent(namespace)}`,
+  )
+  return res.settings
+}
+
 // Persist a shallow patch into a settings namespace (a `null`-valued key
 // deletes it). Used by the theme persister (registered in main.tsx) and
 // the Settings page. Returns the merged doc.
@@ -59,6 +69,37 @@ export async function updateSettings(
 
 export async function exchangeSso(code: string, state: string): Promise<void> {
   await request<void>('POST', '/api/v1/ui/sso/exchange', { code, state })
+}
+
+// --- push notifications --------------------------------------------
+
+export interface PushSubscriptionPayload {
+  endpoint: string
+  keys: { p256dh: string; auth: string }
+}
+
+// Register (or refresh) the browser's Web Push subscription with planner-api.
+export async function registerPushSubscription(sub: PushSubscriptionPayload): Promise<void> {
+  await request<void>('POST', '/api/v1/ui/push/subscription', sub)
+}
+
+// Remove the browser's Web Push subscription (notifications turned off).
+export async function removePushSubscription(endpoint: string): Promise<void> {
+  await request<void>('DELETE', '/api/v1/ui/push/subscription', { endpoint })
+}
+
+export interface TestPushResult {
+  // Devices the user has registered.
+  subscriptions: number
+  // Devices that accepted the test push.
+  sent: number
+  // Dead devices reaped during the send.
+  reaped: number
+}
+
+// Send a test notification to the user's registered devices right now.
+export async function sendTestPush(): Promise<TestPushResult> {
+  return request<TestPushResult>('POST', '/api/v1/ui/push/test')
 }
 
 export async function signout(): Promise<void> {
@@ -172,7 +213,11 @@ export async function createFieldDef(
   listId: string,
   input: CreateFieldDefInput,
 ): Promise<FieldDefDto> {
-  return request<FieldDefDto>('POST', `/api/v1/ui/lists/${encodeURIComponent(listId)}/fields`, input)
+  return request<FieldDefDto>(
+    'POST',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/fields`,
+    input,
+  )
 }
 
 export async function updateFieldDef(
@@ -191,20 +236,6 @@ export async function deleteFieldDef(listId: string, fieldId: string): Promise<v
   await request<void>(
     'DELETE',
     `/api/v1/ui/lists/${encodeURIComponent(listId)}/fields/${encodeURIComponent(fieldId)}`,
-  )
-}
-
-// Merge typed custom-field values onto a task. A `null` value clears that
-// key; the server validates the resulting state against the list's defs.
-export async function setTaskItemCustomFields(
-  listId: string,
-  itemId: string,
-  customFields: Record<string, unknown>,
-): Promise<TaskItemDto> {
-  return request<TaskItemDto>(
-    'PATCH',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
-    { customFields },
   )
 }
 
@@ -271,29 +302,34 @@ export interface RecurringResponse {
   recurring: RecurringSeriesDto[]
 }
 
+// Resolve the caller's single canonical Tasks list (#543). The BFF
+// provisions it on first access and folds any legacy extra task lists into
+// it, returning a one-element array — callers take the head.
 export async function listTaskLists(): Promise<TaskListDto[]> {
   return request<TaskListDto[]>('GET', '/api/v1/ui/lists')
 }
 
 /** Set or clear the actor's "show in planner" flag on a group event. */
 export async function setGroupEventPlannerPref(eventId: string, show: boolean): Promise<void> {
-  await request<void>(
-    'PUT',
-    `/api/v1/ui/events/${encodeURIComponent(eventId)}/planner-pref`,
-    { show },
-  )
-}
-
-export async function createTaskList(name: string, color?: string): Promise<TaskListDto> {
-  return request<TaskListDto>('POST', '/api/v1/ui/lists', { name, ...(color ? { color } : {}) })
-}
-
-export async function deleteTaskList(listId: string): Promise<void> {
-  await request<void>('DELETE', `/api/v1/ui/lists/${encodeURIComponent(listId)}`)
+  await request<void>('PUT', `/api/v1/ui/events/${encodeURIComponent(eventId)}/planner-pref`, {
+    show,
+  })
 }
 
 export async function listTaskItems(listId: string): Promise<TaskItemDto[]> {
-  return request<TaskItemDto[]>('GET', `/api/v1/ui/lists/${encodeURIComponent(listId)}/items`)
+  // Pass the browser tz so the BFF resolves any recurring occurrence's floating
+  // due into a genuine instant (the single resolver); the client renders it with
+  // plain local formatters and never re-anchors.
+  return request<TaskItemDto[]>(
+    'GET',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items?tz=${encodeURIComponent(taskTz())}`,
+  )
+}
+
+// The browser's IANA timezone, appended to task writes as `?tz=` so the BFF
+// can tell a timed due from a day-only one and schedule notifications.
+function taskTz(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
 
 export async function createTaskItem(
@@ -303,7 +339,7 @@ export async function createTaskItem(
 ): Promise<TaskItemDto> {
   return request<TaskItemDto>(
     'POST',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items`,
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items?tz=${encodeURIComponent(taskTz())}`,
     {
       title,
       ...(opts?.dueDate !== undefined ? { dueDate: opts.dueDate } : {}),
@@ -312,24 +348,10 @@ export async function createTaskItem(
   )
 }
 
-export async function listTaskSeries(listId: string): Promise<TaskSeriesDto[]> {
-  return request<TaskSeriesDto[]>(
-    'GET',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/series`,
-  )
-}
-
-export async function createTaskSeries(
-  listId: string,
-  input: CreateTaskSeriesInput,
-): Promise<TaskSeriesDto> {
-  return request<TaskSeriesDto>(
-    'POST',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/series`,
-    input,
-  )
-}
-
+// Tasks are one-off only — recurrence lives on the Chores surface. The task
+// `/series` create + list endpoints are no longer called from the UI; the
+// update/delete helpers below remain so a legacy task series surfaced in
+// My Day / Upcoming can still be edited or removed via SeriesEdit.
 export async function deleteTaskSeries(listId: string, seriesId: string): Promise<void> {
   await request<void>(
     'DELETE',
@@ -361,15 +383,14 @@ export async function setTaskItemCompleted(
 ): Promise<TaskItemDto> {
   return request<TaskItemDto>(
     'PATCH',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}?tz=${encodeURIComponent(taskTz())}`,
     { completed },
   )
 }
 
 // Patch the editable first-class columns of a task item (title / priority /
-// dueDate). Same PATCH endpoint as setTaskItemCompleted; distinct from the
-// custom-fields path (setTaskItemCustomFields). dueDate accepts an ISO string,
-// or null/'' to clear.
+// dueDate). Same PATCH endpoint as setTaskItemCompleted. dueDate accepts an
+// ISO string, or null/'' to clear.
 export async function updateTaskItem(
   listId: string,
   itemId: string,
@@ -377,7 +398,7 @@ export async function updateTaskItem(
 ): Promise<TaskItemDto> {
   return request<TaskItemDto>(
     'PATCH',
-    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}?tz=${encodeURIComponent(taskTz())}`,
     patch,
   )
 }
@@ -426,10 +447,7 @@ export async function listShoppingItems(listId: string): Promise<ShoppingItemDto
   )
 }
 
-export async function createShoppingItem(
-  listId: string,
-  title: string,
-): Promise<ShoppingItemDto> {
+export async function createShoppingItem(listId: string, title: string): Promise<ShoppingItemDto> {
   return request<ShoppingItemDto>(
     'POST',
     `/api/v1/ui/shopping/${encodeURIComponent(listId)}/items`,
@@ -456,6 +474,179 @@ export async function deleteShoppingItem(listId: string, itemId: string): Promis
   )
 }
 
+// --- chores list (#546) ---------------------------------------------
+// A single system-managed `chores`-type list per user holding recurring
+// household items. Mirrors the shopping helpers but, like tasks, chores items
+// carry dueDate + priority and chores supports recurring series. The BFF owns
+// scope + listType; the client sends only user-facing fields.
+
+// A chores list row (same shape as TaskListDto).
+export type ChoreListDto = TaskListDto
+
+// A chores item — tasks-shaped (carries dueDate + priority), seriesId set when
+// it is an occurrence of a recurring chore.
+export type ChoreItemDto = TaskItemDto
+
+// Resolve (auto-provision) the caller's single system-managed chores list.
+export async function getChoresList(): Promise<ChoreListDto> {
+  return request<ChoreListDto>('GET', '/api/v1/ui/chores/list')
+}
+
+export async function listChoreItems(listId: string): Promise<ChoreItemDto[]> {
+  // Pass the browser tz so the BFF resolves each recurring occurrence's floating
+  // due into a genuine instant (the single resolver); the client renders it with
+  // plain local formatters and never re-anchors.
+  return request<ChoreItemDto[]>(
+    'GET',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/items?tz=${encodeURIComponent(taskTz())}`,
+  )
+}
+
+export async function createChoreItem(
+  listId: string,
+  title: string,
+  opts?: { dueDate?: string | null; priority?: string | null },
+): Promise<ChoreItemDto> {
+  return request<ChoreItemDto>('POST', `/api/v1/ui/chores/${encodeURIComponent(listId)}/items`, {
+    title,
+    ...(opts?.dueDate !== undefined ? { dueDate: opts.dueDate } : {}),
+    ...(opts?.priority !== undefined ? { priority: opts.priority } : {}),
+  })
+}
+
+export async function setChoreItemCompleted(
+  listId: string,
+  itemId: string,
+  completed: boolean,
+): Promise<ChoreItemDto> {
+  return request<ChoreItemDto>(
+    'PATCH',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+    { completed },
+  )
+}
+
+export async function deleteChoreItem(listId: string, itemId: string): Promise<void> {
+  await request<void>(
+    'DELETE',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+  )
+}
+
+export async function listChoreSeries(listId: string): Promise<TaskSeriesDto[]> {
+  return request<TaskSeriesDto[]>('GET', `/api/v1/ui/chores/${encodeURIComponent(listId)}/series`)
+}
+
+export async function createChoreSeries(
+  listId: string,
+  input: CreateTaskSeriesInput,
+): Promise<TaskSeriesDto> {
+  return request<TaskSeriesDto>(
+    'POST',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/series?tz=${encodeURIComponent(taskTz())}`,
+    input,
+  )
+}
+
+export async function deleteChoreSeries(listId: string, seriesId: string): Promise<void> {
+  await request<void>(
+    'DELETE',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/series/${encodeURIComponent(seriesId)}`,
+  )
+}
+
+export async function updateChoreSeries(
+  listId: string,
+  seriesId: string,
+  patch: UpdateTaskSeriesInput,
+): Promise<TaskSeriesDto> {
+  return request<TaskSeriesDto>(
+    'PATCH',
+    `/api/v1/ui/chores/${encodeURIComponent(listId)}/series/${encodeURIComponent(seriesId)}?tz=${encodeURIComponent(taskTz())}`,
+    patch,
+  )
+}
+
+// --- diary (Phase B, capture-only) ----------------------------------
+// A single system-managed `diary`-type list per user. Entries are generic list
+// items: title = a heading (defaults to the entry date), notes = the body,
+// dueDate = the entry's day, customFields = mood + arbitrary metrics. Only the
+// diary-list provisioner is diary-specific; entry + field CRUD reuse the
+// generic /api/v1/ui/lists/:listId/{items,fields} endpoints.
+
+// A diary list row (same shape as a task list).
+export type DiaryListDto = TaskListDto
+// A diary entry — a generic list item.
+export type DiaryEntryDto = TaskItemDto
+
+// Resolve (auto-provision + seed a default Mood field) the caller's diary list.
+export async function getDiaryList(): Promise<DiaryListDto> {
+  return request<DiaryListDto>('GET', '/api/v1/ui/diary/list')
+}
+
+export async function listDiaryEntries(listId: string): Promise<DiaryEntryDto[]> {
+  return request<DiaryEntryDto[]>('GET', `/api/v1/ui/lists/${encodeURIComponent(listId)}/items`)
+}
+
+export interface DiaryEntryInput {
+  title?: string
+  notes?: string | null
+  dueDate?: string | null
+  customFields?: Record<string, unknown>
+}
+
+export async function createDiaryEntry(
+  listId: string,
+  input: DiaryEntryInput,
+): Promise<DiaryEntryDto> {
+  return request<DiaryEntryDto>(
+    'POST',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items`,
+    input,
+  )
+}
+
+export async function updateDiaryEntry(
+  listId: string,
+  itemId: string,
+  patch: DiaryEntryInput,
+): Promise<DiaryEntryDto> {
+  return request<DiaryEntryDto>(
+    'PATCH',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+    patch,
+  )
+}
+
+export async function deleteDiaryEntry(listId: string, itemId: string): Promise<void> {
+  await request<void>(
+    'DELETE',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+  )
+}
+
+// --- chores feed setting (#546) -------------------------------------
+// Whether chores items appear in My Day & Upcoming. Stored in the 'planner'
+// settings namespace; absent → true (ON by default). Pure read/derive of the
+// settings blob is unit-tested in chores-helpers.test.ts. Keep in lockstep
+// with the BFF mirror `SETTING_SHOW_CHORES_IN_FEEDS` in
+// apps/planner-api/src/lib/chores-feed.ts (separate build targets, same string).
+export const SHOW_CHORES_IN_FEEDS_KEY = 'showChoresInFeeds'
+
+// Whether the user has enabled push notifications. Stored in the 'planner'
+// settings namespace; absent → false (OFF until the user opts in + grants
+// browser permission). The actual delivery gate is the presence of a
+// registered push_subscriptions row; this flag drives the Settings toggle's
+// remembered state across devices.
+export const PUSH_NOTIFICATIONS_KEY = 'pushNotificationsEnabled'
+
+// --- weather unit setting -------------------------------------------
+// Temperature unit for the My Day weather strip. Stored in the 'planner'
+// settings namespace; absent → 'fahrenheit' (default). Only an explicit
+// 'celsius' switches to Celsius. Pure read is unit-tested in
+// weather-helpers.test.ts.
+export const WEATHER_UNIT_KEY = 'weatherUnit'
+
 // --- personal events + tickets (slice 7) ----------------------------
 // Mirror the planner-api BFF responses, which pass the Events SDK DTOs
 // through verbatim (camelCase). The BFF owns scope + actor; the client only
@@ -467,6 +658,8 @@ export interface PersonalEventDto {
   description: string | null
   startAt: string | null
   endAt: string | null
+  /** Issue #545: true = all-day event; false = timed. Resolved server-side with inference fallback. */
+  allDay: boolean
   timezone: string
   locationLabel: string | null
   // Number of tickets attached to this event (Events SDK, Phase B). Drives
@@ -496,6 +689,8 @@ export interface CreatePersonalEventInput {
   locationLabel?: string
   ticketPlatform?: string
   ticketAccountEmail?: string
+  /** Issue #545: true = all-day; false = timed; omit to let server infer. */
+  allDay?: boolean
 }
 
 export async function listPersonalEvents(): Promise<PersonalEventDto[]> {
@@ -519,6 +714,8 @@ export interface UpdatePersonalEventInput {
   locationLabel?: string | null
   ticketPlatform?: string | null
   ticketAccountEmail?: string | null
+  /** Issue #545: true = all-day; false = timed; null reverts to inference. */
+  allDay?: boolean | null
 }
 
 export async function updatePersonalEvent(
@@ -537,10 +734,7 @@ export async function deletePersonalEvent(eventId: string): Promise<void> {
 }
 
 export async function listTickets(eventId: string): Promise<TicketDto[]> {
-  return request<TicketDto[]>(
-    'GET',
-    `/api/v1/ui/events/${encodeURIComponent(eventId)}/tickets`,
-  )
+  return request<TicketDto[]>('GET', `/api/v1/ui/events/${encodeURIComponent(eventId)}/tickets`)
 }
 
 // Single same-origin multipart upload (#409): the BFF streams the file to
@@ -606,6 +800,8 @@ export interface MyDayEvent {
   name: string
   startAt: string | null
   endAt: string | null
+  /** Issue #545: true = all-day event; false = timed. Server-resolved. */
+  allDay: boolean
   locationLabel: string | null
   // Tickets attached to the event (Phase B); drives the "Ticket" chip.
   ticketCount: number
@@ -652,6 +848,56 @@ export async function getMyDay(date: string, tz: string): Promise<MyDay> {
   return request<MyDay>('GET', `/api/v1/ui/my-day?${q.toString()}`)
 }
 
+// --- weather (Phase C) ----------------------------------------------
+// My Day weather strip. The browser supplies the user's lat/lng (geolocation);
+// planner-api proxies the events-api coordinate forecast (Open-Meteo). Nothing
+// is stored. Only the fields the strip renders are typed here.
+
+export interface WeatherForecast {
+  units: { temperature: 'C'; precipitation: 'mm'; windSpeed: 'km/h' }
+  current: {
+    temperature: number | null
+    apparentTemperature: number | null
+    windSpeed: number | null
+    weatherCode: number | null
+    isDay: boolean | null
+  } | null
+  daily: Array<{
+    date: string
+    temperatureMax: number | null
+    temperatureMin: number | null
+    precipitationProbabilityMax: number | null
+    uvIndexMax: number | null
+    weatherCode: number | null
+  }>
+  // Opt-in per-hour series (the My Day coordinate endpoint requests it). Only
+  // the fields the hourly strip renders are typed here.
+  hourly?: Array<{
+    time: string
+    temperature: number | null
+    uvIndex: number | null
+    weatherCode: number | null
+    isDay: boolean | null
+    precipitationProbability: number | null
+  }>
+}
+
+export interface WeatherResponse {
+  forecast: WeatherForecast | null
+  airQuality: unknown | null
+}
+
+export async function getMyDayWeather(
+  lat: number,
+  lng: number,
+  tz: string,
+  date?: string,
+): Promise<WeatherResponse> {
+  const q = new URLSearchParams({ lat: String(lat), lng: String(lng), tz })
+  if (date) q.set('date', date)
+  return request<WeatherResponse>('GET', `/api/v1/ui/my-day/weather?${q.toString()}`)
+}
+
 // --- Upcoming (slice 9) ---------------------------------------------
 // A forward-looking, date-sorted merge of tasks + personal events. Items
 // carrying a date at/after the start of the caller's local day land in
@@ -663,6 +909,7 @@ export type UpcomingItem =
   | { kind: 'task'; task: MyDayTask }
   | { kind: 'event'; event: MyDayEvent }
   | { kind: 'eventDay'; eventDay: EventDayDto }
+  | { kind: 'holiday'; holiday: HolidayDto }
 
 export interface Upcoming {
   date: string
@@ -687,6 +934,18 @@ export interface NoteDto {
   title: string
   notes: string | null
   createdAt: string
+  // The folder (notes list) this note lives in. Always present on the
+  // cross-folder GET; the BFF tags every note with its folder (#549).
+  folderId: string
+}
+
+// A notes folder = a per-user notes-type list. The oldest is the undeletable
+// default 'Notes' folder (isDefault).
+export interface NoteFolderDto {
+  id: string
+  name: string
+  createdAt: string
+  isDefault: boolean
 }
 
 export interface CreateNoteInput {
@@ -694,21 +953,62 @@ export interface CreateNoteInput {
   notes?: string
 }
 
-export async function listNotes(): Promise<NoteDto[]> {
-  return request<NoteDto[]>('GET', '/api/v1/ui/notes')
+// `folderId` scopes the read to a single folder; omit for notes across all.
+export async function listNotes(folderId?: string): Promise<NoteDto[]> {
+  const qs = folderId ? `?folderId=${encodeURIComponent(folderId)}` : ''
+  return request<NoteDto[]>('GET', `/api/v1/ui/notes${qs}`)
 }
 
 export async function createNote(input: CreateNoteInput): Promise<NoteDto> {
   return request<NoteDto>('POST', '/api/v1/ui/notes', input)
 }
 
+// `folderId` in the patch moves the note to another folder.
 export async function updateNote(
   itemId: string,
-  patch: { title?: string; notes?: string | null },
+  patch: { title?: string; notes?: string | null; folderId?: string },
 ): Promise<NoteDto> {
   return request<NoteDto>('PATCH', `/api/v1/ui/notes/${encodeURIComponent(itemId)}`, patch)
 }
 
 export async function deleteNote(itemId: string): Promise<void> {
   await request<void>('DELETE', `/api/v1/ui/notes/${encodeURIComponent(itemId)}`)
+}
+
+// --- notes folders --------------------------------------------------
+
+export async function listNoteFolders(): Promise<NoteFolderDto[]> {
+  return request<NoteFolderDto[]>('GET', '/api/v1/ui/notes/folders')
+}
+
+export async function createNoteFolder(name: string): Promise<NoteFolderDto> {
+  return request<NoteFolderDto>('POST', '/api/v1/ui/notes/folders', { name })
+}
+
+export async function deleteNoteFolder(folderId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/notes/folders/${encodeURIComponent(folderId)}`)
+}
+
+export async function moveNote(itemId: string, folderId: string): Promise<NoteDto> {
+  return updateNote(itemId, { folderId })
+}
+
+// --- US federal holidays (#548) ------------------------------------
+// Planner settings keys for holiday visibility.
+export const HOLIDAYS_ENABLED_KEY = 'holidaysEnabled'
+export const HIDDEN_HOLIDAYS_KEY = 'hiddenHolidays'
+
+export interface HolidayDto {
+  id: string
+  name: string
+  date: string // YYYY-MM-DD canonical date
+  observedDate: string // YYYY-MM-DD with Sat→Fri, Sun→Mon shift
+}
+
+export async function listHolidays(from: string, to: string): Promise<HolidayDto[]> {
+  const res = await request<{ holidays: HolidayDto[] }>(
+    'GET',
+    `/api/v1/ui/holidays?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+  )
+  return res.holidays
 }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   createEventsClient,
   EventsClientError,
+  type ForecastResponse,
   type PublicEventDto,
   type LineupResponse,
   type PersonalEventDto,
@@ -483,5 +484,57 @@ describe('createEventsClient — ticket attachments (R2 bindings #409)', () => {
     expect(res.headers.get('Content-Type')).toBe('application/pdf')
     const body = new Uint8Array(await res.arrayBuffer())
     expect(body[0]).toBe(0x25)
+  })
+})
+
+// --- coordinate forecast (Open-Meteo proxy) -----------------------------
+
+describe('createEventsClient — coordinate forecast', () => {
+  it('GETs /sdk/weather with lat/lng/tz/date and carries the optional hourly series', async () => {
+    const payload: ForecastResponse = {
+      forecast: {
+        units: { temperature: 'C', precipitation: 'mm', windSpeed: 'km/h' },
+        current: { temperature: 18, apparentTemperature: 17, windSpeed: 9, weatherCode: 2, isDay: true },
+        daily: [
+          {
+            date: '2026-06-17',
+            temperatureMax: 24,
+            temperatureMin: 12,
+            precipitationSum: 0,
+            precipitationProbabilityMax: 40,
+            windSpeedMax: 14,
+            uvIndexMax: 7,
+            weatherCode: 61,
+            sunrise: '2026-06-17T05:30',
+            sunset: '2026-06-17T20:45',
+          },
+        ],
+        hourly: [
+          { time: '2026-06-17T12:00', temperature: 23, uvIndex: 7, weatherCode: 2, isDay: true, precipitationProbability: 10 },
+        ],
+      },
+      airQuality: null,
+    }
+    const fakeFetch = makeFakeFetch((req) => {
+      const url = new URL(req.url)
+      expect(url.pathname).toBe('/api/v1/sdk/weather')
+      expect(url.searchParams.get('lat')).toBe('51.5')
+      expect(url.searchParams.get('lng')).toBe('-0.12')
+      expect(url.searchParams.get('tz')).toBe('Europe/London')
+      expect(url.searchParams.get('date')).toBe('2026-06-17')
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const client = createEventsClient({
+      baseUrl: 'https://events.example',
+      apiKey: 'k',
+      fetch: fakeFetch as unknown as typeof fetch,
+    })
+    const res = await client.getForecast({ lat: 51.5, lng: -0.12, tz: 'Europe/London', date: '2026-06-17' })
+    expect(res.forecast?.daily[0]!.uvIndexMax).toBe(7)
+    expect(res.forecast?.hourly).toHaveLength(1)
+    expect(res.forecast?.hourly?.[0]!.uvIndex).toBe(7)
   })
 })

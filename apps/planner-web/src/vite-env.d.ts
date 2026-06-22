@@ -9,6 +9,10 @@ interface ImportMetaEnv {
   // Workspace version, injected at build time (see vite.config.ts `define`);
   // rendered in the app-switcher version eyebrow.
   readonly VITE_APP_VERSION?: string
+  // VAPID public key (base64url) for Web Push — the browser's
+  // applicationServerKey. Safe to ship to clients; set as a repo Variable in
+  // CI (cf-deploy.yml). Unset → the notifications toggle reports unsupported.
+  readonly VITE_VAPID_PUBLIC_KEY?: string
 }
 
 interface ImportMeta {

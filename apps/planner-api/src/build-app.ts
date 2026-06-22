@@ -22,6 +22,11 @@ import { myDayRoutes } from './routes/my-day.js'
 import { upcomingRoutes } from './routes/upcoming.js'
 import { recurringRoutes } from './routes/recurring.js'
 import { shoppingRoutes } from './routes/shopping.js'
+import { choresRoutes } from './routes/chores.js'
+import { diaryRoutes } from './routes/diary.js'
+import { holidaysRoutes } from './routes/holidays.js'
+import { weatherRoutes } from './routes/weather.js'
+import { pushRoutes } from './routes/push.js'
 
 export interface BuildAppDeps {
   env: Env
@@ -75,6 +80,11 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.route('/', upcomingRoutes)
   app.route('/', recurringRoutes)
   app.route('/', shoppingRoutes)
+  app.route('/', choresRoutes)
+  app.route('/', diaryRoutes)
+  app.route('/', holidaysRoutes)
+  app.route('/', weatherRoutes)
+  app.route('/', pushRoutes)
 
   app.notFound((c) =>
     c.json({ error: ANTI_FINGERPRINT_NOT_FOUND }, 404),

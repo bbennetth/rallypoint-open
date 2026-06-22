@@ -7,6 +7,7 @@ import {
   type ListItemSeriesDto,
   type ListsClient,
 } from '@rallypoint/lists-client'
+import { PERSONAL_GROUP_NAME_LEGACY } from '../lib/personal-scope.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
 import { buildD1Repos, createDb } from '../repos/d1/index.js'
@@ -105,11 +106,13 @@ function makeFakeListsRecurring(): FakeListsRecurring {
     seedPersonalList(actor, opts = {}) {
       const listType = opts.listType ?? 'tasks'
       const name = opts.name ?? (listType === 'notes' ? 'Notes' : 'My List')
-      let group = groups.find((g) => g.createdBy === actor && g.name === 'My Tasks')
+      // Legacy name models the pre-migration rollout state; selectPersonalGroup
+      // accepts either PERSONAL_GROUP_NAME_LEGACY or the new PERSONAL_GROUP_NAME.
+      let group = groups.find((g) => g.createdBy === actor && g.name === PERSONAL_GROUP_NAME_LEGACY)
       if (!group) {
         group = {
           id: `lgr_${actor}`,
-          name: 'My Tasks',
+          name: PERSONAL_GROUP_NAME_LEGACY,
           description: null,
           createdBy: actor,
           createdAt: ISO_BASE,

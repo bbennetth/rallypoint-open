@@ -15,10 +15,13 @@ function task(over: Partial<ListItemDto> & { id: string }): ListItemDto {
     completed: false,
     completedAt: null,
     status: null,
+    statusId: null,
+    parentId: null,
     priority: null,
     dueDate: null,
     position: 0,
     customFields: {},
+    seriesId: null,
     createdBy: 'user_a',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -59,14 +62,15 @@ function userEvent(over: Partial<UserEventDto> & { eventId: string }): UserEvent
 }
 
 describe('composeMyDay', () => {
-  it('keeps only tasks whose dueDate is within the window', () => {
+  it('keeps in-window tasks; drops undated, future, and completed-overdue', () => {
     const out = composeMyDay({
       date: '2026-06-03',
       timezone: 'UTC',
       window: WINDOW,
       tasks: [
         task({ id: 'undated', dueDate: null }),
-        task({ id: 'yesterday', dueDate: '2026-06-02T23:59:59.999Z' }),
+        // Overdue but completed → does NOT roll forward (it's done).
+        task({ id: 'yesterday-done', dueDate: '2026-06-02T23:59:59.999Z', completed: true, completedAt: '2026-06-02T23:59:59.999Z' }),
         task({ id: 'today', dueDate: '2026-06-03T09:00:00.000Z' }),
         task({ id: 'tomorrow', dueDate: '2026-06-04T00:00:00.000Z' }),
       ],
@@ -124,6 +128,85 @@ describe('composeMyDay', () => {
       userEvents: [],
     })
     expect(out.events.map((e) => e.id)).toEqual(['morning', 'evening'])
+  })
+
+  // --- multi-day events: shown on every day they span -------------------
+
+  it('keeps a multi-day event that started before today but runs into it', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [
+        event({ id: 'ongoing', startAt: '2026-06-02T20:00:00.000Z', endAt: '2026-06-03T10:00:00.000Z' }),
+      ],
+      userEvents: [],
+    })
+    expect(out.events.map((e) => e.id)).toEqual(['ongoing'])
+  })
+
+  it('keeps a multi-day event that starts today and ends on a later day', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [
+        event({ id: 'trip', startAt: '2026-06-03T09:00:00.000Z', endAt: '2026-06-05T17:00:00.000Z' }),
+      ],
+      userEvents: [],
+    })
+    expect(out.events.map((e) => e.id)).toEqual(['trip'])
+  })
+
+  it('drops an event that ended entirely before today', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [
+        event({ id: 'past', startAt: '2026-06-01T09:00:00.000Z', endAt: '2026-06-02T17:00:00.000Z' }),
+      ],
+      userEvents: [],
+    })
+    expect(out.events).toEqual([])
+  })
+
+  it('drops a timed event ending exactly at the window start (half-open)', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [
+        event({ id: 'ended-at-midnight', startAt: '2026-06-02T20:00:00.000Z', endAt: '2026-06-03T00:00:00.000Z' }),
+      ],
+      userEvents: [],
+    })
+    expect(out.events).toEqual([])
+  })
+
+  it('keeps an all-day multi-day event on its inclusive last day', () => {
+    // All-day end is local midnight of the last covered day (2026-06-04). The
+    // window is 2026-06-03, which the span [06-02 .. 06-04] still covers.
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [
+        event({
+          id: 'conf',
+          allDay: true,
+          startAt: '2026-06-02T00:00:00.000Z',
+          endAt: '2026-06-04T00:00:00.000Z',
+        }),
+      ],
+      userEvents: [],
+    })
+    expect(out.events.map((e) => e.id)).toEqual(['conf'])
   })
 
   it('includes completed tasks (display state is the UI’s concern)', () => {
@@ -357,5 +440,123 @@ describe('composeMyDay', () => {
     })
     expect(out.tasks).toHaveLength(2)
     expect(out.undatedTasks).toHaveLength(0)
+  })
+})
+
+// Overdue roll-over: an item not completed by its due date keeps showing on
+// each later day until it's done. Recurring items collapse to one row a day so
+// a rolled-over occurrence never doubles up with the day's own occurrence.
+describe('composeMyDay — overdue roll-over', () => {
+  const base = { date: '2026-06-03', timezone: 'UTC', window: WINDOW, events: [], userEvents: [] }
+
+  it('rolls an overdue incomplete one-off task forward into today', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({ id: 'today', dueDate: '2026-06-03T09:00:00.000Z' }),
+        task({ id: 'overdue', dueDate: '2026-06-02T09:00:00.000Z' }),
+      ],
+    })
+    // Overdue leads (earlier dueDate), then today's item.
+    expect(out.tasks.map((t) => t.id)).toEqual(['overdue', 'today'])
+  })
+
+  it('keeps rolling a multi-day-overdue task (still shows days later)', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [task({ id: 'stale', dueDate: '2026-05-28T09:00:00.000Z' })],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['stale'])
+  })
+
+  it('does not roll an overdue task that was completed (late)', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({
+          id: 'done-late',
+          dueDate: '2026-06-01T09:00:00.000Z',
+          completed: true,
+          completedAt: '2026-06-02T09:00:00.000Z',
+        }),
+      ],
+    })
+    expect(out.tasks).toHaveLength(0)
+  })
+
+  it('does not show a recurring occurrence twice when the next one is also today', () => {
+    // A daily chore: yesterday's occurrence is overdue+open, today's is due
+    // today. Both share a seriesId → only today's occurrence shows.
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({ id: 'occ-today', seriesId: 'lse_chore', dueDate: '2026-06-03T07:00:00.000Z' }),
+        task({ id: 'occ-overdue', seriesId: 'lse_chore', dueDate: '2026-06-02T07:00:00.000Z' }),
+      ],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['occ-today'])
+  })
+
+  it('prefers the on-day occurrence even when it is already completed', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({
+          id: 'occ-today-done',
+          seriesId: 'lse_chore',
+          dueDate: '2026-06-03T07:00:00.000Z',
+          completed: true,
+          completedAt: '2026-06-03T07:30:00.000Z',
+        }),
+        task({ id: 'occ-overdue', seriesId: 'lse_chore', dueDate: '2026-06-02T07:00:00.000Z' }),
+      ],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['occ-today-done'])
+  })
+
+  it('collapses several overdue occurrences of one series to the longest-overdue', () => {
+    // A daily chore missed three days running, no occurrence due today → a
+    // single row stands in for the series (the earliest, longest-overdue one).
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({ id: 'occ-mon', seriesId: 'lse_chore', dueDate: '2026-05-31T07:00:00.000Z' }),
+        task({ id: 'occ-tue', seriesId: 'lse_chore', dueDate: '2026-06-01T07:00:00.000Z' }),
+        task({ id: 'occ-wed', seriesId: 'lse_chore', dueDate: '2026-06-02T07:00:00.000Z' }),
+      ],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['occ-mon'])
+  })
+
+  it('shows an overdue recurring occurrence when the next occurrence is not today', () => {
+    // A weekly chore overdue from last week with nothing due today → it rolls.
+    const out = composeMyDay({
+      ...base,
+      tasks: [task({ id: 'occ-lastweek', seriesId: 'lse_weekly', dueDate: '2026-05-27T07:00:00.000Z' })],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['occ-lastweek'])
+  })
+
+  it('does not collapse distinct one-off overdue tasks (no seriesId)', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({ id: 'one-off-a', title: 'A', dueDate: '2026-06-02T07:00:00.000Z' }),
+        task({ id: 'one-off-b', title: 'B', dueDate: '2026-06-02T07:00:00.000Z' }),
+      ],
+    })
+    expect(out.tasks.map((t) => t.id).sort()).toEqual(['one-off-a', 'one-off-b'])
+  })
+
+  it('orders rolled-over overdue items before today’s items', () => {
+    const out = composeMyDay({
+      ...base,
+      tasks: [
+        task({ id: 'today-late', dueDate: '2026-06-03T18:00:00.000Z' }),
+        task({ id: 'today-early', dueDate: '2026-06-03T08:00:00.000Z' }),
+        task({ id: 'overdue', dueDate: '2026-06-02T23:00:00.000Z' }),
+      ],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['overdue', 'today-early', 'today-late'])
   })
 })

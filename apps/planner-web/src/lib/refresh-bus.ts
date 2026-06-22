@@ -1,12 +1,12 @@
 // A tiny window-event bus so the global quick-add FAB can tell a live page
 // to refetch after it creates something. There's no shared query cache in
 // planner-web (pages own their own state and refetch on mount), so when the
-// FAB creates a task / event / note while a relevant page is already mounted,
-// it dispatches here and the page re-pulls. Pages not mounted simply refetch
-// on their next visit — so this is a best-effort freshness nudge, not a
-// correctness dependency.
+// FAB creates a task / event / note / chore / diary entry while a relevant
+// page is already mounted, it dispatches here and the page re-pulls. Pages not
+// mounted simply refetch on their next visit — so this is a best-effort
+// freshness nudge, not a correctness dependency.
 
-export type CreatedKind = 'task' | 'event' | 'note' | 'shopping'
+export type CreatedKind = 'task' | 'event' | 'note' | 'shopping' | 'chore' | 'diary'
 
 const EVENT = 'planner:created'
 

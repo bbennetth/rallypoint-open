@@ -29,6 +29,44 @@ export interface Upcoming {
   undated: UpcomingItem[] // no date, by creation then title
 }
 
+// How many future occurrences of one recurring series appear in Upcoming.
+// Series are materialized weeks ahead (rolling window, up to 50 instances);
+// showing them all turns the feed into a wall of "Laundry" rows. The next
+// two are enough to see "today/this week and the one after".
+export const SERIES_OCCURRENCE_CAP = 2
+
+// Keep only the first `cap` occurrences of each recurring series in an
+// already-sorted dated stream (soonest first, so "first" = "next due").
+// Non-series items pass through untouched. Pure; does not mutate the input.
+export function capSeriesOccurrences(dated: UpcomingItem[], cap: number): UpcomingItem[] {
+  const seen = new Map<string, number>()
+  return dated.filter((i) => {
+    if (i.kind !== 'task' || i.task.seriesId == null) return true
+    const n = seen.get(i.task.seriesId) ?? 0
+    if (n >= cap) return false
+    seen.set(i.task.seriesId, n + 1)
+    return true
+  })
+}
+
+const DAY_MS = 86_400_000
+
+// Whether any part of a personal event lands at/after the forward window start
+// (`fromMs`) — i.e. the event still has a day to show in the feed. Mirrors the
+// My Day overlap rule: a timed event uses its real end instant; an all-day
+// event's endAt is local midnight of its inclusive last day, so +DAY_MS keeps
+// that final day in range; a point event (no usable endAt) falls back to its
+// start instant (the old "startAt ≥ window start" behaviour).
+function eventReachesForward(e: PersonalEventDto, fromMs: number): boolean {
+  if (e.startAt == null) return false
+  const s = Date.parse(e.startAt)
+  if (!Number.isFinite(s)) return false
+  const rawEnd = e.endAt != null ? Date.parse(e.endAt) : NaN
+  const hasEnd = Number.isFinite(rawEnd) && rawEnd > s
+  const endEff = hasEnd ? (e.allDay ? rawEnd + DAY_MS : rawEnd) : s
+  return endEff >= fromMs
+}
+
 // The instant an item buckets/sorts by. eventDays always carry a date, so they
 // resolve via dayInstant in the client's tz (all-day → start of that day).
 function itemInstant(i: UpcomingItem, tz: string): string | null {
@@ -85,6 +123,19 @@ export function composeUpcoming(input: {
   const dated: UpcomingItem[] = []
   const undated: UpcomingItem[] = []
   for (const i of items) {
+    // Events keep their place in the forward feed if any part of them is still
+    // at/after the window start — so a multi-day event that STARTED before today
+    // but runs into it (or beyond) isn't dropped as "past". The client expands
+    // it across the days it still covers; here we only decide inclusion. Tasks
+    // and group event-days keep the simple "instant ≥ window start" rule.
+    if (i.kind === 'event') {
+      if (i.event.startAt == null) {
+        undated.push(i)
+        continue
+      }
+      if (eventReachesForward(i.event, fromMs)) dated.push(i)
+      continue
+    }
     const instant = itemInstant(i, tz)
     if (instant == null) {
       undated.push(i)
@@ -111,5 +162,10 @@ export function composeUpcoming(input: {
     return ac !== bc ? ac.localeCompare(bc) : itemLabel(a).localeCompare(itemLabel(b))
   })
 
-  return { date: input.date, timezone: input.timezone, dated, undated }
+  return {
+    date: input.date,
+    timezone: input.timezone,
+    dated: capSeriesOccurrences(dated, SERIES_OCCURRENCE_CAP),
+    undated,
+  }
 }

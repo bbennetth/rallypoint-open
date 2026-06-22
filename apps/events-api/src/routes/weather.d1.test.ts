@@ -253,4 +253,53 @@ describe('D1 integration — weather routes', () => {
     const res = await authedReq(strangerBearer, 'GET', `/api/v1/ui/events/${id}/weather`)
     expect(res.status).toBe(404)
   })
+
+  // --- coordinate forecast (Phase C): GET /api/v1/sdk/weather ---------
+
+  function sdkKey(): Record<string, string> {
+    return { authorization: `Bearer ${envVars.PLANNER_API_KEY}` }
+  }
+
+  it('requires the SDK key (403 without a bearer)', async () => {
+    const res = await app.request('http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC')
+    expect(res.status).toBe(403)
+  })
+
+  it('returns a coordinate forecast for valid lat/lng with the key', async () => {
+    const callsBefore = provider.calls
+    const res = await app.request(
+      'http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC&date=2026-06-01',
+      { headers: sdkKey() },
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Cache-Control')).toContain('max-age=60')
+    const body = (await res.json()) as { forecast: { daily: unknown[] }; airQuality: unknown }
+    expect(body.forecast.daily.length).toBeGreaterThan(0)
+    expect(body.airQuality).not.toBeNull()
+    // The provider was hit directly (no event_weather cache on this surface).
+    expect(provider.calls).toBe(callsBefore + 1)
+  })
+
+  it('400s an out-of-range / missing coordinate', async () => {
+    const bad = await app.request('http://localhost/api/v1/sdk/weather?lat=999&lng=0&tz=UTC', {
+      headers: sdkKey(),
+    })
+    expect(bad.status).toBe(400)
+    const missing = await app.request('http://localhost/api/v1/sdk/weather?tz=UTC', {
+      headers: sdkKey(),
+    })
+    expect(missing.status).toBe(400)
+  })
+
+  it('400s an invalid timezone or malformed date', async () => {
+    const badTz = await app.request('http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=Narnia', {
+      headers: sdkKey(),
+    })
+    expect(badTz.status).toBe(400)
+    const badDate = await app.request(
+      'http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC&date=nope',
+      { headers: sdkKey() },
+    )
+    expect(badDate.status).toBe(400)
+  })
 })

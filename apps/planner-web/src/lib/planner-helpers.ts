@@ -78,6 +78,36 @@ export function instantToDateInput(instant: string | null): string {
   return `${y}-${m}-${da}`
 }
 
+// ISO instant → local "HH:mm" for a <input type="time">, or '' when null /
+// unparseable. Inverse pairing for combineDueDateTime when a time is set. Reads
+// the browser's local zone (matching combineDueDateTime's toInstant), so the
+// round-trip is self-consistent. Callers gate on hasTimeOfDay first, so the
+// documented `T00:00Z` edge there (a far-east-of-UTC time that lands on UTC
+// midnight) never reaches here — it stays blank, which the BFF still treats as
+// timed via localClockIsMidnight.
+export function instantToTimeInput(instant: string | null): string {
+  if (!instant) return ''
+  const dt = new Date(instant)
+  if (Number.isNaN(dt.getTime())) return ''
+  const h = String(dt.getHours()).padStart(2, '0')
+  const mi = String(dt.getMinutes()).padStart(2, '0')
+  return `${h}:${mi}`
+}
+
+// Combine a date input (YYYY-MM-DD) with an optional time input (HH:mm) into a
+// task dueDate:
+//   - no date            → null (clears the due)
+//   - date, no time      → local-midnight instant (date-only; never notifies)
+//   - date + time        → a true local instant (toISOString); this is the
+//                          timed due the notification scheduler fires on.
+// (The browser's IANA tz is attached to task writes by api.ts `taskTz()`, which
+// the BFF uses to tell a timed due from a day-only one.)
+export function combineDueDateTime(dateInput: string, timeInput: string): string | null {
+  if (!dateInput) return null
+  if (!timeInput) return dateInputToInstant(dateInput)
+  return toInstant(`${dateInput}T${timeInput}`) ?? dateInputToInstant(dateInput)
+}
+
 // ── quick notes ────────────────────────────────────────────────────
 
 // Split a free-form quick-note textarea into a Lists item's `title` (the
@@ -181,6 +211,15 @@ export function hasTimeOfDay(instant: string | null): boolean {
   return !(d.getHours() === 0 && d.getMinutes() === 0)
 }
 
+// Timezone invariant: every `dueDate` the planner client receives from
+// planner-api is a GENUINE UTC instant. A recurring occurrence's floating local
+// wall-clock (lists-api stamps "9:30" as "…T09:30:00.000Z") is resolved into the
+// request tz server-side — the BFF is the single resolver (resolveRecurrenceDues
+// on my-day / upcoming / the item-list reads). So the client never re-anchors:
+// it renders every due with the plain local formatters below (fmtTime / localYmd
+// / toLocaleDateString), which read the runtime zone, and the time + day the
+// user set come out right in any viewer timezone.
+
 // Local calendar day (YYYY-MM-DD) of an instant, in the runtime's timezone.
 export function localYmd(instant: string): string {
   const d = new Date(instant)
@@ -205,13 +244,21 @@ export interface ScheduleEntry {
 export interface MyDaySplit {
   allDay: MyDayTask[]
   allDayEvents: EventDayDto[] // all-day group event days (read-only)
+  allDayPersonalEvents: MyDayEvent[] // all-day + multi-day-continuation personal events
   timeline: ScheduleEntry[]
 }
 
 // Split a My Day payload into the all-day list (tasks whose due time is
-// midnight / date-only, plus all-day group event days) and the timed schedule
-// (timed tasks, every personal event, and timed group event days), the latter
-// sorted ascending by instant.
+// midnight / date-only, all-day group event days, and all-day / continuation
+// personal events) and the timed schedule (timed tasks, personal events that
+// start today, and timed group event days), the latter sorted ascending by
+// instant.
+//
+// `todayYmd` (the viewer's local calendar day) drives the multi-day handling: a
+// personal event whose startAt falls on a PRIOR day is a continuation of a
+// multi-day event into today, so it shows in the all-day band (its day-1 start
+// time is meaningless today) rather than the timeline at a stale past time. When
+// omitted, only the explicit all-day flag routes an event aside (back-compat).
 //
 // Mixed sort keys are safe: tasks/personal events carry real UTC instants while
 // a timed group day carries only a wall-clock `date`+`startTime`. Per the
@@ -224,21 +271,42 @@ export function splitMyDay(
   tasks: MyDayTask[],
   events: MyDayEvent[],
   eventDays: EventDayDto[] = [],
+  todayYmd?: string,
 ): MyDaySplit {
   const allDay: MyDayTask[] = []
   const allDayEvents: EventDayDto[] = []
+  const allDayPersonalEvents: MyDayEvent[] = []
   const timeline: ScheduleEntry[] = []
 
   for (const t of tasks) {
     if (t.dueDate && hasTimeOfDay(t.dueDate)) {
-      timeline.push({ id: t.id, kind: 'task', title: t.title, at: t.dueDate, task: t })
+      timeline.push({
+        id: t.id,
+        kind: 'task',
+        title: t.title,
+        // dueDate is a genuine instant (the BFF resolved any recurring floating
+        // due in the request tz), so it both sorts and renders in local time.
+        at: t.dueDate,
+        task: t,
+      })
     } else {
       allDay.push(t)
     }
   }
   for (const e of events) {
-    if (e.startAt) {
+    // A multi-day event whose start day is before today continues INTO today —
+    // its day-1 start time doesn't apply, so treat it as all-day for today.
+    const startsBeforeToday =
+      todayYmd != null && e.startAt != null && localYmd(e.startAt) < todayYmd
+    // Issue #545: use the allDay flag from the server (with midnight-inference
+    // fallback for backward compat).
+    const isAllDay = e.allDay || !e.startAt || startsBeforeToday
+    if (!isAllDay && e.startAt) {
       timeline.push({ id: e.id, kind: 'event', title: e.name, at: e.startAt, event: e })
+    } else if (e.startAt) {
+      // All-day and continuation personal events sit in the all-day band. Events
+      // with no startAt at all have no calendar position and are dropped.
+      allDayPersonalEvents.push(e)
     }
   }
   for (const d of eventDays) {
@@ -261,7 +329,17 @@ export function splitMyDay(
     if (ad !== bd) return ad - bd
     return a.title.localeCompare(b.title)
   })
-  return { allDay, allDayEvents, timeline }
+  // Order the all-day band by startAt ascending so ongoing multi-day events
+  // (which started on prior days) lead, then genuine all-day events that start
+  // today, then by name. The BFF already returns startAt-ascending, so this is a
+  // no-op in practice — it just makes the band's contract explicit rather than
+  // relying on upstream order.
+  allDayPersonalEvents.sort((a, b) => {
+    const am = a.startAt ? Date.parse(a.startAt) : 0
+    const bm = b.startAt ? Date.parse(b.startAt) : 0
+    return am !== bm ? am - bm : a.name.localeCompare(b.name)
+  })
+  return { allDay, allDayEvents, allDayPersonalEvents, timeline }
 }
 
 // The soonest schedule entry at/after `nowMs` (the "Next" stat). Null when the
@@ -335,8 +413,13 @@ export interface UpcomingGroup {
 // bare calendar date, so it's used verbatim (no tz drift).
 function itemYmd(i: UpcomingItem): string | null {
   if (i.kind === 'eventDay') return i.eventDay.date
-  const instant = i.kind === 'task' ? i.task.dueDate : i.event.startAt
-  return instant ? localYmd(instant) : null
+  if (i.kind === 'holiday') return i.holiday.observedDate
+  if (i.kind === 'task') {
+    // dueDate is a genuine instant (the BFF resolved any recurring floating due),
+    // so its local calendar day groups it under the day it falls on.
+    return i.task.dueDate ? localYmd(i.task.dueDate) : null
+  }
+  return i.event.startAt ? localYmd(i.event.startAt) : null
 }
 
 // Group dated Upcoming items by their local calendar day, preserving the
@@ -526,5 +609,44 @@ export function nextConfirmListId(
     default:
       return current
   }
+}
+
+// --- notes folders (#549) -------------------------------------------
+
+interface FolderLike {
+  id: string
+  isDefault: boolean
+}
+
+// Order folders for the rail/picker: the default folder first, the rest in
+// their given order. Pure (the BFF already returns folders oldest-first, so
+// "the rest" preserves that). Unit-tested.
+export function orderFolders<T extends FolderLike>(folders: T[]): T[] {
+  const def = folders.filter((f) => f.isDefault)
+  const rest = folders.filter((f) => !f.isDefault)
+  return [...def, ...rest]
+}
+
+// Count notes per folder id, for the rail badges. Pure. Unit-tested.
+export function countNotesByFolder(notes: { folderId: string }[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const n of notes) counts[n.folderId] = (counts[n.folderId] ?? 0) + 1
+  return counts
+}
+
+// --- My Day status line (header toolbar) -----------------------------
+
+// Compose the My Day agenda status line shown on the header toolbar:
+// "<date> · All clear" when nothing is due, "<date> · N of M tasks done"
+// otherwise, or just the bare date label when task counts aren't known yet
+// (total === null, i.e. the day roll-up hasn't loaded). Pure. Unit-tested.
+export function mydayStatusLabel(
+  dateLabel: string,
+  total: number | null,
+  done: number,
+): string {
+  if (total === null) return dateLabel
+  if (total === 0) return `${dateLabel} · All clear`
+  return `${dateLabel} · ${done} of ${total} tasks done`
 }
 

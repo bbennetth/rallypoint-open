@@ -162,7 +162,12 @@ start_web id-web      5173 id-web
 start_web events-web  5174 events-web
 start_web lists-web   5175 lists-web
 start_web money-web   5176 money-web
-start_web planner-web 5177 planner-web
+# planner-web needs the VAPID public key at build time (the browser
+# applicationServerKey) for Web Push. This dev key matches planner-api's
+# DEV_VAPID_PUBLIC_KEY fallback in apps/planner-api/src/env.ts, so push works
+# end-to-end against the local stack. NOT a secret; regenerate for real deploys.
+VITE_VAPID_PUBLIC_KEY="BMtiizjeUZ7oRAzgJkYldtNsBFin0L1VdojVUccJqDzYjoOE0mkyQJ35H-4y2A4-gASqZh1A3ae2ADWzmSw_0so" \
+  start_web planner-web 5177 planner-web
 
 # --- health-wait banner ------------------------------------------
 # Poll all five API /api/v1/health endpoints each iteration (not one port at a

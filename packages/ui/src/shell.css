@@ -105,7 +105,8 @@ body {
 .pl-tab:focus-visible,
 .pl-switch-trigger:focus-visible,
 .pl-app-row:focus-visible,
-.pl-shortcut:focus-visible {
+.pl-shortcut:focus-visible,
+.pl-topaction-btn:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -258,6 +259,32 @@ body {
   cursor: pointer;
   box-sizing: border-box;
 }
+/* Top-bar action button (e.g. the calendar button): a square bordered icon
+   button sitting immediately left of the avatar, in both the mobile top bar
+   and the desktop sidebar foot. */
+.pl-topaction-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.pl-topaction-btn:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+.pl-topaction-btn.is-active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
 .pl-app-row {
   all: unset;
   box-sizing: border-box;
@@ -373,7 +400,7 @@ body {
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 22px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 .pg-head h1 {
@@ -397,7 +424,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 0 0 11px;
+  margin: 0 0 8px;
 }
 .pl-eyerow .ln {
   flex: 1;
@@ -461,6 +488,12 @@ body {
   border-color: color-mix(in srgb, var(--acid) 45%, var(--line));
   color: var(--ink-dim);
 }
+/* Interactive toggle chip — one size for the mood + day-of-week pickers
+   (their active colors are still set by the component). */
+.pl-chip.toggle {
+  padding: 6px 10px;
+  cursor: pointer;
+}
 .pl-btn {
   all: unset;
   box-sizing: border-box;
@@ -468,12 +501,13 @@ body {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 15px;
+  min-height: 36px;
+  padding: 0 16px;
   background: var(--accent);
   color: var(--accent-ink);
   font-family: var(--font-mono);
   font-weight: 700;
-  font-size: 11.5px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   cursor: pointer;
@@ -494,10 +528,7 @@ body {
   background: transparent;
   color: var(--ink);
   border: 1.5px solid var(--line);
-  font-weight: 700;
-  font-size: 11px;
   letter-spacing: 0.08em;
-  padding: 9px 13px;
   filter: none;
 }
 .pl-btn.ghost:hover {
@@ -507,6 +538,45 @@ body {
 .pl-btn.hot {
   background: var(--hot, #d4504e);
   color: var(--bg);
+}
+/* Compact size — inline / row-trailing actions (Edit, Get, View, Hide, …).
+   Pairs with .ghost. Shares the mono-caps type, just shorter. */
+.pl-btn.sm {
+  min-height: 28px;
+  padding: 0 11px;
+  font-size: 10.5px;
+}
+/* Add-row fill — a .pl-btn placed beside a .pl-input in a flex row stretches
+   to the input's height (≈44px) instead of a per-site `padding: 0 16px` hack. */
+.pl-btn.grow {
+  align-self: stretch;
+}
+/* Icon-only square button — one consistent box for ×/pencil/pin/calendar-nav,
+   replacing the ad-hoc icon uses of .pl-donebtn / .pl-note-del / .cal-nav-btn.
+   .danger tints the hover red for destructive (delete) actions. */
+.pl-iconbtn {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.pl-iconbtn:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+.pl-iconbtn.danger:hover {
+  border-color: var(--hot, #d4504e);
+  color: var(--hot, #d4504e);
 }
 .pl-input {
   width: 100%;
@@ -544,14 +614,15 @@ body {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  padding: 6px 10px;
-  min-height: 30px;
+  min-height: 28px;
+  padding: 0 11px;
   flex: 0 0 auto;
   border: 1.5px solid var(--line);
   color: var(--ink-dim);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -609,6 +680,13 @@ body {
   background: var(--bg);
   position: relative;
   z-index: 3;
+}
+/* Trailing cluster in the mobile top bar — the calendar button + avatar sit
+   together on the right (brand is on the left; the top bar is space-between). */
+.pl-topbar-trail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .pl-tabbar {
   flex: 0 0 auto;
@@ -827,7 +905,8 @@ body {
   .pl-donebtn {
     min-height: 44px;
   }
-  .pl-check {
+  .pl-check,
+  .pl-iconbtn {
     width: 44px;
     height: 44px;
     flex: 0 0 44px;

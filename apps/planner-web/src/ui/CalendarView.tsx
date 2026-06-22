@@ -31,13 +31,19 @@ function ItemChip({
 }) {
   const isTask = item.kind === 'task'
   const isEventDay = item.kind === 'eventDay'
+  const isHoliday = item.kind === 'holiday'
   const title = isTask
     ? item.task.title
     : isEventDay
       ? item.eventDay.name
-      : item.event.name
+      : isHoliday
+        ? item.holiday.name
+        : item.event.name
   const completed = isTask ? item.task.completed : false
 
+  // Every chip — events, tasks, eventDays, and holidays — is a button that
+  // surfaces the item's detail. Holidays open a read-only detail (the page
+  // handler decides; clicking never enters an edit form for a built-in one).
   return (
     <button
       type="button"
@@ -95,6 +101,7 @@ function CalCell({
             key={
               it.kind === 'task' ? `task:${it.task.id}` :
               it.kind === 'event' ? `event:${it.event.id}` :
+              it.kind === 'holiday' ? `holiday:${it.holiday.id}` :
               `eventDay:${it.eventDay.eventId}@${it.eventDay.date}`
             }
             item={it}
@@ -152,7 +159,7 @@ export function MonthGrid({
       <div className="cal-nav">
         <button
           type="button"
-          className="cal-nav-btn"
+          className="pl-iconbtn"
           onClick={prevMonth}
           aria-label="Previous month"
         >
@@ -165,7 +172,7 @@ export function MonthGrid({
         </span>
         <button
           type="button"
-          className="cal-nav-btn"
+          className="pl-iconbtn"
           onClick={nextMonth}
           aria-label="Next month"
         >
@@ -241,7 +248,7 @@ export function WeekStrip({
       <div className="cal-nav">
         <button
           type="button"
-          className="cal-nav-btn"
+          className="pl-iconbtn"
           onClick={prevWeek}
           aria-label="Previous week"
         >
@@ -257,7 +264,7 @@ export function WeekStrip({
         </span>
         <button
           type="button"
-          className="cal-nav-btn"
+          className="pl-iconbtn"
           onClick={nextWeek}
           aria-label="Next week"
         >

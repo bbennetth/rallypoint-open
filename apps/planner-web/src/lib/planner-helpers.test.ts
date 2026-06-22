@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import {
   clockLabel,
   fmtClock,
+  fmtTime,
   eventDayWindow,
   hasTimeOfDay,
   splitMyDay,
@@ -21,6 +22,9 @@ import {
   instantToDateInput,
   LIST_CONFIRM_TIMEOUT_MS,
   nextConfirmListId,
+  orderFolders,
+  countNotesByFolder,
+  mydayStatusLabel,
   type ScheduleEntry,
   type CalendarCell,
 } from './planner-helpers.js'
@@ -46,8 +50,11 @@ function event(over: Partial<MyDayEvent> = {}): MyDayEvent {
     name: 'Event',
     startAt: null,
     endAt: null,
+    allDay: false,
     locationLabel: null,
     ticketCount: 0,
+    ticketPlatform: null,
+    ticketAccountEmail: null,
     ...over,
   }
 }
@@ -156,6 +163,65 @@ describe('splitMyDay', () => {
     expect(timeline.map((e) => e.kind)).toEqual(['eventDay', 'task'])
     expect(timeline[0]?.eventDay?.name).toBe('Morning')
   })
+
+  // Issue #545: allDay flag tests
+  it('treats allDay=true event as all-day (drops from timeline)', () => {
+    const events = [event({ id: 'ev_allday', startAt: '2026-06-04T09:00:00Z', allDay: true })]
+    const { allDayEvents: _allDayEvents, timeline } = splitMyDay([], events)
+    // allDay=true events are not currently bucketed into allDayEvents
+    // (personal all-day events live in the regular events bucket in My Day),
+    // but they must NOT appear in the timed timeline.
+    expect(timeline.some((e) => e.id === 'ev_allday')).toBe(false)
+  })
+
+  it('treats allDay=false event with a timed startAt as timed', () => {
+    const events = [event({ id: 'ev_timed', startAt: '2026-06-04T14:30:00Z', allDay: false })]
+    const { timeline } = splitMyDay([], events)
+    expect(timeline.some((e) => e.id === 'ev_timed')).toBe(true)
+  })
+
+  it('treats allDay=false event without startAt as all-day (no startAt fallback)', () => {
+    // No startAt: the event has no time anchor, so it never enters the timeline.
+    const events = [event({ id: 'ev_nostart', startAt: null, allDay: false })]
+    const { timeline } = splitMyDay([], events)
+    expect(timeline.some((e) => e.id === 'ev_nostart')).toBe(false)
+  })
+
+  // Multi-day events: an all-day or continuation personal event lands in the new
+  // allDayPersonalEvents bucket; a timed event that starts today stays in the
+  // timeline. Instants are built with the local-time Date constructor so the
+  // localYmd comparison against todayYmd is stable in any runner zone.
+  it('routes an allDay personal event with startAt into allDayPersonalEvents', () => {
+    const events = [event({ id: 'ev_allday', startAt: '2026-06-04T00:00:00Z', allDay: true })]
+    const { allDayPersonalEvents, timeline } = splitMyDay([], events, [], '2026-06-04')
+    expect(allDayPersonalEvents.map((e) => e.id)).toEqual(['ev_allday'])
+    expect(timeline.some((e) => e.id === 'ev_allday')).toBe(false)
+  })
+
+  it('routes a multi-day continuation (started before today) into allDayPersonalEvents', () => {
+    const events = [
+      event({ id: 'trip', startAt: new Date(2026, 5, 3, 10, 0).toISOString(), allDay: false }),
+    ]
+    const { allDayPersonalEvents, timeline } = splitMyDay([], events, [], '2026-06-04')
+    expect(allDayPersonalEvents.map((e) => e.id)).toEqual(['trip'])
+    expect(timeline.some((e) => e.id === 'trip')).toBe(false)
+  })
+
+  it('keeps a timed event that starts today in the timeline', () => {
+    const events = [
+      event({ id: 'meeting', startAt: new Date(2026, 5, 4, 10, 0).toISOString(), allDay: false }),
+    ]
+    const { allDayPersonalEvents, timeline } = splitMyDay([], events, [], '2026-06-04')
+    expect(allDayPersonalEvents).toEqual([])
+    expect(timeline.map((e) => e.id)).toEqual(['meeting'])
+  })
+
+  it('without todayYmd, a timed event keeps its timeline placement (back-compat)', () => {
+    const events = [event({ id: 'ev', startAt: '2026-06-03T10:00:00Z', allDay: false })]
+    const { allDayPersonalEvents, timeline } = splitMyDay([], events)
+    expect(allDayPersonalEvents).toEqual([])
+    expect(timeline.some((e) => e.id === 'ev')).toBe(true)
+  })
 })
 
 describe('pickNext', () => {
@@ -246,6 +312,56 @@ describe('groupUpcomingByDay', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0]?.ymd).toBe('2026-06-04')
     expect(groups[0]?.items.map((i) => i.kind)).toEqual(['task', 'eventDay'])
+  })
+})
+
+// Timezone invariant: every dueDate the client receives is a GENUINE instant —
+// the BFF resolves a recurring occurrence's floating wall-clock into the request
+// tz (resolveRecurrenceDues), so the client renders it directly with the local
+// formatters and NEVER re-anchors. These cases feed splitMyDay / groupUpcomingByDay
+// the BFF-resolved instants and assert the local rendering. Pinned to
+// America/Los_Angeles (UTC-7 in June) so a stray re-anchor (the old double-convert
+// bug: 6:30 PM → 1:30 AM) would be observable on a UTC CI host.
+describe('splitMyDay / groupUpcomingByDay with BFF-resolved recurring dues', () => {
+  const ORIG_TZ = process.env.TZ
+  beforeAll(() => {
+    process.env.TZ = 'America/Los_Angeles'
+  })
+  afterAll(() => {
+    if (ORIG_TZ === undefined) delete process.env.TZ
+    else process.env.TZ = ORIG_TZ
+  })
+
+  it('renders a 6:30 PM chore at 6:30 PM, not 1:30 AM (regression)', () => {
+    // The exact reported bug: a chore set for 6:30 PM Pacific. The BFF resolves
+    // it to the genuine instant 01:30Z (next day); the client must show 6:30 PM.
+    // A double conversion would surface it as 1:30 AM.
+    const tasks = [task({ id: 'chore', dueDate: '2026-06-20T01:30:00.000Z', seriesId: 's1' })]
+    const { timeline } = splitMyDay(tasks, [])
+    expect(fmtTime(timeline[0]!.at)).toBe('6:30 PM')
+  })
+
+  it('shows and sorts a recurring chore by its local wall clock', () => {
+    // Chore set for 9:30 Pacific → BFF-resolved instant 16:30Z; event at local
+    // 8:00. The chore renders at 9:30 AM and sorts AFTER the event.
+    const tasks = [task({ id: 'chore', dueDate: '2026-06-04T16:30:00.000Z', seriesId: 's1' })]
+    const events = [event({ id: 'ev', startAt: new Date(2026, 5, 4, 8, 0).toISOString() })]
+    const { timeline } = splitMyDay(tasks, events)
+    expect(timeline.map((e) => e.id)).toEqual(['ev', 'chore'])
+    expect(fmtTime(timeline[1]!.at)).toBe('9:30 AM')
+  })
+
+  it('groups a day-only recurring chore under its own local day', () => {
+    // A day-only chore on 2026-06-05 → BFF-resolved to local midnight Pacific
+    // (07:00Z). It buckets under 2026-06-05 and stays in the all-day track.
+    const chore: UpcomingItem = {
+      kind: 'task',
+      task: task({ id: 'chore', dueDate: '2026-06-05T07:00:00.000Z', seriesId: 's1' }),
+    }
+    const groups = groupUpcomingByDay([chore], '2026-06-04')
+    expect(groups.map((g) => g.ymd)).toEqual(['2026-06-05'])
+    expect(groups[0]?.rel).toBe('Tomorrow')
+    expect(hasTimeOfDay(chore.task.dueDate)).toBe(false)
   })
 })
 
@@ -679,3 +795,55 @@ describe('quick-add date conversion (dateInputToInstant contract for AddTaskForm
   })
 })
 
+describe('orderFolders', () => {
+  it('puts the default folder first, keeping the rest in order', () => {
+    const folders = [
+      { id: 'lst_b', isDefault: false },
+      { id: 'lst_def', isDefault: true },
+      { id: 'lst_c', isDefault: false },
+    ]
+    expect(orderFolders(folders).map((f) => f.id)).toEqual(['lst_def', 'lst_b', 'lst_c'])
+  })
+
+  it('is a no-op when there is no default flagged', () => {
+    const folders = [
+      { id: 'lst_a', isDefault: false },
+      { id: 'lst_b', isDefault: false },
+    ]
+    expect(orderFolders(folders).map((f) => f.id)).toEqual(['lst_a', 'lst_b'])
+  })
+})
+
+describe('countNotesByFolder', () => {
+  it('counts notes grouped by folderId', () => {
+    const notes = [
+      { folderId: 'lst_a' },
+      { folderId: 'lst_a' },
+      { folderId: 'lst_b' },
+    ]
+    expect(countNotesByFolder(notes)).toEqual({ lst_a: 2, lst_b: 1 })
+  })
+
+  it('is empty for no notes', () => {
+    expect(countNotesByFolder([])).toEqual({})
+  })
+})
+
+
+describe('mydayStatusLabel', () => {
+  it('returns the bare date label when counts are unknown (total null)', () => {
+    expect(mydayStatusLabel('Today', null, 0)).toBe('Today')
+    expect(mydayStatusLabel('Saturday, June 13', null, 0)).toBe('Saturday, June 13')
+  })
+
+  it('appends "All clear" when nothing is due', () => {
+    expect(mydayStatusLabel('Saturday, June 13', 0, 0)).toBe('Saturday, June 13 · All clear')
+  })
+
+  it('appends "N of M tasks done" when there are tasks', () => {
+    expect(mydayStatusLabel('Saturday, June 13', 5, 2)).toBe(
+      'Saturday, June 13 · 2 of 5 tasks done',
+    )
+    expect(mydayStatusLabel('Today', 3, 3)).toBe('Today · 3 of 3 tasks done')
+  })
+})

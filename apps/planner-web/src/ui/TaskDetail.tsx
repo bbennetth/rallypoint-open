@@ -1,15 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  ApiError,
-  deleteTaskItem,
-  setTaskItemCompleted,
-  updateTaskItem,
-  type FieldDefDto,
-} from '../lib/api.js'
-import { CustomFieldsEditor } from '../components/CustomFieldsEditor.js'
+import { ApiError, deleteTaskItem, setTaskItemCompleted, updateTaskItem } from '../lib/api.js'
 import { PriorityPicker } from './PriorityPicker.js'
 import { DoneBtn } from './bits.js'
-import { instantToDateInput } from '../lib/planner-helpers.js'
+import { hasTimeOfDay, instantToDateInput, instantToTimeInput } from '../lib/planner-helpers.js'
 import { applyPatchToState, buildTaskPatch, taskEditState } from '../lib/task-edit.js'
 
 // Detail + quick-edit body for a task, rendered inside an Ink Drawer by the
@@ -44,22 +37,15 @@ export function TaskDetail({
   task,
   onChanged,
   onClose,
-  fieldDefs,
-  customFields,
-  onCustomFieldChange,
 }: {
   task: EditableTask
   onChanged: () => void
   onClose: () => void
-  // Optional per-task custom-field editing (Tasks page passes these; My Day /
-  // Upcoming don't, since they don't have the list's field defs loaded).
-  fieldDefs?: FieldDefDto[]
-  customFields?: Record<string, unknown>
-  onCustomFieldChange?: (fieldId: string, value: unknown | null) => void
 }) {
   const [title, setTitle] = useState(task.title)
   const [priority, setPriority] = useState<string | null>(task.priority)
   const [due, setDue] = useState(instantToDateInput(task.dueDate))
+  const [dueTime, setDueTime] = useState(hasTimeOfDay(task.dueDate) ? instantToTimeInput(task.dueDate) : '')
   const [completed, setCompleted] = useState(task.completed)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<SaveStatus>('idle')
@@ -70,7 +56,7 @@ export function TaskDetail({
   // without being re-created on every keystroke.
   const savedRef = useRef(taskEditState(task))
   const draftRef = useRef(savedRef.current)
-  draftRef.current = { title, priority, dueInput: due }
+  draftRef.current = { title, priority, dueInput: due, dueTimeInput: dueTime }
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // A different task opened into the same drawer instance — reset baseline +
@@ -83,6 +69,7 @@ export function TaskDetail({
     setTitle(task.title)
     setPriority(task.priority)
     setDue(instantToDateInput(task.dueDate))
+    setDueTime(hasTimeOfDay(task.dueDate) ? instantToTimeInput(task.dueDate) : '')
     setStatus('idle')
     setError(null)
   }, [taskId])
@@ -143,8 +130,17 @@ export function TaskDetail({
   }
   function onDueChange(v: string) {
     setDue(v)
+    // A time with no date is meaningless — clear it when the date is cleared.
+    const time = v ? draftRef.current.dueTimeInput : ''
+    if (!v) setDueTime('')
     if (timerRef.current) clearTimeout(timerRef.current)
-    draftRef.current = { ...draftRef.current, dueInput: v }
+    draftRef.current = { ...draftRef.current, dueInput: v, dueTimeInput: time }
+    void flush()
+  }
+  function onDueTimeChange(v: string) {
+    setDueTime(v)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    draftRef.current = { ...draftRef.current, dueTimeInput: v }
     void flush()
   }
 
@@ -219,25 +215,29 @@ export function TaskDetail({
       </div>
       <label className="pl-fab-label">
         Due date
-        <input
-          className="pl-input"
-          type="date"
-          value={due}
-          onChange={(e) => onDueChange(e.target.value)}
-          aria-label="Due date"
-        />
-      </label>
-      {fieldDefs && fieldDefs.length > 0 && onCustomFieldChange && (
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div className="eyebrow">Custom fields</div>
-          <CustomFieldsEditor
-            defs={fieldDefs}
-            values={customFields ?? {}}
-            onChange={onCustomFieldChange}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            className="pl-input"
+            type="date"
+            value={due}
+            onChange={(e) => onDueChange(e.target.value)}
+            aria-label="Due date"
+          />
+          <input
+            className="pl-input"
+            type="time"
+            value={dueTime}
+            onChange={(e) => onDueTimeChange(e.target.value)}
+            aria-label="Due time"
+            disabled={!due}
           />
         </div>
+      </label>
+      {error && (
+        <p role="alert" className="pl-fab-error">
+          {error}
+        </p>
       )}
-      {error && <p role="alert" className="pl-fab-error">{error}</p>}
       <button className="pl-btn ghost" type="button" onClick={() => void remove()} disabled={busy}>
         Delete task
       </button>

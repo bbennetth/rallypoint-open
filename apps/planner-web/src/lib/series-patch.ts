@@ -9,7 +9,7 @@
 //    clear (daily, or weekly with no specific days = "dtstart's weekday").
 //  - until/count are mutually exclusive.
 
-import type { RecurringSeriesDto, UpdateTaskSeriesInput } from './api.js'
+import type { TaskSeriesDto, UpdateTaskSeriesInput } from './api.js'
 
 export type TermMode = 'none' | 'until' | 'count'
 
@@ -41,7 +41,7 @@ function daysEqual(a: string[] | null, b: string[] | null): boolean {
 }
 
 export function buildSeriesPatch(
-  series: RecurringSeriesDto,
+  series: TaskSeriesDto,
   f: SeriesFormState,
 ): BuildSeriesPatchResult {
   const title = f.title.trim()

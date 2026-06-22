@@ -97,7 +97,8 @@ export function LedgersPage({ selfUserId: _selfUserId }: { selfUserId: string })
                 background: 'var(--surface-2)',
                 border: '1.5px solid var(--line)',
                 color: 'var(--ink)',
-                fontSize: 14,
+                // 16px is the floor below which iOS Safari auto-zooms on focus.
+                fontSize: 16,
               }}
             />
           </label>
@@ -114,7 +115,8 @@ export function LedgersPage({ selfUserId: _selfUserId }: { selfUserId: string })
                 background: 'var(--surface-2)',
                 border: '1.5px solid var(--line)',
                 color: 'var(--ink)',
-                fontSize: 14,
+                // 16px is the floor below which iOS Safari auto-zooms on focus.
+                fontSize: 16,
               }}
             >
               {SUPPORTED_CURRENCIES.map((c) => (

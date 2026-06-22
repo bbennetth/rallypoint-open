@@ -11,6 +11,9 @@
     "build": "tsc --build",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@rallypoint/shared": "*"
+  },
   "peerDependencies": {
     "react": ">=18"
   },

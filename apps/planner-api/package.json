@@ -21,6 +21,7 @@
     "@rallypoint/planner-db": "*",
     "@rallypoint/rate-limit": "*",
     "@rallypoint/shared": "*",
+    "@rallypoint/web-push": "*",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.0",
     "ulid": "^2.3.0",

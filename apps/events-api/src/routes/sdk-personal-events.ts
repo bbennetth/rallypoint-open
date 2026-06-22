@@ -29,6 +29,20 @@ function parseInstantParam(raw: string | undefined, name: string): Date | null {
   return d
 }
 
+// Issue #545: resolve the effective all-day flag. Explicit DB value wins;
+// null falls back to inference: no startAt → false (no time info);
+// midnight UTC (or no time-of-day component) → true; any other time → false.
+function effectiveAllDay(e: EventRecord): boolean {
+  if (e.allDay !== null && e.allDay !== undefined) return e.allDay
+  // Inference fallback for null rows (pre-migration data).
+  if (!e.startAt) return false
+  const iso = e.startAt.toISOString()
+  // Date-only strings have no 'T' component. UTC midnight ends in T00:00:00.000Z.
+  if (!iso.includes('T')) return true
+  const timePart = iso.split('T')[1] ?? ''
+  return timePart === '00:00:00.000Z'
+}
+
 // Flat camelCase DTO. tenantId and deletedAt are never surfaced to callers.
 function serializePersonalEventDto(e: EventRecord): Record<string, unknown> {
   return {
@@ -40,6 +54,7 @@ function serializePersonalEventDto(e: EventRecord): Record<string, unknown> {
     description: e.description,
     startAt: e.startAt?.toISOString() ?? null,
     endAt: e.endAt?.toISOString() ?? null,
+    allDay: effectiveAllDay(e),
     timezone: e.timezone,
     locationLabel: e.locationLabel,
     privacyMode: e.privacyMode,
@@ -78,6 +93,7 @@ export const sdkPersonalEventsRoutes = new Hono<HonoApp>()
       endAt: parsed.data.endAt ? new Date(parsed.data.endAt) : null,
       ticketPlatform: parsed.data.ticketPlatform ?? null,
       ticketAccountEmail: parsed.data.ticketAccountEmail ?? null,
+      ...(parsed.data.allDay !== undefined ? { allDay: parsed.data.allDay } : {}),
     })
 
     return c.json(serializePersonalEventDto(record), 201)
@@ -148,6 +164,7 @@ export const sdkPersonalEventsRoutes = new Hono<HonoApp>()
       fields.endAt = parsed.data.endAt === null ? null : new Date(parsed.data.endAt)
     if (parsed.data.ticketPlatform !== undefined) fields.ticketPlatform = parsed.data.ticketPlatform
     if (parsed.data.ticketAccountEmail !== undefined) fields.ticketAccountEmail = parsed.data.ticketAccountEmail
+    if (parsed.data.allDay !== undefined) fields.allDay = parsed.data.allDay
 
     const updated = await c.var.repos.events.patch(id, fields)
     if (!updated) throw errors.notFound('Personal event not found.')

@@ -75,6 +75,12 @@ export const errors = {
   conflict(code: string, message: string): ApiError {
     return new ApiError({ code, message, status: 409 })
   },
+  // Semantically-invalid request the schema can't catch (422). Used by the
+  // cross-list move when the item shape forbids the move (e.g. a series
+  // occurrence — move the series, not one materialized occurrence).
+  unprocessable(code: string, message: string): ApiError {
+    return new ApiError({ code, message, status: 422 })
+  },
   listNotFound(): ApiError {
     return new ApiError({ code: 'list_not_found', message: 'List not found.', status: 404 })
   },

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { SHARED_SETTINGS_NAMESPACE } from '@rallypoint/shared'
+import { SHARED_SETTINGS_NAMESPACE, type SessionProfile } from '@rallypoint/shared'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken, constantTimeEqual, readCookie, buildSetCookie, buildClearCookie, extractIp, dailySalt, hashIp, hashUserAgent } from '@rallypoint/crypto'
@@ -110,32 +110,31 @@ export const ssoRoutes = new Hono<HonoApp>()
 
   .get('/api/v1/ui/session', requireSession(), async (c) => {
     const userId = c.var.session!.userId
-    // Fold the shared cross-app settings doc (theme etc.) into the probe
-    // so the web app hydrates in one round-trip. Best-effort: a settings
-    // fetch failure (RPID hiccup) must not break an otherwise-valid
-    // session, so degrade to an empty doc.
+    // Fold the shared cross-app settings doc (theme etc.) and the RPID
+    // profile (avatar + name) into the probe so the web app hydrates in one
+    // round-trip. They are independent RPID reads, so run them concurrently.
+    // Both are best-effort: a settings hiccup degrades to an empty doc and a
+    // profile hiccup to `null` (the bar falls back to initials) — neither
+    // must break an otherwise-valid session.
+    const [settingsResult, profileResult] = await Promise.allSettled([
+      c.var.services.settings.get(userId, SHARED_SETTINGS_NAMESPACE),
+      c.var.services.profiles.lookup(userId),
+    ])
+
     let settings: Record<string, unknown> = {}
-    try {
-      settings = await c.var.services.settings.get(userId, SHARED_SETTINGS_NAMESPACE)
-    } catch (err) {
+    if (settingsResult.status === 'fulfilled') {
+      settings = settingsResult.value
+    } else {
+      const reason = settingsResult.reason
       c.var.logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
+        { err: reason instanceof Error ? reason.message : String(reason) },
         'shared settings fold-in failed; returning empty doc',
       )
     }
-    // Fold the RPID profile (avatar + name) into the probe too so the
-    // user bar renders the real user in one round-trip. Best-effort: an
-    // RPID batch-lookup hiccup must not break an otherwise-valid session,
-    // so degrade to `null` (the bar falls back to initials).
-    let profile: {
-      username: string | null
-      first_name: string | null
-      last_name: string | null
-      picture_url: string | null
-      email: string | null
-    } | null = null
-    try {
-      const entry = await c.var.services.profiles.lookup(userId)
+
+    let profile: SessionProfile | null = null
+    if (profileResult.status === 'fulfilled') {
+      const entry = profileResult.value
       if (entry) {
         profile = {
           username: entry.display_name,
@@ -145,9 +144,10 @@ export const ssoRoutes = new Hono<HonoApp>()
           email: entry.email,
         }
       }
-    } catch (err) {
+    } else {
+      const reason = profileResult.reason
       c.var.logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
+        { err: reason instanceof Error ? reason.message : String(reason) },
         'profile fold-in failed; returning null',
       )
     }

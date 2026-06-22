@@ -34,7 +34,11 @@ describe('CreateListSchema', () => {
   })
 
   it('rejects an unknown list type', () => {
-    expect(CreateListSchema.safeParse({ ...base, listType: 'chores' }).success).toBe(false)
+    expect(CreateListSchema.safeParse({ ...base, listType: 'bogus' }).success).toBe(false)
+  })
+
+  it('accepts the chores list type (#546)', () => {
+    expect(CreateListSchema.safeParse({ ...base, listType: 'chores' }).success).toBe(true)
   })
 
   it('rejects an unknown scope type', () => {

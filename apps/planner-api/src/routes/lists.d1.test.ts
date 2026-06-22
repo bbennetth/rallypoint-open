@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { env as testEnv } from 'cloudflare:test'
 import type { Hono } from 'hono'
+import { PERSONAL_GROUP_NAME_LEGACY } from '../lib/personal-scope.js'
 import {
   ListsClientError,
   type FieldDefDto,
@@ -28,7 +29,10 @@ import { PLANNER_SESSION_BEARER_PREFIX } from '../middleware/session.js'
 // guard, and SDK-error → envelope mapping — without standing up lists-api.
 
 const CSRF = 'csrf_token_value_aaaaaaaaaaaaaaaaaaaaaaaaaa'
-const PERSONAL_NAME = 'My Tasks'
+// PERSONAL_GROUP_NAME_LEGACY ('My Tasks') is the name fakes seed when
+// modelling the pre-migration rollout state (groups that haven't been renamed
+// yet). selectPersonalGroup matches either legacy or new name, so the fakes
+// are still found. resolvePersonalScope creates NEW groups with PERSONAL_GROUP_NAME.
 
 // A mutable in-memory Lists SDK. Models the slices-6a contract the BFF
 // relies on: createGroup auto-owns the actor; createList/createListItem
@@ -47,6 +51,21 @@ interface FakeLists {
   // Seed a notes list inside the given actor's personal group (provisioning the
   // group if it doesn't exist yet). Returns the notes list id.
   seedNotesListForActor(actor: string): string
+  // Seed a `tasks`-type list inside the given actor's personal group
+  // (provisioning the group if needed). Returns the list id. Used to model the
+  // single-list world (#543) where the BFF no longer exposes list-create, plus
+  // the legacy multi-list state the merge folds in. `createdAt` is overridable
+  // so tests can control which list is the oldest (canonical).
+  seedTaskListForActor(actor: string, opts?: { name?: string; createdAt?: string }): string
+  // Low-level seeders used by the merge tests to plant items / series / field
+  // defs on a specific (typically non-canonical) list.
+  seedItem(listId: string, over?: Partial<ListItemDto>): string
+  seedSeriesWithOccurrence(listId: string, over?: Partial<ListItemSeriesDto>): string
+  seedFieldDef(listId: string, over: Partial<FieldDefDto> & { label: string }): string
+  listsSnapshot(): ListDto[]
+  itemsSnapshot(): ListItemDto[]
+  seriesSnapshot(): ListItemSeriesDto[]
+  fieldDefsSnapshot(): FieldDefDto[]
 }
 
 function isoNow(): string {
@@ -262,15 +281,18 @@ function makeFakeLists(): FakeLists {
         throw new ListsClientError(404, 'not_found', 'List not found.')
       }
       const isTasks = list.listType === 'tasks'
+      const resolvedStatus = isTasks ? (input.status ?? 'todo') : null
       const it: ListItemDto = {
         id: `lit_${items.length + 1}`,
         listId,
         title: input.title,
         notes: input.notes ?? null,
         assignedTo: input.assignedTo ?? null,
-        completed: false,
+        // Mirror lists-api: the boolean `completed` column is derived from the
+        // status category — 'done' → true, else false.
+        completed: resolvedStatus === 'done',
         completedAt: null,
-        status: isTasks ? (input.status ?? 'todo') : null,
+        status: resolvedStatus,
         // Mirror lists-api post-#430: explicit null = no-priority (null stored);
         // omitted (undefined) = default medium; else use the value. ?? coerces
         // null→'medium', so use a conditional to distinguish null from undefined.
@@ -352,7 +374,9 @@ function makeFakeLists(): FakeLists {
     seedForeignPersonalList() {
       groups.push({
         id: 'grp_foreign_personal',
-        name: 'My Tasks',
+        // Model the pre-migration state (legacy name) — selectPersonalGroup
+        // still finds it via PERSONAL_GROUP_NAME_LEGACY during the rollout window.
+        name: PERSONAL_GROUP_NAME_LEGACY,
         description: null,
         createdBy: 'user_someone_else',
         createdAt: isoNow(),
@@ -389,12 +413,15 @@ function makeFakeLists(): FakeLists {
       return l.id
     },
     seedNotesListForActor(actor: string): string {
-      // Find or create the actor's personal group.
-      let group = groups.find((g) => g.createdBy === actor && g.name === 'My Tasks')
+      // Find or create the actor's personal group. Use the legacy name here
+      // to model the pre-migration state (selectPersonalGroup accepts either).
+      let group = groups.find(
+        (g) => g.createdBy === actor && g.name === PERSONAL_GROUP_NAME_LEGACY,
+      )
       if (!group) {
         group = {
           id: `lgr_notes_${actor}`,
-          name: 'My Tasks',
+          name: PERSONAL_GROUP_NAME_LEGACY,
           description: null,
           createdBy: actor,
           createdAt: isoNow(),
@@ -418,6 +445,131 @@ function makeFakeLists(): FakeLists {
       lists.push(l)
       return l.id
     },
+    seedTaskListForActor(actor, opts = {}) {
+      // Find or create the actor's personal group (legacy name models the
+      // pre-migration state; selectPersonalGroup accepts either).
+      let group = groups.find(
+        (g) => g.createdBy === actor && g.name === PERSONAL_GROUP_NAME_LEGACY,
+      )
+      if (!group) {
+        group = {
+          id: `lgr_t_${actor}`,
+          name: PERSONAL_GROUP_NAME_LEGACY,
+          description: null,
+          createdBy: actor,
+          createdAt: isoNow(),
+          updatedAt: isoNow(),
+        }
+        groups.push(group)
+      }
+      const l: ListDto = {
+        id: `lst_t_${lists.length + 1}`,
+        scopeType: 'list_group',
+        scopeId: group.id,
+        listType: 'tasks',
+        name: opts.name ?? 'Tasks',
+        visibility: 'all',
+        color: null,
+        incompleteCount: 0,
+        createdBy: actor,
+        createdAt: opts.createdAt ?? isoNow(),
+        updatedAt: opts.createdAt ?? isoNow(),
+      }
+      lists.push(l)
+      return l.id
+    },
+    seedItem(listId, over = {}) {
+      const it: ListItemDto = {
+        id: `lit_seed_${items.length + 1}`,
+        listId,
+        title: 'Seeded',
+        notes: null,
+        assignedTo: null,
+        completed: false,
+        completedAt: null,
+        status: 'todo',
+        statusId: null,
+        parentId: null,
+        priority: 'medium',
+        dueDate: null,
+        position: items.length,
+        customFields: {},
+        seriesId: null,
+        createdBy: 'system',
+        createdAt: isoNow(),
+        updatedAt: isoNow(),
+        ...over,
+      }
+      items.push(it)
+      return it.id
+    },
+    seedSeriesWithOccurrence(listId, over = {}) {
+      const s: ListItemSeriesDto = {
+        id: `lse_seed_${series.length + 1}`,
+        listId,
+        title: 'Seeded series',
+        notes: null,
+        assignedTo: null,
+        priority: null,
+        freq: 'weekly',
+        interval: 1,
+        byDay: ['MO'],
+        dtstart: '2026-06-08',
+        until: null,
+        count: 4,
+        timeOfDay: null,
+        createdBy: 'system',
+        createdAt: isoNow(),
+        updatedAt: isoNow(),
+        ...over,
+      }
+      series.push(s)
+      // One materialized occurrence carrying the seriesId.
+      items.push({
+        id: `lit_occ_${items.length + 1}`,
+        listId,
+        title: s.title,
+        notes: null,
+        assignedTo: null,
+        completed: false,
+        completedAt: null,
+        status: 'todo',
+        statusId: null,
+        parentId: null,
+        priority: s.priority ?? 'medium',
+        dueDate: s.dtstart,
+        position: items.length,
+        customFields: {},
+        seriesId: s.id,
+        createdBy: 'system',
+        createdAt: isoNow(),
+        updatedAt: isoNow(),
+      })
+      return s.id
+    },
+    seedFieldDef(listId, over) {
+      const d: FieldDefDto = {
+        id: `lfd_seed_${fieldDefs.length + 1}`,
+        listId,
+        key: over.label.toLowerCase().replace(/\s+/g, '_'),
+        label: over.label,
+        fieldType: over.fieldType ?? 'text',
+        options: over.options ?? {},
+        required: over.required ?? false,
+        defaultValue: null,
+        position: fieldDefs.length,
+        createdBy: 'system',
+        createdAt: isoNow(),
+        updatedAt: isoNow(),
+        ...over,
+      }
+      fieldDefs.push(d)
+      return d.id
+    },
+    listsSnapshot: () => lists.map((l) => ({ ...l })),
+    itemsSnapshot: () => items.map((i) => ({ ...i })),
+    seriesSnapshot: () => series.map((s) => ({ ...s })),
+    fieldDefsSnapshot: () => fieldDefs.map((d) => ({ ...d })),
   }
 }
 
@@ -489,69 +641,69 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect(res.status).toBe(401)
   })
 
-  it('GET /lists returns [] before the personal group is provisioned', async () => {
+  it('GET /lists provisions + returns the single canonical Tasks list (fresh user)', async () => {
     const bearer = await loginAs('user_a')
     const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual([])
-    expect(fake.calls.some((c) => c.method === 'createGroup')).toBe(false)
+    const rows = (await res.json()) as ListDto[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].listType).toBe('tasks')
+    expect(rows[0].name).toBe('Tasks')
+    expect(rows[0].scopeType).toBe('list_group')
+    expect(rows[0].visibility).toBe('all')
+    // The personal group + the Tasks list were provisioned.
+    expect(fake.calls.some((c) => c.method === 'createGroup')).toBe(true)
+    expect(fake.calls.some((c) => c.method === 'createList')).toBe(true)
   })
 
-  it('POST /lists provisions the personal group and injects scope + type', async () => {
+  it('GET /lists is idempotent: a second call provisions nothing new', async () => {
+    const bearer = await loginAs('user_c')
+    const first = (await (
+      await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    ).json()) as ListDto[]
+    const createListCount = fake.calls.filter((c) => c.method === 'createList').length
+    const second = (await (
+      await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    ).json()) as ListDto[]
+    // Same canonical list, and no extra list/group provisioned the 2nd time.
+    expect(second[0].id).toBe(first[0].id)
+    expect(fake.calls.filter((c) => c.method === 'createList')).toHaveLength(createListCount)
+    expect(fake.calls.filter((c) => c.method === 'createGroup')).toHaveLength(1)
+  })
+
+  it('GET /lists returns the existing task list when one already exists (no provisioning)', async () => {
+    const bearer = await loginAs('user_d')
+    fake.seedTaskListForActor('user_d', { name: 'Today' })
+    const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    const rows = (await res.json()) as ListDto[]
+    expect(rows.map((l) => l.name)).toEqual(['Today'])
+    expect(fake.calls.some((c) => c.method === 'createList')).toBe(false)
+  })
+
+  it('no POST /lists endpoint (single-list — list create is gone)', async () => {
     const bearer = await loginAs('user_b')
     const res = await app.request('http://localhost/api/v1/ui/lists', {
       method: 'POST',
       headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: 'Errands', color: 'blue' }),
+      body: JSON.stringify({ name: 'Errands' }),
     })
-    expect(res.status).toBe(201)
-    const created = (await res.json()) as ListDto
-    expect(created.listType).toBe('tasks')
-    expect(created.scopeType).toBe('list_group')
-    expect(created.visibility).toBe('all')
-    expect(created.color).toBe('blue')
-
-    const createGroup = fake.calls.find((c) => c.method === 'createGroup')
-    expect(createGroup?.actor).toBe('user_b')
-    expect((createGroup?.args[0] as { name: string }).name).toBe(PERSONAL_NAME)
-    const createList = fake.calls.find((c) => c.method === 'createList')
-    expect(createList?.actor).toBe('user_b')
+    expect(res.status).toBe(404)
   })
 
-  it('reuses the existing personal group on a second create', async () => {
-    const bearer = await loginAs('user_c')
-    const post = () =>
-      app.request('http://localhost/api/v1/ui/lists', {
-        method: 'POST',
-        headers: headers(bearer, { 'content-type': 'application/json' }),
-        body: JSON.stringify({ name: 'List' }),
-      })
-    await post()
-    await post()
-    expect(fake.calls.filter((c) => c.method === 'createGroup')).toHaveLength(1)
-    expect(fake.calls.filter((c) => c.method === 'createList')).toHaveLength(2)
-  })
-
-  it('GET /lists then returns the created lists', async () => {
-    const bearer = await loginAs('user_d')
-    await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: 'Today' }),
+  it('no DELETE /lists/:listId endpoint (single-list — list delete is gone)', async () => {
+    const bearer = await loginAs('user_dl')
+    const listId = fake.seedTaskListForActor('user_dl')
+    const res = await app.request(`http://localhost/api/v1/ui/lists/${listId}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
     })
-    const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-    const rows = (await res.json()) as ListDto[]
-    expect(rows.map((l) => l.name)).toEqual(['Today'])
+    expect(res.status).toBe(404)
+    expect(fake.calls.some((c) => c.method === 'deleteList')).toBe(false)
   })
 
   it('item create → check-off → delete round-trips with the session actor', async () => {
     const bearer = await loginAs('user_e')
-    const listRes = await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: 'Chores' }),
-    })
-    const listId = ((await listRes.json()) as ListDto).id
+    const listId = fake.seedTaskListForActor('user_e', { name: 'Chores' })
 
     const createRes = await app.request(
       `http://localhost/api/v1/ui/lists/${listId}/items`,
@@ -590,6 +742,34 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect((await listItems.json()) as ListItemDto[]).toEqual([])
   })
 
+  it('GET items leaves a one-off task’s genuine timed instant untouched in any tz', async () => {
+    // A one-off task (seriesId null) carries a true UTC instant — the BFF must
+    // NOT re-anchor it. 6:30 PM Pacific is stored as 01:30Z next day; GET items
+    // returns it byte-identical whether tz is UTC or Pacific. (The resolver only
+    // touches recurring floating dues; one-offs are genuine instants.)
+    const bearer = await loginAs('user_oneoff_tz')
+    const listId = fake.seedTaskListForActor('user_oneoff_tz', { name: 'Tasks' })
+    const due = '2026-06-20T01:30:00.000Z'
+    const createRes = await app.request(`http://localhost/api/v1/ui/lists/${listId}/items`, {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ title: 'Call mom', dueDate: due }),
+    })
+    expect(createRes.status).toBe(201)
+
+    for (const tz of ['UTC', 'America/Los_Angeles']) {
+      const res = await app.request(
+        `http://localhost/api/v1/ui/lists/${listId}/items?tz=${encodeURIComponent(tz)}`,
+        { headers: headers(bearer) },
+      )
+      expect(res.status).toBe(200)
+      const rows = (await res.json()) as ListItemDto[]
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.seriesId).toBeNull()
+      expect(rows[0]!.dueDate).toBe(due)
+    }
+  })
+
   it('GET items 404s for a list the caller does not own (IDOR guard)', async () => {
     const bearer = await loginAs('user_f')
     const foreignId = fake.seedForeignList()
@@ -602,26 +782,9 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect(fake.calls.some((c) => c.method === 'listItems')).toBe(false)
   })
 
-  it('rejects an empty list name at the BFF boundary (400)', async () => {
-    const bearer = await loginAs('user_h')
-    const res = await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: '   ' }),
-    })
-    expect(res.status).toBe(400)
-    // The bad request never reaches the SDK.
-    expect(fake.calls.some((c) => c.method === 'createList')).toBe(false)
-  })
-
   it('rejects a malformed item body at the BFF boundary (400)', async () => {
     const bearer = await loginAs('user_i')
-    const listRes = await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name: 'L' }),
-    })
-    const listId = ((await listRes.json()) as ListDto).id
+    const listId = fake.seedTaskListForActor('user_i')
     const res = await app.request(`http://localhost/api/v1/ui/lists/${listId}/items`, {
       method: 'POST',
       headers: headers(bearer, { 'content-type': 'application/json' }),
@@ -649,13 +812,18 @@ describe('D1 integration — Planner Task Lists BFF', () => {
 
   // --- recurring series (slice 12) ---------------------------------
 
+  // Single-list world (#543): the BFF no longer exposes list-create, so tests
+  // seed a task list directly on the fake. `bearer` carries the actor id (the
+  // stub idClient maps bearer→userId 1:1), so we resolve the actor from the
+  // session to seed under the right group. Simpler: tests pass the actor via
+  // loginAs and we seed for that same id — here we accept the actor explicitly.
   async function createList(bearer: string, name: string): Promise<string> {
-    const res = await app.request('http://localhost/api/v1/ui/lists', {
-      method: 'POST',
-      headers: headers(bearer, { 'content-type': 'application/json' }),
-      body: JSON.stringify({ name }),
-    })
-    return ((await res.json()) as ListDto).id
+    // Resolve the canonical list by hitting GET (provisions it), then rename
+    // is unnecessary — the seeded fake list IS the canonical one. We seed via
+    // the actor recovered from the session row.
+    const session = await repos.sessions.findByIdHash(hashToken(bearer))
+    const actor = session!.userId
+    return fake.seedTaskListForActor(actor, { name })
   }
 
   it('POST /series creates a series; occurrences surface with seriesId', async () => {
@@ -1012,52 +1180,162 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     expect(fake.calls.some((c) => c.method === 'updateSeries')).toBe(false)
   })
 
-  // --- DELETE /lists/:listId (list delete) --------------------------------
+  // --- single-list merge (#543) ------------------------------------------
+  // GET /lists resolves the single canonical Tasks list and folds any legacy
+  // extra task lists into it. These tests drive the merge end-to-end through
+  // the BFF + fake SDK: fresh user, multi-list fold-in (items + series +
+  // custom fields preserved), and idempotency.
 
-  it('DELETE /lists/:listId removes the list and it is gone from a subsequent GET', async () => {
-    const bearer = await loginAs('user_dl1')
-    const listId = await createList(bearer, 'Errands')
+  it('merge: a multi-list user is folded into one canonical list, nothing lost', async () => {
+    const bearer = await loginAs('user_m1')
+    // Canonical = oldest task list; two extra lists to fold in.
+    const canonicalId = fake.seedTaskListForActor('user_m1', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+    const srcA = fake.seedTaskListForActor('user_m1', {
+      name: 'Errands',
+      createdAt: '2026-02-01T00:00:00.000Z',
+    })
+    const srcB = fake.seedTaskListForActor('user_m1', {
+      name: 'Work',
+      createdAt: '2026-03-01T00:00:00.000Z',
+    })
+    fake.seedItem(canonicalId, { title: 'Already here' })
+    fake.seedItem(srcA, { title: 'Milk', priority: 'high' })
+    fake.seedItem(srcA, { title: 'Done thing', completed: true, status: 'done' })
+    fake.seedItem(srcB, { title: 'Report', dueDate: '2026-04-01' })
+    // A duplicate title across canonical and a source — merge keeps both.
+    fake.seedItem(srcB, { title: 'Already here' })
 
-    const delRes = await app.request(
-      `http://localhost/api/v1/ui/lists/${listId}`,
-      { method: 'DELETE', headers: headers(bearer) },
-    )
-    expect(delRes.status).toBe(204)
-    expect(fake.calls.some((c) => c.method === 'deleteList')).toBe(true)
+    const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    const rows = (await res.json()) as ListDto[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].id).toBe(canonicalId)
 
-    // Subsequent GET should not include the deleted list.
-    const getRes = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-    expect(getRes.status).toBe(200)
-    const rows = (await getRes.json()) as ListDto[]
-    expect(rows.some((l) => l.id === listId)).toBe(false)
+    // All source items now live on the canonical list; sources are empty.
+    const canonItems = fake.itemsSnapshot().filter((i) => i.listId === canonicalId)
+    const titles = canonItems.map((i) => i.title).sort()
+    expect(titles).toEqual(['Already here', 'Already here', 'Done thing', 'Milk', 'Report'].sort())
+    expect(fake.itemsSnapshot().filter((i) => i.listId === srcA)).toHaveLength(0)
+    expect(fake.itemsSnapshot().filter((i) => i.listId === srcB)).toHaveLength(0)
+
+    // Field-level preservation: priority, dueDate, completion all survive.
+    expect(canonItems.find((i) => i.title === 'Milk')?.priority).toBe('high')
+    expect(canonItems.find((i) => i.title === 'Report')?.dueDate).toBe('2026-04-01')
+    expect(canonItems.find((i) => i.title === 'Done thing')?.completed).toBe(true)
+
+    // The source LIST rows remain (visible in the Lists app per #543).
+    const listIds = fake.listsSnapshot().map((l) => l.id)
+    expect(listIds).toEqual(expect.arrayContaining([canonicalId, srcA, srcB]))
   })
 
-  it('DELETE /lists/:listId returns 409 for the notes list (not deletable)', async () => {
-    const bearer = await loginAs('user_dl2')
-    const notesId = fake.seedNotesListForActor('user_dl2')
+  it('merge: a recurring series on a source list is rebuilt on the canonical list', async () => {
+    const bearer = await loginAs('user_m2')
+    const canonicalId = fake.seedTaskListForActor('user_m2', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+    const src = fake.seedTaskListForActor('user_m2', {
+      name: 'Habits',
+      createdAt: '2026-02-01T00:00:00.000Z',
+    })
+    fake.seedSeriesWithOccurrence(src, { title: 'Stretch', freq: 'weekly', byDay: ['MO', 'WE'], count: 4 })
 
-    const delRes = await app.request(
-      `http://localhost/api/v1/ui/lists/${notesId}`,
-      { method: 'DELETE', headers: headers(bearer) },
-    )
-    expect(delRes.status).toBe(409)
-    const body = (await delRes.json()) as { error: { code: string; message: string } }
-    expect(body.error.code).toBe('list_not_deletable')
-    // The SDK deleteList must not have been called.
-    expect(fake.calls.some((c) => c.method === 'deleteList')).toBe(false)
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+
+    // The series now lives on the canonical list (rebuilt), and its occurrence
+    // items carry the NEW canonical series id. The source series is gone.
+    const canonSeries = fake.seriesSnapshot().filter((s) => s.listId === canonicalId)
+    expect(canonSeries).toHaveLength(1)
+    expect(canonSeries[0].title).toBe('Stretch')
+    expect(canonSeries[0].byDay).toEqual(['MO', 'WE'])
+    expect(fake.seriesSnapshot().filter((s) => s.listId === src)).toHaveLength(0)
+
+    const canonOccurrences = fake.itemsSnapshot().filter((i) => i.listId === canonicalId && i.seriesId)
+    expect(canonOccurrences.length).toBeGreaterThan(0)
+    expect(canonOccurrences.every((i) => i.seriesId === canonSeries[0].id)).toBe(true)
+    // Source list emptied of items + series.
+    expect(fake.itemsSnapshot().filter((i) => i.listId === src)).toHaveLength(0)
   })
 
-  it('DELETE /lists/:listId returns 404 when the listId is not owned by the actor', async () => {
-    const bearer = await loginAs('user_dl3')
-    // Seed a foreign list_group list the actor does not own.
-    const foreignId = fake.seedForeignPersonalList()
+  it('merge: differing custom-field defs are unified by (label, type) and item values remapped', async () => {
+    const bearer = await loginAs('user_m3')
+    const canonicalId = fake.seedTaskListForActor('user_m3', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+    const src = fake.seedTaskListForActor('user_m3', {
+      name: 'Project',
+      createdAt: '2026-02-01T00:00:00.000Z',
+    })
+    // Canonical already has an "Effort" number field; source has its own
+    // "Effort" (same label+type → reused) plus a unique "Tag" text field.
+    const canonEffort = fake.seedFieldDef(canonicalId, { label: 'Effort', fieldType: 'number' })
+    const srcEffort = fake.seedFieldDef(src, { label: 'Effort', fieldType: 'number' })
+    const srcTag = fake.seedFieldDef(src, { label: 'Tag', fieldType: 'text' })
+    fake.seedItem(src, {
+      title: 'Design',
+      customFields: { [srcEffort]: 5, [srcTag]: 'ui' },
+    })
 
-    const res = await app.request(
-      `http://localhost/api/v1/ui/lists/${foreignId}`,
-      { method: 'DELETE', headers: headers(bearer) },
-    )
-    expect(res.status).toBe(404)
-    expect(fake.calls.some((c) => c.method === 'deleteList')).toBe(false)
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+
+    // Canonical defs: the reused Effort (one only — not duplicated) + a new Tag.
+    const canonDefs = fake.fieldDefsSnapshot().filter((d) => d.listId === canonicalId)
+    const effortDefs = canonDefs.filter((d) => d.label === 'Effort' && d.fieldType === 'number')
+    expect(effortDefs).toHaveLength(1) // not duplicated
+    expect(effortDefs[0].id).toBe(canonEffort)
+    const tagDef = canonDefs.find((d) => d.label === 'Tag')
+    expect(tagDef).toBeTruthy()
+
+    // The moved item's customFields are remapped to the canonical def ids.
+    const moved = fake.itemsSnapshot().find((i) => i.listId === canonicalId && i.title === 'Design')
+    expect(moved?.customFields[canonEffort]).toBe(5)
+    expect(moved?.customFields[tagDef!.id]).toBe('ui')
+    // The stale source def ids must not leak into the canonical item.
+    expect(moved?.customFields[srcEffort]).toBeUndefined()
+    expect(moved?.customFields[srcTag]).toBeUndefined()
+  })
+
+  it('merge is idempotent: running GET /lists twice does not duplicate items', async () => {
+    const bearer = await loginAs('user_m4')
+    const canonicalId = fake.seedTaskListForActor('user_m4', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+    const src = fake.seedTaskListForActor('user_m4', {
+      name: 'Extra',
+      createdAt: '2026-02-01T00:00:00.000Z',
+    })
+    fake.seedItem(src, { title: 'A' })
+    fake.seedItem(src, { title: 'B' })
+
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    const afterFirst = fake.itemsSnapshot().filter((i) => i.listId === canonicalId).map((i) => i.title).sort()
+    expect(afterFirst).toEqual(['A', 'B'])
+
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+    const afterSecond = fake.itemsSnapshot().filter((i) => i.listId === canonicalId).map((i) => i.title).sort()
+    // No duplication on the second pass.
+    expect(afterSecond).toEqual(['A', 'B'])
+  })
+
+  it('merge: notes + shopping lists are never treated as task sources', async () => {
+    const bearer = await loginAs('user_m5')
+    const canonicalId = fake.seedTaskListForActor('user_m5', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+    // Seed a notes list (under the same legacy-named personal group) with an item.
+    const notesId = fake.seedNotesListForActor('user_m5')
+    fake.seedItem(notesId, { title: 'a private note' })
+
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+
+    // The note stays on the notes list; it is NOT folded into Tasks.
+    expect(fake.itemsSnapshot().filter((i) => i.listId === notesId)).toHaveLength(1)
+    expect(fake.itemsSnapshot().filter((i) => i.listId === canonicalId)).toHaveLength(0)
   })
 
   // --- RPL↔RPP separation (#531): no shared lists in Planner ----------

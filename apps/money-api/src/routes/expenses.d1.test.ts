@@ -214,6 +214,73 @@ describe('D1 integration — expenses + balances', () => {
     expect(peerBal.items).toEqual([{ user_id: owner, net_cents: -20 }])
   })
 
+  // Indivisible totals: equal-split sorts participants by userId asc, then
+  // largestRemainder hands the leftover penny to the lowest index. The userIds
+  // below are prefixed user_a / user_b / user_c so the allocation is
+  // deterministic regardless of timestamp. Balances are order-independent, so
+  // we assert against a {userId: net_cents} map.
+  it('splits an indivisible total via largest-remainder; payer absorbs the extra cent', async () => {
+    const ts = Date.now()
+    const owner = `user_a_${ts}_odd3_owner`
+    const p2 = `user_b_${ts}_odd3_p2`
+    const p3 = `user_c_${ts}_odd3_p3`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await setupLedger(ownerBearer, owner, p2)
+    await repos.ledgerMembers.add({
+      id: `lmm_${ts}_odd3_p3`,
+      ledgerId,
+      userId: p3,
+      role: 'member',
+    })
+
+    // Owner pays $1.00 split 3 ways → largestRemainder(100,[1,1,1]) = [34,33,33]
+    // to the sorted ids [owner(a), p2(b), p3(c)]. Owner (payer) takes 34, so the
+    // other two owe exactly 33 each — no pennies lost.
+    const res = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 100,
+      description: 'Dinner',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits: [{ userId: owner }, { userId: p2 }, { userId: p3 }],
+    })
+    expect(res.status).toBe(201)
+
+    const bal = (await (await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/balances`)).json()) as {
+      items: Array<{ user_id: string; net_cents: number }>
+    }
+    const byUser = Object.fromEntries(bal.items.map((i) => [i.user_id, i.net_cents]))
+    expect(byUser).toEqual({ [p2]: 33, [p3]: 33 })
+  })
+
+  it('gives the rounding cent to the lowest-sorted id, not the payer', async () => {
+    const ts = Date.now()
+    // 'a' < 'z' → `other` sorts first and receives the extra cent even though
+    // `payer` paid, proving the payer doesn't always get the rounding benefit.
+    const payer = `user_z_${ts}_odd2_payer`
+    const other = `user_a_${ts}_odd2_other`
+    const payerBearer = await loginAs(payer)
+    const ledgerId = await setupLedger(payerBearer, payer, other)
+
+    // Payer pays 99¢ split 2 ways → largestRemainder(99,[1,1]) = [50,49] to the
+    // sorted ids [other(a), payer(z)]. `other` owes the larger half (50).
+    const res = await req(payerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: payer,
+      totalCents: 99,
+      description: 'Cab',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits: [{ userId: payer }, { userId: other }],
+    })
+    expect(res.status).toBe(201)
+
+    const bal = (await (await req(payerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/balances`)).json()) as {
+      items: Array<{ user_id: string; net_cents: number }>
+    }
+    const byUser = Object.fromEntries(bal.items.map((i) => [i.user_id, i.net_cents]))
+    expect(byUser).toEqual({ [other]: 50 })
+  })
+
   it('patches description + spentAt (member+) and records activity', async () => {
     const owner = `user_${Date.now()}_pat_owner`
     const ownerBearer = await loginAs(owner)

@@ -93,3 +93,40 @@ describe('formatWhenShort', () => {
     expect(result).not.toBe('No date')
   })
 })
+
+// ── formatWhen allDay ─────────────────────────────────────────────────────────
+
+describe('formatWhen with allDay=true', () => {
+  it('returns date-only string (no time) for all-day start', () => {
+    const result = formatWhen('2026-06-12T09:30:00.000Z', null, true)
+    // Should not contain a time separator or AM/PM
+    expect(result).not.toBe('No date set')
+    // In an all-day context the output is a date-only string; verify it does
+    // not include a colon (time separator), which would indicate a time leak.
+    // This is a best-effort check valid for en-US locale and dateStyle:'medium'.
+    expect(typeof result).toBe('string')
+    expect(result.length).toBeGreaterThan(0)
+    expect(result).not.toMatch(/:/)
+  })
+
+  it('returns date range without time when both start and end supplied', () => {
+    const result = formatWhen('2026-06-12T09:30:00.000Z', '2026-06-14T09:30:00.000Z', true)
+    expect(result).toContain('–')
+  })
+})
+
+describe('formatWhenShort with allDay=true', () => {
+  it('returns date-only (no time) when allDay=true', () => {
+    const result = formatWhenShort('2026-06-12T09:30:00.000Z', true)
+    expect(result).not.toBe('No date')
+    expect(typeof result).toBe('string')
+    expect(result.length).toBeGreaterThan(0)
+  })
+
+  it('returns time-bearing string when allDay=false', () => {
+    const result = formatWhenShort('2026-06-12T09:30:00.000Z', false)
+    expect(result).not.toBe('No date')
+    // Time-bearing locale string includes a colon for HH:MM
+    expect(result).toMatch(/:/)
+  })
+})

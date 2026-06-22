@@ -5,11 +5,37 @@ import {
   eventInstantField,
   PatchPersonalEventSchema,
 } from '@rallypoint/events-shared'
+import { ulid } from 'ulid'
+import type { Context } from 'hono'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
 import { proxyEvents } from '../lib/sdk-error.js'
+import {
+  cancelEventNotification,
+  syncEventNotification,
+  type NotifiableEvent,
+} from '../lib/notifications.js'
+
+// Best-effort: keep a personal event's scheduled push notification in sync
+// with the write that just succeeded. A notification failure must never fail
+// the user's event write, so this swallows + logs errors.
+async function syncEventNotificationSafe(
+  c: Context<HonoApp>,
+  actor: string,
+  event: NotifiableEvent,
+): Promise<void> {
+  try {
+    await syncEventNotification(c.var.repos, actor, event, {
+      now: new Date(),
+      appUrl: c.var.env.PLANNER_UI_ORIGIN,
+      newId: () => `psn_${ulid()}`,
+    })
+  } catch (err) {
+    c.var.logger.warn({ err, eventId: event.id }, 'failed to sync event notification')
+  }
+}
 
 // Planner Personal Events BFF (slice 7). A thin proxy over the Events SDK's
 // authenticated /sdk/personal-events surface — planner-api owns no event or
@@ -85,8 +111,10 @@ export const eventsRoutes = new Hono<HonoApp>()
         ...(body.locationLabel != null ? { locationLabel: body.locationLabel } : {}),
         ...(body.ticketPlatform != null ? { ticketPlatform: body.ticketPlatform } : {}),
         ...(body.ticketAccountEmail != null ? { ticketAccountEmail: body.ticketAccountEmail } : {}),
+        ...(body.allDay !== undefined ? { allDay: body.allDay } : {}),
       }),
     )
+    await syncEventNotificationSafe(c, actor, created)
     return c.json(created, 201)
   })
 
@@ -110,8 +138,10 @@ export const eventsRoutes = new Hono<HonoApp>()
         ...(patch.locationLabel !== undefined ? { locationLabel: patch.locationLabel } : {}),
         ...(patch.ticketPlatform !== undefined ? { ticketPlatform: patch.ticketPlatform } : {}),
         ...(patch.ticketAccountEmail !== undefined ? { ticketAccountEmail: patch.ticketAccountEmail } : {}),
+        ...(patch.allDay !== undefined ? { allDay: patch.allDay } : {}),
       }),
     )
+    await syncEventNotificationSafe(c, actor, updated)
     return c.json(updated)
   })
 
@@ -119,7 +149,13 @@ export const eventsRoutes = new Hono<HonoApp>()
   .delete('/api/v1/ui/events/:eventId', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const events = c.var.services.eventsClient
-    await proxyEvents(() => events.deletePersonalEvent({ actor, id: c.req.param('eventId') }))
+    const eventId = c.req.param('eventId')
+    await proxyEvents(() => events.deletePersonalEvent({ actor, id: eventId }))
+    try {
+      await cancelEventNotification(c.var.repos, actor, eventId, new Date())
+    } catch (err) {
+      c.var.logger.warn({ err, eventId }, 'failed to cancel event notification')
+    }
     return c.body(null, 204)
   })
 

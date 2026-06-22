@@ -167,6 +167,7 @@ export class MemoryEventRepo implements EventRepo {
       ticketCount: 0,
       ticketPlatform: input.ticketPlatform ?? null,
       ticketAccountEmail: input.ticketAccountEmail ?? null,
+      allDay: input.allDay ?? null,
     }
     this.byId.set(rec.id, rec)
     return { ...rec }
@@ -234,6 +235,7 @@ export class MemoryEventRepo implements EventRepo {
     if (fields.features !== undefined) r.features = fields.features
     if (fields.ticketPlatform !== undefined) r.ticketPlatform = fields.ticketPlatform
     if (fields.ticketAccountEmail !== undefined) r.ticketAccountEmail = fields.ticketAccountEmail
+    if (fields.allDay !== undefined) r.allDay = fields.allDay
     r.updatedAt = new Date()
     return { ...r }
   }

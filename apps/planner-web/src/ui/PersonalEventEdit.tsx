@@ -8,7 +8,12 @@ import {
   type PersonalEventDto,
   type UpdatePersonalEventInput,
 } from '../lib/api.js'
-import { instantToLocalInput, toInstant } from '../lib/planner-helpers.js'
+import {
+  instantToLocalInput,
+  toInstant,
+  instantToDateInput,
+  dateInputToInstant,
+} from '../lib/planner-helpers.js'
 
 // Create / edit / delete form for a personal (planner) event, rendered inside
 // an Ink Drawer by the host (Events page / My Day / Upcoming sliders). With an
@@ -26,6 +31,8 @@ export interface EditablePersonalEvent {
   name: string
   startAt: string | null
   endAt: string | null
+  /** Issue #545: true = all-day event; false/undefined = timed. */
+  allDay?: boolean
   locationLabel: string | null
   ticketPlatform: string | null
   ticketAccountEmail: string | null
@@ -49,14 +56,45 @@ export function PersonalEventEdit({
 }) {
   const isCreate = event === null
   const [name, setName] = useState(event?.name ?? '')
-  const [start, setStart] = useState(instantToLocalInput(event?.startAt ?? null))
-  const [end, setEnd] = useState(instantToLocalInput(event?.endAt ?? null))
+  const [isAllDay, setIsAllDay] = useState(event?.allDay ?? false)
+  const [start, setStart] = useState(
+    (event?.allDay ?? false) ? instantToDateInput(event?.startAt ?? null) : instantToLocalInput(event?.startAt ?? null)
+  )
+  const [end, setEnd] = useState(
+    (event?.allDay ?? false) ? instantToDateInput(event?.endAt ?? null) : instantToLocalInput(event?.endAt ?? null)
+  )
   const [location, setLocation] = useState(event?.locationLabel ?? '')
   const [platform, setPlatform] = useState(event?.ticketPlatform ?? '')
   const [email, setEmail] = useState(event?.ticketAccountEmail ?? '')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  function handleAllDayChange(checked: boolean) {
+    setIsAllDay(checked)
+    // Convert the current start/end values between datetime-local and date formats
+    if (checked) {
+      // switching to all-day: strip the time portion
+      if (start) {
+        const instant = toInstant(start)
+        setStart(instant ? instantToDateInput(instant) : '')
+      }
+      if (end) {
+        const instant = toInstant(end)
+        setEnd(instant ? instantToDateInput(instant) : '')
+      }
+    } else {
+      // switching to timed: reparse as local midnight instant then back to datetime-local
+      if (start) {
+        const instant = dateInputToInstant(start)
+        setStart(instant ? instantToLocalInput(instant) : '')
+      }
+      if (end) {
+        const instant = dateInputToInstant(end)
+        setEnd(instant ? instantToLocalInput(instant) : '')
+      }
+    }
+  }
 
   async function save(e: FormEvent) {
     e.preventDefault()
@@ -66,12 +104,13 @@ export function PersonalEventEdit({
     setError(null)
     try {
       if (event === null) {
-        const startAt = toInstant(start)
-        const endAt = toInstant(end)
+        const startAt = isAllDay ? (dateInputToInstant(start) ?? undefined) : (toInstant(start) ?? undefined)
+        const endAt = isAllDay ? (dateInputToInstant(end) ?? undefined) : (toInstant(end) ?? undefined)
         const loc = location.trim()
         const acctEmail = email.trim()
         const created = await createPersonalEvent({
           name: nm,
+          allDay: isAllDay,
           ...(startAt ? { startAt } : {}),
           ...(endAt ? { endAt } : {}),
           ...(loc ? { locationLabel: loc } : {}),
@@ -84,8 +123,9 @@ export function PersonalEventEdit({
       }
       const patch: UpdatePersonalEventInput = {
         name: nm,
-        startAt: toInstant(start) ?? null,
-        endAt: toInstant(end) ?? null,
+        allDay: isAllDay,
+        startAt: isAllDay ? (dateInputToInstant(start) ?? null) : (toInstant(start) ?? null),
+        endAt: isAllDay ? (dateInputToInstant(end) ?? null) : (toInstant(end) ?? null),
         locationLabel: location.trim() || null,
         ticketPlatform: platform || null,
         ticketAccountEmail: email.trim() || null,
@@ -127,11 +167,20 @@ export function PersonalEventEdit({
           aria-label="Event name"
         />
       </label>
+      <label className="pl-fab-label" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={isAllDay}
+          onChange={(e) => handleAllDayChange(e.target.checked)}
+          aria-label="All day event"
+        />
+        All day
+      </label>
       <label className="pl-fab-label">
         Starts
         <input
           className="pl-input"
-          type="datetime-local"
+          type={isAllDay ? 'date' : 'datetime-local'}
           value={start}
           onChange={(e) => setStart(e.target.value)}
           aria-label="Event start"
@@ -141,7 +190,7 @@ export function PersonalEventEdit({
         Ends
         <input
           className="pl-input"
-          type="datetime-local"
+          type={isAllDay ? 'date' : 'datetime-local'}
           value={end}
           onChange={(e) => setEnd(e.target.value)}
           aria-label="Event end"
@@ -210,7 +259,7 @@ export function PersonalEventEdit({
         </button>
       ) : confirmDelete ? (
         <div className="pl-fab-form" style={{ gap: 8 }}>
-          <p className="pl-fab-hint">Delete this event? This can't be undone.</p>
+          <p className="pl-fab-hint">Delete this event? This can&apos;t be undone.</p>
           <button className="pl-btn hot" type="button" onClick={() => void remove()} disabled={busy}>
             Yes, delete
           </button>

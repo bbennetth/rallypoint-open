@@ -7,6 +7,7 @@ import {
   CreateFieldDefSchema,
   UpdateFieldDefSchema,
   UpdateListItemSchema,
+  MoveListItemSchema,
   CreateCommentSchema,
   buildCreateOptions,
   mergeUpdateOptions,
@@ -17,15 +18,18 @@ import {
   isCategory,
   CATEGORY_KEY,
   SYSTEM_MANAGED_LIST_TYPES,
+  type SystemManagedListType,
 } from '@rallypoint/lists-shared'
 import type { Context } from 'hono'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import type { GroupRecord, ListRecord, UpdateFieldDefInput, UpdateListItemInput } from '../repos/types.js'
+import { UniqueConstraintError } from '../repos/errors.js'
 import { readJsonBody } from './_body.js'
 import { serializeListDto, serializeListItemDto, serializeFieldDefDto, serializeCommentDto } from './sdk-lists.js'
 import { ensureStatuses, resolveStatus } from './_statuses.js'
 import { assertValidParent } from './_hierarchy.js'
+import { cleanCustomFieldsForTarget, resolveStatusIdForTarget } from './_move.js'
 
 // Authenticated SDK WRITE surface peer apps (planner-api) call
 // server-to-server to manage a user's personal task lists. Mounted under
@@ -147,17 +151,31 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
     await assertActorInScope(c, actor, body.scopeType, body.scopeId)
-    const list = await c.var.repos.lists.create({
-      id: `lst_${ulid()}`,
-      tenantId: TENANT,
-      scopeType: body.scopeType,
-      scopeId: body.scopeId,
-      listType: body.listType,
-      name: body.name,
-      visibility: body.visibility,
-      color: body.color ?? null,
-      createdBy: actor,
-    })
+    let list: ListRecord
+    try {
+      list = await c.var.repos.lists.create({
+        id: `lst_${ulid()}`,
+        tenantId: TENANT,
+        scopeType: body.scopeType,
+        scopeId: body.scopeId,
+        listType: body.listType,
+        name: body.name,
+        visibility: body.visibility,
+        color: body.color ?? null,
+        createdBy: actor,
+      })
+    } catch (err) {
+      // The lists_notes_folder_name_uq partial unique index (notes folders,
+      // #559) is the DB backstop for the name race: two concurrent same-name
+      // notes-folder creates both pass the Planner BFF pre-check, and the
+      // loser hits the index here. Map it to a 409 the BFF turns into
+      // folder_name_taken. Only notes lists carry this constraint, so other
+      // list types never reach this branch.
+      if (err instanceof UniqueConstraintError) {
+        throw errors.conflict('list_name_conflict', 'A list with that name already exists in this scope.')
+      }
+      throw err
+    }
     return c.json(serializeListDto(list), 201)
   })
   // --- soft-delete a list ------------------------------------------
@@ -168,7 +186,7 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
   .delete('/api/v1/sdk/lists/:listId', async (c) => {
     const actor = requireActor(c)
     const list = await loadListForActor(c, actor, c.req.param('listId'))
-    if (SYSTEM_MANAGED_LIST_TYPES.has(list.listType as 'shopping' | 'notes')) {
+    if (SYSTEM_MANAGED_LIST_TYPES.has(list.listType as SystemManagedListType)) {
       throw errors.conflict(
         'system_managed_list',
         'System-managed lists cannot be deleted.',
@@ -192,6 +210,17 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     // here — that would turn an intentional null back into 'medium'.
     const isTasks = list.listType === 'tasks'
 
+    // `chores` is tasks-shaped for the priority + due-date columns (recurring
+    // chore occurrences must carry a dueDate so they land on a calendar day),
+    // but it does NOT get the kanban status pipeline — only `tasks` resolves a
+    // statusId. So the priority/dueDate persistence keys off this wider flag
+    // while status resolution stays gated on isTasks. (#546)
+    const hasTaskScheduling = isTasks || list.listType === 'chores'
+    // `diary` entries carry a dueDate (the journal day) but NOT priority/status
+    // — they're standard-shaped otherwise. So dueDate persistence widens to
+    // this flag while priority stays gated on hasTaskScheduling. (Diary tab)
+    const carriesDueDate = hasTaskScheduling || list.listType === 'diary'
+
     // Strip the reserved `rp:category` key BEFORE validateCustomFields —
     // it is not a field-def id so the validator would reject it. It is
     // handled separately below (shopping auto-categorization).
@@ -211,13 +240,18 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     // (never a field-def id) AFTER validateCustomFields, so the unknown-key
     // rejection never fires. An explicit client-supplied category takes
     // precedence (the client passes it the same way, via update PATCH).
+    // When autoCategorize is false, skip keyword assignment entirely (the
+    // item will have no rp:category until the user manually sets one).
     const persistedFields: Record<string, unknown> = { ...cf.values }
     if (list.listType === 'shopping') {
       if (isCategory(clientCategory)) {
+        // Explicit client-supplied category always wins.
         persistedFields[CATEGORY_KEY] = clientCategory
-      } else {
+      } else if (body.autoCategorize !== false) {
+        // Auto-categorize by title (default behavior; skipped when opt-out).
         persistedFields[CATEGORY_KEY] = categorize(body.title)
       }
+      // autoCategorize === false with no explicit category → no rp:category set.
     }
 
     // Custom statuses (RPL v1.0.0): resolve + dual-write the same way the
@@ -260,8 +294,8 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       status: resolved.status,
       statusId: resolved.statusId,
       parentId: body.parentId ?? null,
-      priority: isTasks ? body.priority : null,
-      dueDate: isTasks && body.dueDate != null ? new Date(body.dueDate) : null,
+      priority: hasTaskScheduling ? body.priority : null,
+      dueDate: carriesDueDate && body.dueDate != null ? new Date(body.dueDate) : null,
       customFields: persistedFields,
       position: body.position,
       createdBy: actor,
@@ -292,6 +326,11 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
     }
 
     const isTasks = list.listType === 'tasks'
+    // chores are tasks-shaped for priority/dueDate (but not kanban status) —
+    // see hasTaskScheduling on the create path above. (#546)
+    const hasTaskScheduling = isTasks || list.listType === 'chores'
+    // diary entries carry a dueDate (the journal day) but no priority/status.
+    const carriesDueDate = hasTaskScheduling || list.listType === 'diary'
     const patch: UpdateListItemInput = {}
     if (data.title !== undefined) patch.title = data.title
     if (data.notes !== undefined) patch.notes = data.notes
@@ -307,8 +346,8 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       patch.statusId = resolved.statusId
       patch.status = resolved.status
     }
-    if (isTasks && data.priority !== undefined) patch.priority = data.priority
-    if (isTasks && data.dueDate !== undefined)
+    if (hasTaskScheduling && data.priority !== undefined) patch.priority = data.priority
+    if (carriesDueDate && data.dueDate !== undefined)
       patch.dueDate = data.dueDate === null ? null : new Date(data.dueDate)
     if (data.position !== undefined) patch.position = data.position
     // Sub-item parent (RPL v1.0.0). null detaches; a real parent is
@@ -407,6 +446,95 @@ export const sdkWritesRoutes = new Hono<HonoApp>()
       await c.var.repos.listLabels.setItemLabels(updated.id, sdkPatchLabelIds)
     }
     return c.json(serializeListItemDto(updated))
+  })
+  // --- move an item to another list --------------------------------
+  // The explicit cross-list move surface (the item PATCH route above keeps
+  // rejecting a differing listId — move is the deliberate, validated path).
+  // Backs Planner notes-folders (#549) but is generic: any peer app can move
+  // an item between two lists the actor can access.
+  //
+  // Validation order (each its own test):
+  //  1. actor authorized on the SOURCE list,
+  //  2. actor authorized on the TARGET list (also asserts target is live —
+  //     loadListForActor 404s a soft-deleted list),
+  //  3. target != source,
+  //  4. item live and belongs to :listId,
+  //  5. series-occurrence items (seriesId != null) rejected 422 — move the
+  //     series, not one materialized occurrence,
+  //  6. custom-field values whose def-id isn't live in the target are dropped
+  //     (rp:category dropped unless the target is a shopping list),
+  //  7. statusId cleared unless it's a live status of the target (legacy
+  //     `status` text is list-type-agnostic and stays).
+  // The repo (buildUpdateSet) re-appends position at the target's max+1 when
+  // listId changes and no explicit position is given.
+  .post('/api/v1/sdk/lists/:listId/items/:itemId/move', async (c) => {
+    const actor = requireActor(c)
+    const source = await loadListForActor(c, actor, c.req.param('listId'))
+    const parsed = MoveListItemSchema.safeParse(await readJsonBody(c))
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const target = await loadListForActor(c, actor, parsed.data.targetListId)
+    if (target.id === source.id) {
+      throw errors.validation({
+        issues: [{ path: ['targetListId'], message: 'Target list must differ from the source list.' }],
+      })
+    }
+    const itemId = c.req.param('itemId')
+    const item = await c.var.repos.listItems.findById(itemId)
+    if (!item || item.listId !== source.id || item.deletedAt) throw errors.itemNotFound()
+    if (item.seriesId !== null) {
+      throw errors.unprocessable(
+        'series_occurrence_immovable',
+        'A recurring-series occurrence cannot be moved on its own — move the series instead.',
+      )
+    }
+
+    // Clean the custom-field map for the target's live defs (rp:category kept
+    // only on a shopping target). Always write the cleaned map so stale keys
+    // never survive the move.
+    const targetDefs = await c.var.repos.fieldDefs.listForList(target.id)
+    const targetDefIds = new Set(targetDefs.map((d) => d.id))
+    const customFields = cleanCustomFieldsForTarget(
+      item.customFields,
+      targetDefIds,
+      target.listType === 'shopping',
+    )
+
+    // Clear statusId unless it's a live status of the target list.
+    const targetStatuses = await c.var.repos.listStatuses.listForList(target.id)
+    const targetLiveStatusIds = new Set(
+      targetStatuses.filter((s) => s.deletedAt === null).map((s) => s.id),
+    )
+    const statusId = resolveStatusIdForTarget(item.statusId, targetLiveStatusIds)
+
+    const updated = await c.var.repos.listItems.update(itemId, {
+      listId: target.id,
+      customFields,
+      statusId,
+    })
+    if (!updated) throw errors.itemNotFound()
+    return c.json(serializeListItemDto(updated))
+  })
+  // --- find an item by id within a scope ---------------------------
+  // Locate an item by id among ALL the actor's lists in a scope, without the
+  // caller fanning out a per-list items read (the N+1 the Planner notes
+  // PATCH/DELETE used to do — #559). Generic: any peer app can resolve an
+  // item to its parent list within a scope the actor is authorized for.
+  // Returns the live item DTO (which carries its listId) or 404. Mirrors the
+  // write surface's actor-scope authz: the actor must be a member of the
+  // scope, and the item's parent list must live in that exact scope (else
+  // 404, never leaking an item that belongs to another scope).
+  .get('/api/v1/sdk/scopes/:scopeType/:scopeId/items/:itemId', async (c) => {
+    const actor = requireActor(c)
+    const scopeType = c.req.param('scopeType')
+    const scopeId = c.req.param('scopeId')
+    await assertActorInScope(c, actor, scopeType, scopeId)
+    const item = await c.var.repos.listItems.findById(c.req.param('itemId'))
+    if (!item || item.deletedAt) throw errors.itemNotFound()
+    const list = await c.var.repos.lists.findById(item.listId)
+    if (!list || list.deletedAt || list.scopeType !== scopeType || list.scopeId !== scopeId) {
+      throw errors.itemNotFound()
+    }
+    return c.json(serializeListItemDto(item))
   })
   // --- soft-delete an item -----------------------------------------
   .delete('/api/v1/sdk/lists/:listId/items/:itemId', async (c) => {

@@ -38,6 +38,10 @@ export const events = sqliteTable(
     scopeType: text('scope_type').notNull().default('personal'),
     startAt: integer('start_at', { mode: 'timestamp_ms' }),
     endAt: integer('end_at', { mode: 'timestamp_ms' }),
+    // Issue #545: first-class all-day flag. NULL = not yet set (inference fallback);
+    // false (0) = timed event; true (1) = all-day event. Expand phase — contract
+    // (NOT NULL DEFAULT 0) deferred until inference rows are backfilled.
+    allDay: integer('all_day', { mode: 'boolean' }),
     // Slice 3b (ticket platform): optional metadata for personal events.
     // Both are nullable plaintext — no secrets, no FK.
     ticketPlatform: text('ticket_platform'),

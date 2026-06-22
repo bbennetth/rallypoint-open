@@ -15,6 +15,20 @@
       "when": 1749513600000,
       "tag": "0001_add_rate_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1781658325777,
+      "tag": "0002_wet_sprite",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1781665104294,
+      "tag": "0003_foamy_molten_man",
+      "breakpoints": true
     }
   ]
 }

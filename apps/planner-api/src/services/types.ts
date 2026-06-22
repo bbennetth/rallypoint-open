@@ -1,6 +1,7 @@
 import type { ListsClient } from '@rallypoint/lists-client'
 import type { EventsClient } from '@rallypoint/events-client'
 import type { UserBatchEntry } from '@rallypoint/id-client'
+import type { SendPushResult, WebPushSubscription } from '@rallypoint/web-push'
 
 // External-service contracts. planner-api reaches RPID over HTTP for
 // everything auth-related; these interfaces let routes depend on
@@ -65,6 +66,13 @@ export interface ProfilesClientService {
   lookup(userId: string): Promise<UserBatchEntry | null>
 }
 
+// Delivers one Web Push notification to one subscription, bound to the
+// planner's VAPID keys. Returns the push-service result so the caller can
+// reap a dead subscription (result.expired === true on 404/410).
+export interface WebPushService {
+  send(subscription: WebPushSubscription, payload: string): Promise<SendPushResult>
+}
+
 export interface Services {
   idClient: IdClientService
   rpidSso: RpidSsoService
@@ -82,4 +90,6 @@ export interface Services {
   // authenticated /sdk/personal-events surface to manage a user's personal
   // events + ticket attachments; it owns no event storage of its own.
   eventsClient: EventsClient
+  // Web Push delivery bound to the planner's VAPID keys (notifications cron).
+  webPush: WebPushService
 }

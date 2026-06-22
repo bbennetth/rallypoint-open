@@ -3,6 +3,7 @@ import { env as testEnv } from 'cloudflare:test'
 import type { Hono } from 'hono'
 import type { EventsClient, PersonalEventDto, UserEventDto } from '@rallypoint/events-client'
 import type { GroupDto, ListDto, ListItemDto, ListsClient } from '@rallypoint/lists-client'
+import { PERSONAL_GROUP_NAME_LEGACY } from '../lib/personal-scope.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
 import { buildD1Repos, createDb } from '../repos/d1/index.js'
@@ -24,7 +25,10 @@ const ISO = '2026-06-01T00:00:00.000Z'
 
 interface FakeLists {
   client: ListsClient
-  seedTask(actor: string, item: { id: string; title?: string; dueDate: string | null }): void
+  seedTask(
+    actor: string,
+    item: { id: string; title?: string; dueDate: string | null; seriesId?: string | null },
+  ): void
   /** Seed a list in a foreign (non-personal) group. Returns the list id. */
   seedForeignList(listId: string): string
   /** Seed a task item in a given (e.g. foreign) list. */
@@ -37,11 +41,13 @@ function makeFakeLists(): FakeLists {
   const itemsByList = new Map<string, ListItemDto[]>()
   // Maps actor → set of list ids flagged show_in_planner=true
   function ensureList(actor: string): string {
-    let group = groups.find((g) => g.createdBy === actor && g.name === 'My Tasks')
+    // Legacy name models the pre-migration rollout state; selectPersonalGroup
+    // accepts either name during the expand/contract window.
+    let group = groups.find((g) => g.createdBy === actor && g.name === PERSONAL_GROUP_NAME_LEGACY)
     if (!group) {
       group = {
         id: `grp_${actor}`,
-        name: 'My Tasks',
+        name: PERSONAL_GROUP_NAME_LEGACY,
         description: null,
         createdBy: actor,
         createdAt: ISO,
@@ -88,10 +94,13 @@ function makeFakeLists(): FakeLists {
         completed: false,
         completedAt: null,
         status: null,
+        statusId: null,
+        parentId: null,
         priority: null,
         dueDate: item.dueDate,
         position: items.length,
         customFields: {},
+        seriesId: item.seriesId ?? null,
         createdBy: actor,
         createdAt: ISO,
         updatedAt: ISO,
@@ -129,10 +138,13 @@ function makeFakeLists(): FakeLists {
         completed: false,
         completedAt: null,
         status: null,
+        statusId: null,
+        parentId: null,
         priority: null,
         dueDate: item.dueDate,
         position: items.length,
         customFields: {},
+        seriesId: null,
         createdBy: 'user_shared_owner',
         createdAt: ISO,
         updatedAt: ISO,
@@ -222,7 +234,7 @@ function makeFakeEvents(): FakeEvents {
 }
 
 type Item =
-  | { kind: 'task'; task: { id: string }; shared?: boolean }
+  | { kind: 'task'; task: { id: string; dueDate?: string | null }; shared?: boolean }
   | { kind: 'event'; event: { id: string } }
   | { kind: 'eventDay'; eventDay: { eventId: string; date: string; owned: boolean; shared?: boolean } }
 interface UpcomingResponse {
@@ -361,6 +373,25 @@ describe('D1 integration — Planner Upcoming BFF', () => {
     const body = (await res.json()) as UpcomingResponse
     expect(ids(body.dated)).toEqual(['t-today', 'e-mid', 't-future'])
     expect(ids(body.undated).sort()).toEqual(['e-undated', 't-undated'])
+  })
+
+  it('resolves a recurring item’s floating due into the request tz', async () => {
+    const bearer = await loginAs('user_tz')
+    // A future chore stamped at a floating 10:30 (UTC components = intended
+    // local time). Viewed from Pacific it must surface at 10:30 local (17:30Z),
+    // not the raw stamp (which would render as 03:30 in the Coming-up feed).
+    lists.seedTask('user_tz', {
+      id: 'chore',
+      seriesId: 'lse_chore',
+      dueDate: '2026-06-10T10:30:00.000Z',
+    })
+
+    const body = (await (
+      await get(bearer, 'date=2026-06-03&tz=America/Los_Angeles')
+    ).json()) as UpcomingResponse
+    const chore = body.dated.find((i) => i.kind === 'task' && i.task.id === 'chore')
+    expect(chore?.kind).toBe('task')
+    if (chore?.kind === 'task') expect(chore.task.dueDate).toBe('2026-06-10T17:30:00.000Z')
   })
 
   it('resolves the lower bound in the requested timezone', async () => {
