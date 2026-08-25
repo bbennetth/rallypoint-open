@@ -1,9 +1,10 @@
 import { ulid } from 'ulid'
-import type {
-  ListBundle,
-  ListImportResult,
-  ListItemBundle,
-  ScopeType,
+import {
+  parseBundleFieldDefOptions,
+  type ListBundle,
+  type ListImportResult,
+  type ListItemBundle,
+  type ScopeType,
 } from '@rallypoint/lists-shared'
 import {
   createCommentCore,
@@ -12,6 +13,7 @@ import {
   createListItemCore,
   createSeriesCore,
   listListsCore,
+  updateFieldDefCore,
   type ListsNotFound,
   type ListsRpcDeps,
   type Forbidden,
@@ -191,26 +193,109 @@ export async function importListBundleCore(
   result.listId = listId
 
   // --- field defs (matched by key) ------------------------------------
+  // Tracks, per SOURCE def key, the target def the item values will land on.
+  // Choices are carried because select values are stored as choice IDS, and
+  // choice ids are minted per list — a value can only cross lists by being
+  // translated through its choice's LABEL further down.
   const defs = await deps.repos.fieldDefs.listForList(listId)
-  const defIdByKey = new Map(defs.map((d) => [d.key, d.id]))
+  const targetDefByKey = new Map<string, TargetDef>(
+    defs.map((d) => [
+      d.key,
+      {
+        id: d.id,
+        fieldType: d.fieldType,
+        choices: parseBundleFieldDefOptions(d.options).choices ?? [],
+      },
+    ]),
+  )
   for (const def of bundle.fieldDefs) {
-    if (defIdByKey.has(def.key)) {
+    const sourceOptions = parseBundleFieldDefOptions(def.options)
+    const isSelect = def.fieldType === 'single_select' || def.fieldType === 'multi_select'
+    const existing = targetDefByKey.get(def.key)
+    if (existing) {
       result.fieldDefs.skipped++
+      // The def is already here (e.g. an auto-provisioned Mood/Category), but
+      // its choices were minted independently, so the source may carry labels
+      // this list has never seen — a user-added choice, say. Merge those in
+      // (mergeUpdateOptions preserves every existing choice) so their values
+      // survive the label translation below. A label the target archived is
+      // NOT re-added: absence from the active set is a choice the user made.
+      if (isSelect && existing.fieldType === def.fieldType) {
+        const knownLabels = new Set(existing.choices.map((c) => c.label))
+        const missing = (sourceOptions.choices ?? []).filter((c) => !knownLabels.has(c.label))
+        if (missing.length > 0) {
+          let merged = false
+          try {
+            const updated = await updateFieldDefCore(
+              actor,
+              listId,
+              existing.id,
+              {
+                choices: [
+                  // Echo existing choices by id (edited in place, order kept)…
+                  ...existing.choices.map(({ id, label, archived }) => ({
+                    id,
+                    label,
+                    ...(archived !== undefined ? { archived } : {}),
+                  })),
+                  // …then append the source-only labels as fresh choices.
+                  ...missing.map(({ label, color, archived }) => ({
+                    label,
+                    ...(color !== undefined ? { color } : {}),
+                    ...(archived !== undefined ? { archived } : {}),
+                  })),
+                ],
+              },
+              deps,
+            )
+            if (updated.kind === 'ok') {
+              existing.choices = parseBundleFieldDefOptions(updated.data.options).choices ?? []
+              merged = true
+            }
+          } catch {
+            // fall through to the warning
+          }
+          if (!merged) {
+            result.warnings.push({
+              code: 'field_def_merge_failed',
+              message: `Some choices of "${def.label}" could not be restored.`,
+            })
+          }
+        }
+      }
       continue
     }
-    const created = await createFieldDefCore(
-      actor,
-      listId,
-      {
-        label: def.label,
-        fieldType: def.fieldType as never,
-        ...(def.options != null ? { options: def.options as never } : {}),
-        required: def.required ?? false,
-        ...(def.defaultValue != null ? { defaultValue: def.defaultValue as never } : {}),
-      },
-      deps,
-    )
-    if (created.kind !== 'ok') {
+    let created: Awaited<ReturnType<typeof createFieldDefCore>> | null = null
+    try {
+      created = await createFieldDefCore(
+        actor,
+        listId,
+        {
+          label: def.label,
+          fieldType: def.fieldType as never,
+          // The create path mints fresh choice ids; only labels carry over.
+          ...(sourceOptions.choices
+            ? {
+                choices: sourceOptions.choices.map(({ label, color, archived }) => ({
+                  label,
+                  ...(color !== undefined ? { color } : {}),
+                  ...(archived !== undefined ? { archived } : {}),
+                })),
+              }
+            : {}),
+          ...(sourceOptions.multiline !== undefined ? { multiline: sourceOptions.multiline } : {}),
+          required: def.required ?? false,
+          // A select default is a SOURCE choice id, meaningless on this list;
+          // other types' defaults carry verbatim.
+          ...(!isSelect && def.defaultValue != null ? { defaultValue: def.defaultValue } : {}),
+          ...(def.position !== undefined ? { position: def.position } : {}),
+        },
+        deps,
+      )
+    } catch {
+      // handled as field_def_failed below
+    }
+    if (!created || created.kind !== 'ok') {
       result.warnings.push({
         code: 'field_def_failed',
         message: `Custom field "${def.label}" could not be restored.`,
@@ -219,8 +304,36 @@ export async function importListBundleCore(
     }
     // createFieldDefCore derives its own unique key from the label, so map the
     // SOURCE key onto whatever key/id it actually minted.
-    defIdByKey.set(def.key, created.data.id)
+    targetDefByKey.set(def.key, {
+      id: created.data.id,
+      fieldType: def.fieldType,
+      choices: parseBundleFieldDefOptions(created.data.options).choices ?? [],
+    })
     result.fieldDefs.created++
+  }
+
+  // Per-source-def translation for re-keying item custom fields: the target
+  // def id plus, for selects, source choice id → target choice id matched by
+  // label. Active target choices only — validateCustomFields rejects writes
+  // to archived choices, so values pointing at one drop (with a warning) in
+  // rekeyCustomFields rather than failing the item.
+  const translations = new Map<string, DefTranslation>()
+  for (const def of bundle.fieldDefs) {
+    const target = targetDefByKey.get(def.key)
+    if (!target) continue
+    let choiceIds: Map<string, string> | null = null
+    if (def.fieldType === 'single_select' || def.fieldType === 'multi_select') {
+      const targetIdByLabel = new Map<string, string>()
+      for (const c of target.choices) {
+        if (!c.archived && !targetIdByLabel.has(c.label)) targetIdByLabel.set(c.label, c.id)
+      }
+      choiceIds = new Map()
+      for (const c of parseBundleFieldDefOptions(def.options).choices ?? []) {
+        const t = targetIdByLabel.get(c.label)
+        if (t !== undefined) choiceIds.set(c.id, t)
+      }
+    }
+    translations.set(def.sourceId, { targetId: target.id, choiceIds })
   }
 
   // --- statuses + labels (matched by name) ----------------------------
@@ -282,26 +395,32 @@ export async function importListBundleCore(
       result.series.skipped++
       continue
     }
-    const created = await createSeriesCore(
-      actor,
-      listId,
-      {
-        title: s.title,
-        notes: s.notes ?? null,
-        assignedTo: s.assignedTo ?? null,
-        priority: (s.priority ?? null) as never,
-        freq: s.freq as never,
-        interval: s.interval,
-        byDay: (s.byDay ?? null) as never,
-        dtstart: s.dtstart,
-        until: s.until ?? null,
-        count: s.count ?? null,
-        timeOfDay: s.timeOfDay ?? null,
-        ref: s.ref,
-      } as never,
-      deps,
-    )
-    if (created.kind !== 'ok') {
+    let created: Awaited<ReturnType<typeof createSeriesCore>> | null = null
+    try {
+      created = await createSeriesCore(
+        actor,
+        listId,
+        {
+          title: s.title,
+          notes: s.notes ?? null,
+          assignedTo: s.assignedTo ?? null,
+          priority: (s.priority ?? null) as never,
+          freq: s.freq as never,
+          interval: s.interval,
+          byDay: (s.byDay ?? null) as never,
+          dtstart: s.dtstart,
+          until: s.until ?? null,
+          count: s.count ?? null,
+          timeOfDay: s.timeOfDay ?? null,
+          ref: s.ref,
+        } as never,
+        deps,
+      )
+    } catch {
+      // A throw (e.g. seriesRefTakenByDeleted) must not abandon the whole
+      // list; it degrades to the same warning a returned error does.
+    }
+    if (!created || created.kind !== 'ok') {
       result.warnings.push({
         code: 'series_failed',
         ref: s.ref,
@@ -326,42 +445,62 @@ export async function importListBundleCore(
   const created: { bundle: ListItemBundle; id: string; isNew: boolean }[] = []
 
   for (const item of bundle.items) {
-    const res = await createListItemCore(
-      actor,
-      listId,
-      {
-        title: item.title,
-        notes: item.notes ?? null,
-        assignedTo: item.assignedTo ?? null,
-        priority: (item.priority ?? null) as never,
-        dueDate: (item.dueDate ?? null) as never,
-        ref: item.ref,
-        ...(item.statusName && statusIdByName.has(item.statusName)
-          ? { statusId: statusIdByName.get(item.statusName)! }
-          : {}),
-        ...(item.labelNames?.length
-          ? {
-              labelIds: item.labelNames
-                .map((n) => labelIdByName.get(n))
-                .filter((id): id is string => typeof id === 'string'),
-            }
-          : {}),
-        // Re-key the custom-field map from the SOURCE list's def ids onto this
-        // list's. A value whose def did not come across is dropped rather than
-        // written under an id that means something else here.
-        ...(item.customFields
-          ? { customFields: rekeyCustomFields(item.customFields, bundle.fieldDefs, defIdByKey) }
-          : {}),
-      } as never,
-      deps,
-    )
-    if (res.kind !== 'ok') {
+    // Re-key the custom-field map from the SOURCE list's def ids onto this
+    // list's, translating select choice ids by label. A value whose def did
+    // not come across is dropped rather than written under an id that means
+    // something else here; a choice with no active counterpart drops too,
+    // with a warning, so one stale selection never sinks the entry.
+    let droppedChoices = false
+    let res: Awaited<ReturnType<typeof createListItemCore>> | null = null
+    try {
+      let customFields: Record<string, unknown> | undefined
+      if (item.customFields) {
+        const rekeyed = rekeyCustomFields(item.customFields, translations)
+        customFields = rekeyed.values
+        droppedChoices = rekeyed.droppedChoices
+      }
+      res = await createListItemCore(
+        actor,
+        listId,
+        {
+          title: item.title,
+          notes: item.notes ?? null,
+          assignedTo: item.assignedTo ?? null,
+          priority: (item.priority ?? null) as never,
+          dueDate: (item.dueDate ?? null) as never,
+          ref: item.ref,
+          ...(item.statusName && statusIdByName.has(item.statusName)
+            ? { statusId: statusIdByName.get(item.statusName)! }
+            : {}),
+          ...(item.labelNames?.length
+            ? {
+                labelIds: item.labelNames
+                  .map((n) => labelIdByName.get(n))
+                  .filter((id): id is string => typeof id === 'string'),
+              }
+            : {}),
+          ...(customFields ? { customFields } : {}),
+        } as never,
+        deps,
+      )
+    } catch {
+      // A throw (validation, itemRefTakenByDeleted, …) must not abandon the
+      // whole list; it degrades to the same warning a returned error does.
+    }
+    if (!res || res.kind !== 'ok') {
       result.warnings.push({
         code: 'item_failed',
         ref: item.ref,
         message: `"${item.title}" could not be restored.`,
       })
       continue
+    }
+    if (droppedChoices) {
+      result.warnings.push({
+        code: 'choice_unmapped',
+        ref: item.ref,
+        message: `"${item.title}" was restored without some of its selections.`,
+      })
     }
     // A ref repeated within the SAME bundle resolves to one row (the create
     // path replays it), so only the first occurrence counts as new — otherwise
@@ -421,17 +560,31 @@ export async function importListBundleCore(
   return { kind: 'ok', data: result }
 }
 
-/** Move a custom-field value map from the source list's def ids to this list's,
- *  matching on the def KEY that both sides carry. */
+/** A target-list field def an import lands values on, tracked by source key. */
+interface TargetDef {
+  id: string
+  fieldType: string
+  choices: { id: string; label: string; color?: string | undefined; archived?: boolean | undefined }[]
+}
+
+/** How one SOURCE def's values map onto the target list. `choiceIds` is set
+ *  only for select fields: source choice id → target choice id, joined on the
+ *  choice LABEL (ids are minted per list and never match across lists). */
+interface DefTranslation {
+  targetId: string
+  choiceIds: Map<string, string> | null
+}
+
+/** Move a custom-field value map from the source list's def ids to this
+ *  list's. Select values are translated choice-id-to-choice-id; a value whose
+ *  choice has no active counterpart on the target is dropped and reported via
+ *  `droppedChoices` (writing it would fail the whole item's validation). */
 function rekeyCustomFields(
   values: Record<string, unknown>,
-  sourceDefs: ListBundle['fieldDefs'],
-  defIdByKey: ReadonlyMap<string, string>,
-): Record<string, unknown> {
-  const keyBySourceId = new Map<string, string>()
-  for (const def of sourceDefs) keyBySourceId.set(def.sourceId, def.key)
-
+  translations: ReadonlyMap<string, DefTranslation>,
+): { values: Record<string, unknown>; droppedChoices: boolean } {
   const out: Record<string, unknown> = {}
+  let droppedChoices = false
   for (const [sourceId, value] of Object.entries(values)) {
     // System keys (the `rp:` namespace, e.g. the shopping category) are not
     // field-def ids and travel unchanged.
@@ -439,9 +592,26 @@ function rekeyCustomFields(
       out[sourceId] = value
       continue
     }
-    const key = keyBySourceId.get(sourceId)
-    const targetId = key ? defIdByKey.get(key) : undefined
-    if (targetId) out[targetId] = value
+    const t = translations.get(sourceId)
+    if (!t) continue
+    if (t.choiceIds === null) {
+      out[t.targetId] = value
+      continue
+    }
+    if (typeof value === 'string') {
+      const mapped = t.choiceIds.get(value)
+      if (mapped !== undefined) out[t.targetId] = mapped
+      else droppedChoices = true
+    } else if (Array.isArray(value)) {
+      const mapped = value
+        .map((v) => (typeof v === 'string' ? t.choiceIds!.get(v) : undefined))
+        .filter((v): v is string => v !== undefined)
+      if (mapped.length > 0) out[t.targetId] = mapped
+      if (mapped.length < value.length) droppedChoices = true
+    } else {
+      // Not a shape a select value can take; dropping beats failing the item.
+      droppedChoices = true
+    }
   }
-  return out
+  return { values: out, droppedChoices }
 }

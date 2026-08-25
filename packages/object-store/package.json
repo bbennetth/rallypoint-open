@@ -16,7 +16,7 @@
     "test": "vitest run --config vitest.workers.config.ts"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^4.20260606.1",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0"

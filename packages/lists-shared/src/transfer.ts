@@ -46,6 +46,33 @@ export const listFieldDefBundleSchema = z.object({
   position: z.number().int().optional(),
 })
 
+// The subset of a field def's options blob that import understands. The
+// bundle field itself stays `unknown` so archives written before (or after)
+// this shape still parse; anything unreadable degrades to `{}`, which imports
+// the def without choices rather than failing the list.
+export const fieldDefOptionsBundleSchema = z.object({
+  choices: z
+    .array(
+      z.object({
+        id: shortText,
+        label: shortText,
+        color: shortText.optional(),
+        archived: z.boolean().optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
+  multiline: z.boolean().optional(),
+})
+
+export type FieldDefOptionsBundle = z.infer<typeof fieldDefOptionsBundleSchema>
+
+/** Narrow a bundle def's `options: unknown` to the shape import can use. */
+export function parseBundleFieldDefOptions(options: unknown): FieldDefOptionsBundle {
+  const parsed = fieldDefOptionsBundleSchema.safeParse(options ?? {})
+  return parsed.success ? parsed.data : {}
+}
+
 export const listStatusBundleSchema = z.object({
   name: shortText,
   color: shortText.nullable().optional(),

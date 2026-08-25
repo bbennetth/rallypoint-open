@@ -734,6 +734,17 @@ export async function deleteListCore(
   return { kind: 'ok', data: true }
 }
 
+// Which list types persist a due date on their items. Tasks/chores schedule
+// with it; diary and braindump use it as the entry's capture day.
+function listTypeCarriesDueDate(listType: string): boolean {
+  return (
+    listType === 'tasks' ||
+    listType === 'chores' ||
+    listType === 'diary' ||
+    listType === 'braindump'
+  )
+}
+
 export interface CreateListItemInputCore extends CreateListItemInput {
   statusId?: string | null | undefined
   status?: TaskStatus | null | undefined
@@ -780,7 +791,7 @@ export async function createListItemCore(
 
   const isTasks = list.listType === 'tasks'
   const hasTaskScheduling = isTasks || list.listType === 'chores'
-  const carriesDueDate = hasTaskScheduling || list.listType === 'diary'
+  const carriesDueDate = listTypeCarriesDueDate(list.listType)
 
   const rawCf = input.customFields ?? {}
   const clientCategory = rawCf[CATEGORY_KEY]
@@ -904,7 +915,7 @@ export async function updateListItemCore(
 
   const isTasks = list.listType === 'tasks'
   const hasTaskScheduling = isTasks || list.listType === 'chores'
-  const carriesDueDate = hasTaskScheduling || list.listType === 'diary'
+  const carriesDueDate = listTypeCarriesDueDate(list.listType)
   const patch: UpdateListItemInput = {}
   if (data.title !== undefined) patch.title = data.title
   if (data.notes !== undefined) patch.notes = data.notes
@@ -1088,6 +1099,7 @@ export interface CreateFieldDefInputCore {
   choices?: SelectChoiceInput[] | undefined
   multiline?: boolean | undefined
   required: boolean
+  defaultValue?: unknown
   position?: number | undefined
 }
 export async function createFieldDefCore(
@@ -1117,6 +1129,7 @@ export async function createFieldDefCore(
     fieldType: input.fieldType,
     options,
     required: input.required,
+    ...(input.defaultValue !== undefined ? { defaultValue: input.defaultValue } : {}),
     ...(input.position !== undefined ? { position: input.position } : {}),
     createdBy: actor,
   })

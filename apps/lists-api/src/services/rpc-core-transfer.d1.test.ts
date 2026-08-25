@@ -270,6 +270,233 @@ describe('D1 integration — list transfer bundle', () => {
     expect(r.kind).toBe('list_not_found')
   })
 
+  // --- select custom fields (the Diary/Brain Dump restore path) ----------
+  // Select values are stored as choice IDS, and choice ids are minted per
+  // list — so restoring them depends on (a) the choices being re-created at
+  // all and (b) each value being translated to the target's id by label.
+
+  type ChoiceList = { id: string; label: string; archived?: boolean }[]
+  const choicesOf = (options: unknown): ChoiceList =>
+    ((options as { choices?: ChoiceList })?.choices ?? [])
+
+  async function makeTypedList(actor: string, name: string, listType: string): Promise<string> {
+    const r = await createListCore(
+      actor,
+      { ...scopeOf(actor), listType: listType as never, name, visibility: 'all' },
+      deps,
+    )
+    if (r.kind !== 'ok') throw new Error(`createListCore: ${r.kind}`)
+    return r.data.id
+  }
+
+  async function makeMoodList(actor: string): Promise<{ listId: string; defId: string; choices: ChoiceList }> {
+    const listId = await makeTypedList(actor, 'Diary', 'diary')
+    const def = await createFieldDefCore(
+      actor,
+      listId,
+      {
+        label: 'Mood',
+        fieldType: 'single_select',
+        choices: [{ label: '😐 Okay' }, { label: '🙂 Good' }],
+        required: false,
+      },
+      deps,
+    )
+    if (def.kind !== 'ok') throw new Error('field def create failed')
+    return { listId, defId: def.data.id, choices: choicesOf(def.data.options) }
+  }
+
+  it('restores select choices and translates values into a fresh scope', async () => {
+    const src = nextActor('ssrc')
+    const { listId, defId, choices } = await makeMoodList(src)
+    const okay = choices.find((c) => c.label === '😐 Okay')!
+    await addItem(src, listId, {
+      title: 'Mon, Jun 15',
+      ref: 'ref_mood',
+      dueDate: '2026-06-15T00:00:00.000Z',
+      customFields: { [defId]: okay.id },
+    })
+
+    const exported = await exportListBundleCore(src, listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+
+    const dst = nextActor('sdst')
+    const imported = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (imported.kind !== 'ok') throw new Error('import failed')
+    expect(imported.data.warnings).toEqual([])
+    expect(imported.data.items).toEqual({ created: 1, skipped: 0 })
+
+    const defs = await deps.repos.fieldDefs.listForList(imported.data.listId)
+    const targetDef = defs.find((d) => d.label === 'Mood')!
+    const targetChoices = choicesOf(targetDef.options)
+    // Choices came across (by label), under freshly minted ids.
+    expect(targetChoices.map((c) => c.label).sort()).toEqual(['😐 Okay', '🙂 Good'])
+    expect(targetChoices.every((c) => !choices.some((s) => s.id === c.id))).toBe(true)
+
+    const after = await itemsOf(dst, imported.data.listId)
+    const item = after.find((i) => i.ref === 'ref_mood')!
+    const targetOkay = targetChoices.find((c) => c.label === '😐 Okay')!
+    expect(item.customFields[targetDef.id]).toBe(targetOkay.id)
+    // Diary entries keep their capture day.
+    expect(item.dueDate).not.toBeNull()
+  })
+
+  it('translates select values onto a pre-provisioned target def', async () => {
+    // The auto-provisioned case: the target already has a same-key def whose
+    // choice ids were minted independently. Values must land on the TARGET's
+    // ids; no duplicate choices may be added for labels both sides share.
+    const src = nextActor('tsrc')
+    const source = await makeMoodList(src)
+    const good = source.choices.find((c) => c.label === '🙂 Good')!
+    await addItem(src, source.listId, {
+      title: 'Entry',
+      ref: 'ref_pre',
+      customFields: { [source.defId]: good.id },
+    })
+    const exported = await exportListBundleCore(src, source.listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+
+    const dst = nextActor('tdst')
+    const target = await makeMoodList(dst)
+    const imported = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (imported.kind !== 'ok') throw new Error('import failed')
+    expect(imported.data.warnings).toEqual([])
+    expect(imported.data.listId).toBe(target.listId)
+    expect(imported.data.fieldDefs).toEqual({ created: 0, skipped: 1 })
+
+    const defs = await deps.repos.fieldDefs.listForList(target.listId)
+    const targetChoices = choicesOf(defs.find((d) => d.label === 'Mood')!.options)
+    expect(targetChoices).toHaveLength(2)
+
+    const after = await itemsOf(dst, target.listId)
+    const targetGood = targetChoices.find((c) => c.label === '🙂 Good')!
+    expect(after.find((i) => i.ref === 'ref_pre')!.customFields[target.defId]).toBe(targetGood.id)
+  })
+
+  it('merges source-only choice labels into an existing def, once', async () => {
+    const src = nextActor('msrc')
+    const listId = await makeTypedList(src, 'Diary', 'diary')
+    const def = await createFieldDefCore(
+      src,
+      listId,
+      {
+        label: 'Mood',
+        fieldType: 'single_select',
+        choices: [{ label: '😐 Okay' }, { label: '✨ Custom' }],
+        required: false,
+      },
+      deps,
+    )
+    if (def.kind !== 'ok') throw new Error('field def create failed')
+    const custom = choicesOf(def.data.options).find((c) => c.label === '✨ Custom')!
+    await addItem(src, listId, {
+      title: 'Entry',
+      ref: 'ref_merge',
+      customFields: { [def.data.id]: custom.id },
+    })
+    const exported = await exportListBundleCore(src, listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+
+    // Target def knows 'Okay' but not 'Custom'.
+    const dst = nextActor('mdst')
+    const target = await makeMoodList(dst)
+
+    const first = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (first.kind !== 'ok') throw new Error('import failed')
+    expect(first.data.warnings).toEqual([])
+
+    const defsAfter = await deps.repos.fieldDefs.listForList(target.listId)
+    const mergedChoices = choicesOf(defsAfter.find((d) => d.label === 'Mood')!.options)
+    expect(mergedChoices.map((c) => c.label).sort()).toEqual(['✨ Custom', '😐 Okay', '🙂 Good'])
+
+    const after = await itemsOf(dst, target.listId)
+    const targetCustom = mergedChoices.find((c) => c.label === '✨ Custom')!
+    expect(after.find((i) => i.ref === 'ref_merge')!.customFields[target.defId]).toBe(targetCustom.id)
+
+    // Idempotent: a re-run adds no duplicate choices.
+    const second = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (second.kind !== 'ok') throw new Error('second import failed')
+    const defsAgain = await deps.repos.fieldDefs.listForList(target.listId)
+    expect(choicesOf(defsAgain.find((d) => d.label === 'Mood')!.options)).toHaveLength(3)
+  })
+
+  it('drops an unmappable choice value with a warning instead of failing the item', async () => {
+    const src = nextActor('usrc')
+    const { listId, defId, choices } = await makeMoodList(src)
+    await addItem(src, listId, {
+      title: 'Entry',
+      ref: 'ref_unmap',
+      customFields: { [defId]: choices[0]!.id },
+    })
+    const exported = await exportListBundleCore(src, listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+    // Hand-craft a value pointing at a choice id the bundle's def never had.
+    const bundle = {
+      ...exported.data,
+      items: exported.data.items.map((i) =>
+        i.ref === 'ref_unmap' ? { ...i, customFields: { [defId]: 'opt_never_existed' } } : i,
+      ),
+    }
+
+    const dst = nextActor('udst')
+    const imported = await importListBundleCore(dst, scopeOf(dst), bundle, deps)
+    if (imported.kind !== 'ok') throw new Error('import failed')
+    expect(imported.data.items).toEqual({ created: 1, skipped: 0 })
+    expect(imported.data.warnings).toEqual([
+      { code: 'choice_unmapped', ref: 'ref_unmap', message: expect.stringContaining('selections') },
+    ])
+
+    const after = await itemsOf(dst, imported.data.listId)
+    const targetDefs = await deps.repos.fieldDefs.listForList(imported.data.listId)
+    const targetDefId = targetDefs.find((d) => d.label === 'Mood')!.id
+    expect(after.find((i) => i.ref === 'ref_unmap')!.customFields[targetDefId]).toBeUndefined()
+  })
+
+  it('downgrades an item-level throw to a warning and imports the rest', async () => {
+    const src = nextActor('esrc')
+    const listId = await makeList(src, 'Throwing list')
+    await addItem(src, listId, { title: 'Poisoned', ref: 'ref_poison' })
+    await addItem(src, listId, { title: 'Healthy', ref: 'ref_healthy' })
+    const exported = await exportListBundleCore(src, listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+
+    // A soft-deleted row holding the same ref makes createListItemCore THROW
+    // (itemRefTakenByDeleted) — before the containment fix this abandoned the
+    // whole list as "could not be restored".
+    const dst = nextActor('edst')
+    const dstListId = await makeList(dst, 'Throwing list')
+    const doomed = await addItem(dst, dstListId, { title: 'Poisoned', ref: 'ref_poison' })
+    await deps.repos.listItems.softDelete(doomed, new Date())
+
+    const imported = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (imported.kind !== 'ok') throw new Error('import failed')
+    expect(imported.data.warnings).toEqual([
+      { code: 'item_failed', ref: 'ref_poison', message: '"Poisoned" could not be restored.' },
+    ])
+    const after = await itemsOf(dst, dstListId)
+    expect(after.map((i) => i.title)).toEqual(['Healthy'])
+  })
+
+  it('roundtrips a braindump entry with its capture day', async () => {
+    const src = nextActor('bsrc')
+    const listId = await makeTypedList(src, 'Brain Dump', 'braindump')
+    await addItem(src, listId, {
+      title: 'A thought',
+      ref: 'ref_dump',
+      dueDate: '2026-08-01T00:00:00.000Z',
+    })
+    const exported = await exportListBundleCore(src, listId, deps)
+    if (exported.kind !== 'ok') throw new Error('export failed')
+    expect(exported.data.items[0]!.dueDate).toBe('2026-08-01T00:00:00.000Z')
+
+    const dst = nextActor('bdst')
+    const imported = await importListBundleCore(dst, scopeOf(dst), exported.data, deps)
+    if (imported.kind !== 'ok') throw new Error('import failed')
+    expect(imported.data.warnings).toEqual([])
+    const after = await itemsOf(dst, imported.data.listId)
+    expect(after[0]!.dueDate).not.toBeNull()
+  })
+
   it('leaves the source list untouched', async () => {
     const src = nextActor('ksrc')
     const listId = await makeList(src, 'Source list')

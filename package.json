@@ -79,7 +79,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^22.10.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
@@ -93,6 +93,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0",
-    "wrangler": "^4.105.0"
+    "wrangler": "^4.124.0"
   }
 }
