@@ -134,6 +134,7 @@ describe('D1 integration — SSO exchange + revocation cascade', () => {
         `${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       ].join('; '),
       'x-rp-csrf': CSRF,
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -145,6 +146,7 @@ describe('D1 integration — SSO exchange + revocation cascade', () => {
       ].join('; '),
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -397,6 +399,7 @@ describe('D1 integration — SSO exchange + revocation cascade', () => {
     return {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${csrfCookiePair()}`,
       'x-rp-csrf': CSRF,
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 

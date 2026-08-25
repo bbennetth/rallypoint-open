@@ -1,4 +1,3 @@
-import { ulid } from 'ulid'
 import {
   DEFAULT_STATUS_SEEDS,
   defaultStatusForCategory,
@@ -15,8 +14,17 @@ const TENANT = 'rallypoint'
 // Lazily seed the default status set the first time a list's statuses are
 // needed (no migration backfill — D1 can't mint ULIDs in pure SQL).
 // Returns the list's live statuses, seeding the three defaults when empty.
-// A concurrent double-seed is benign: category resolution always takes the
-// lowest-position match, so duplicates just sort after the originals.
+//
+// Audit E2 #11: seed ids are DETERMINISTIC (derived from listId + category)
+// so two concurrent first-readers mint the same row ids and the second
+// INSERT collides on the primary key — INSERT OR IGNORE in seedDefaults
+// drops the duplicate silently. The previous impl minted fresh ULIDs per
+// call, so a concurrent double-seed produced 6 rows instead of 3, with
+// duplicated category/name pairs.
+function seedIdFor(listId: string, category: string): string {
+  return `lst_seed_${listId}_${category}`
+}
+
 export async function ensureStatuses(
   c: Context<HonoApp>,
   listId: string,
@@ -29,7 +37,7 @@ export async function ensureStatuses(
     TENANT,
     actor,
     DEFAULT_STATUS_SEEDS.map((s) => ({
-      id: `lst_${ulid()}`,
+      id: seedIdFor(listId, s.category),
       name: s.name,
       color: s.color,
       category: s.category,

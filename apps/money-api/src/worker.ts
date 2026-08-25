@@ -1,10 +1,13 @@
+/// <reference types="@cloudflare/workers-types" />
 import type {
   D1Database,
   DurableObjectNamespace,
   ExecutionContext,
   Fetcher,
   R2Bucket,
+  Service,
 } from '@cloudflare/workers-types'
+import type { IdRPC } from '@rallypoint/id-api'
 import {
   createDoRealtimeBus,
   type RealtimeBus,
@@ -12,7 +15,7 @@ import {
 } from '@rallypoint/realtime'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
-import { buildLogger, type Logger } from './logger.js'
+import { buildLoggerWithFlush, type Logger } from './logger.js'
 import { buildD1Repos, createDb } from './repos/d1/index.js'
 import { buildServices } from './services/index.js'
 import type { Repos } from './repos/types.js'
@@ -38,22 +41,21 @@ import type { Services } from './services/types.js'
 // money has no background pruner, so (unlike id-api) there is no
 // `scheduled` handler — just `fetch`.
 
-interface WorkerEnv {
+export interface WorkerEnv {
   DB: D1Database
   HUB: DurableObjectNamespace
   // R2 bucket binding for receipt object storage (#409).
   OBJECT_STORE: R2Bucket
   ASSETS?: Fetcher
-  // Cloudflare service binding to id-api (wrangler.toml [[env.<env>.services]]
-  // RPID -> rallypoint-id-<env>). Present only in deployed envs; absent in
-  // local `wrangler dev`, where buildServices falls back to global fetch.
-  RPID?: Fetcher
+  // Typed RPC binding to id-api's IdRPC entrypoint (PR 2 of feat/rpc-bindings).
+  RPID?: Service<IdRPC>
   [key: string]: unknown
 }
 
 interface Deps {
   env: Env
   logger: Logger
+  flushLogs: () => Promise<void>
   repos: Repos
   services: Services
   realtime: RealtimeBus
@@ -66,7 +68,7 @@ interface Deps {
 let deps: Deps | null = null
 let app: ReturnType<typeof buildApp> | null = null
 
-function ensureDeps(env: WorkerEnv): Deps {
+export function ensureDeps(env: WorkerEnv): Deps {
   if (deps) return deps
   // parseEnv reads string vars/secrets; the D1/HUB/ASSETS bindings are
   // objects, so feed it only the string-valued keys.
@@ -75,18 +77,19 @@ function ensureDeps(env: WorkerEnv): Deps {
     if (typeof v === 'string') vars[k] = v
   }
   const parsed = parseEnv(vars as NodeJS.ProcessEnv)
-  const logger = buildLogger(parsed)
+  const { logger, flushLogs } = buildLoggerWithFlush(parsed)
   // A DurableObjectNamespace satisfies the structural RealtimeHubNamespace
   // (idFromName + get); see do-bus.ts.
   const hub = env.HUB as unknown as RealtimeHubNamespace
-  // Bind the service-binding fetcher when present (deployed envs); else
-  // undefined so buildServices uses the global fetch (local dev).
-  const rpidFetch = env.RPID ? (env.RPID.fetch.bind(env.RPID) as unknown as typeof fetch) : undefined
   deps = {
     env: parsed,
     logger,
+    flushLogs,
     repos: buildD1Repos(createDb(env.DB)),
-    services: buildServices(parsed, { rpidFetch, objectStore: env.OBJECT_STORE }),
+    services: buildServices(parsed, {
+      objectStore: env.OBJECT_STORE,
+      ...(env.RPID ? { rpid: env.RPID } : {}),
+    }),
     realtime: createDoRealtimeBus({
       hub,
       onError: (err) => logger.warn({ err }, 'realtime publish failed'),
@@ -103,6 +106,7 @@ export default {
       app = buildApp({
         env: d.env,
         logger: d.logger,
+        flushLogs: d.flushLogs,
         repos: d.repos,
         services: d.services,
         realtime: d.realtime,
@@ -117,3 +121,7 @@ export default {
 // entry so wrangler can bind the HUB namespace to it (wrangler.toml
 // [[durable_objects.bindings]] + [[migrations]] new_classes).
 export { RealtimeHub } from '@rallypoint/realtime'
+
+// Named WorkerEntrypoint exposing the cross-Worker SDK surface as typed
+// RPC methods (PR 1 of feat/rpc-bindings). See ./rpc.ts.
+export { MoneyRPC } from './rpc.js'

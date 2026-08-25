@@ -16,6 +16,7 @@ import type {
   UpdateListItemSeriesInput,
 } from '../types.js'
 import type { Db } from './db.js'
+import { mapUniqueViolation } from './_errors.js'
 
 type Stmt = BatchItem<'sqlite'>
 
@@ -41,6 +42,7 @@ function rowToRecord(row: typeof listItemSeries.$inferSelect): ListItemSeriesRec
     until: row.until,
     count: row.count,
     timeOfDay: row.timeOfDay,
+    ref: row.ref ?? null,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -95,6 +97,7 @@ export class D1ListItemSeriesRepo implements ListItemSeriesRepo {
         until: input.until ?? null,
         count: input.count ?? null,
         timeOfDay: input.timeOfDay ?? null,
+        ref: input.ref ?? null,
         createdBy: actor,
       })
       .returning() as Stmt
@@ -118,10 +121,16 @@ export class D1ListItemSeriesRepo implements ListItemSeriesRepo {
     )
 
     const stmts: [Stmt, ...Stmt[]] = [insertSeries, ...occurrenceInserts]
-    const results = await this.db.batch(stmts)
-
-    const seriesRows = results[0] as (typeof listItemSeries.$inferSelect)[]
-    return rowToRecord(seriesRows[0]!)
+    try {
+      const results = await this.db.batch(stmts)
+      const seriesRows = results[0] as (typeof listItemSeries.$inferSelect)[]
+      return rowToRecord(seriesRows[0]!)
+    } catch (err) {
+      // Surface the actual violated constraint rather than hardcoding the ref
+      // index; the caller re-finds by ref and rethrows if absent, so any other
+      // future unique violation passes through correctly.
+      throw mapUniqueViolation(err)
+    }
   }
 
   async findById(id: string): Promise<ListItemSeriesRecord | null> {
@@ -129,6 +138,18 @@ export class D1ListItemSeriesRepo implements ListItemSeriesRepo {
       .select()
       .from(listItemSeries)
       .where(eq(listItemSeries.id, id))
+      .limit(1)
+    return rows[0] ? rowToRecord(rows[0]) : null
+  }
+
+  // Idempotent-create lookup (offline create-retry dedup). Spans
+  // soft-deleted rows — the partial-unique index does too, so a
+  // tombstoned series' ref is never silently reusable.
+  async findByListAndRef(listId: string, ref: string): Promise<ListItemSeriesRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(listItemSeries)
+      .where(and(eq(listItemSeries.listId, listId), eq(listItemSeries.ref, ref)))
       .limit(1)
     return rows[0] ? rowToRecord(rows[0]) : null
   }

@@ -88,6 +88,7 @@ describe('D1 integration — SDK public events', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -316,5 +317,72 @@ describe('D1 integration — SDK public events', () => {
     await enablePublicPage(bearer, id, { enabled: true })
     const res = await publicReq('GET', `/api/v1/sdk/events/${id}/background-image`)
     expect(res.status).toBe(404)
+  })
+
+  // --- audit 1.1: theme keys must stay in the event's R2 namespace ---
+
+  it('public background-image route streams bytes for an event-scoped key', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bgok`)
+    const { id, slug } = await createEvent(bearer, 'BG Event', 'public')
+    const key = `events/${id}/bg/01TEST.png`
+    await (env.OBJECT_STORE as unknown as R2Bucket).put(key, PNG, {
+      httpMetadata: { contentType: 'image/png' },
+    })
+    await enablePublicPage(bearer, id, {
+      enabled: true,
+      theme: { background_image_key: key },
+    })
+
+    const img = await publicReq('GET', `/api/v1/sdk/events/${id}/background-image`)
+    expect(img.status).toBe(200)
+    expect(new Uint8Array(await img.arrayBuffer())).toEqual(PNG)
+
+    const json = await publicReq('GET', `/api/v1/sdk/events/${slug}`)
+    const body = (await json.json()) as { theme: { backgroundImageUrl: string | null } }
+    expect(body.theme.backgroundImageUrl).toContain(`/api/v1/sdk/events/${id}/background-image`)
+  })
+
+  it('PATCH rejects theme keys scoped outside the event', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bgbad`)
+    const { id } = await createEvent(bearer, 'BG Reject Event', 'public')
+    const { id: otherId } = await createEvent(bearer, 'BG Victim Event', 'public')
+
+    for (const badKey of [
+      `events/${otherId}/bg/steal.png`, // another event's namespace
+      `event-maps/${id}/some-map.png`, // wrong namespace entirely
+      'arbitrary/backup.sql',
+    ]) {
+      const res = await authedReq(bearer, 'PATCH', `/api/v1/ui/events/${id}`, {
+        publicPageConfig: { enabled: true, theme: { background_image_key: badKey } },
+      })
+      expect(res.status).toBe(400)
+      const icon = await authedReq(bearer, 'PATCH', `/api/v1/ui/events/${id}`, {
+        publicPageConfig: { enabled: true, theme: { icon_image_key: badKey } },
+      })
+      expect(icon.status).toBe(400)
+    }
+  })
+
+  it('background-image route refuses a stored out-of-scope key even when the object exists', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bgleg`)
+    const { id, slug } = await createEvent(bearer, 'BG Legacy Event', 'public')
+    const { id: otherId } = await createEvent(bearer, 'BG Legacy Victim', 'public')
+    const foreignKey = `events/${otherId}/bg/secret.png`
+    await (env.OBJECT_STORE as unknown as R2Bucket).put(foreignKey, PNG, {
+      httpMetadata: { contentType: 'image/png' },
+    })
+    // Plant the foreign key directly (bypassing the PATCH gate), the way
+    // legacy/out-of-band data could look.
+    await repos.events.patch(id, {
+      publicPageConfig: { enabled: true, theme: { background_image_key: foreignKey } },
+    })
+
+    const img = await publicReq('GET', `/api/v1/sdk/events/${id}/background-image`)
+    expect(img.status).toBe(404)
+
+    // The public JSON must not advertise a URL the serve route refuses.
+    const json = await publicReq('GET', `/api/v1/sdk/events/${slug}`)
+    const body = (await json.json()) as { theme: { backgroundImageUrl: string | null } }
+    expect(body.theme.backgroundImageUrl).toBeNull()
   })
 })

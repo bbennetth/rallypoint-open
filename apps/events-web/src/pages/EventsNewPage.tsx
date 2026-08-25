@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, createEvent, type CreateEventInput, type PrivacyMode } from '../lib/api.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 type SubmitState = 'idle' | 'submitting'
 
@@ -37,6 +38,11 @@ export function EventsNewPage() {
 
     try {
       const created = await createEvent(input)
+      captureEvent('group_event_created', {
+        privacy_mode: privacyMode,
+        has_location: Boolean(locationLabel.trim()),
+        has_dates: Boolean(startDate),
+      })
       void navigate(`/events/${created.slug}`)
     } catch (err) {
       if (err instanceof ApiError) {
@@ -63,10 +69,11 @@ export function EventsNewPage() {
         {error && (
           <div
             role="alert"
-            className="p-3 text-sm text-white/80"
+            className="p-3 text-sm"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              color: 'var(--hot-text)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
             {error}

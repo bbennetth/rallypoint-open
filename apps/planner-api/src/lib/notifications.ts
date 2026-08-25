@@ -1,7 +1,7 @@
 import { materializeOccurrences, type RecurrenceRule } from '@rallypoint/lists-shared'
 import type { Repos, ScheduledNotificationRecord } from '../repos/types.js'
 import type { WebPushService } from '../services/types.js'
-import { dayInstant } from './day-window.js'
+import { dayInstant } from '@rallypoint/shared'
 
 // Pure decision + delivery logic for planner-owned push notifications.
 // Kept free of Hono/D1 specifics so it can be unit-tested directly.
@@ -98,6 +98,18 @@ export async function cancelEventNotification(
 // have a time?" can only be answered in the user's timezone — a due whose
 // local clock reads 00:00 is day-only and must NOT notify. The client passes
 // its IANA tz on the write so we can make that call here.
+
+// Validate an IANA timezone name. Returns the validated string, or null if the
+// name is invalid. Exported so route handlers can reject bad `tz` query params
+// before passing them into tz math (a bad tz silently mutes notifications).
+export function parseIanaTimezone(tz: string): string | null {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz })
+    return tz
+  } catch {
+    return null
+  }
+}
 
 // Whether `instant` lands on 00:00 in `tz`. On an invalid/unknown tz we can't
 // tell, so we report midnight → the caller declines to notify (safer than
@@ -374,6 +386,35 @@ function advanceRecurringFireAt(notification: ScheduledNotificationRecord): Date
   )
 }
 
+// A per-user push-delivery outcome, keyed to the real userId so PostHog
+// can attribute delivery to the same person the web app identifies. The
+// tick stays pure — it returns these; the Worker's scheduled handler maps
+// them to PostHog captures. distinct_id is the userId (RPID subject).
+export interface PushEvent {
+  name: 'push_delivered' | 'push_failed' | 'push_gave_up' | 'push_subscription_reaped'
+  userId: string
+  properties: Record<string, unknown>
+}
+
+// Outcome of delivering one due row. `lost` means another deliverer (an
+// overlapping cron tick) already claimed the row, or a reschedule upsert
+// revived it mid-send — this caller sent nothing that counts and wrote
+// nothing it shouldn't. The remaining fields let the tick rebuild planner's
+// per-user PostHog events without re-reading the row.
+export interface DeliverResult {
+  outcome: 'delivered' | 'retired' | 'failed' | 'gaveUp' | 'lost'
+  reapedSubscriptions: number
+  deviceCount: number
+  okCount: number
+  transientErrors: number
+  // Recurring (chore) row whose series had a next occurrence to advance to.
+  recurring: boolean
+  // The recurring advance CAS committed (this caller moved the row forward).
+  advanced: boolean
+  // Post-increment attempt count from recordFailure (failed/gaveUp only).
+  attempts: number | null
+}
+
 export interface NotificationTickResult {
   due: number
   delivered: number
@@ -384,14 +425,124 @@ export interface NotificationTickResult {
   retired: number
   // Recurring (chore) rows advanced to their next occurrence after firing.
   advanced: number
+  // Rows another deliverer claimed (overlapping tick) or a reschedule revived
+  // mid-send — this tick sent nothing for them.
+  lost: number
   reapedSubscriptions: number
+  // Per-user delivery-outcome events for PostHog (semantic visibility on
+  // push health). Emitted by the caller; the tick just collects them.
+  events: PushEvent[]
 }
 
-// Drain due notifications and deliver them via Web Push. For each due row we
-// fan out to every one of the user's subscriptions; a delivery to at least one
-// device marks the row sent. Dead subscriptions (push service 404/410) are
-// reaped. Transient failures bump the attempt counter and retry next pass,
-// up to MAX_ATTEMPTS. Called from the Worker's `scheduled` cron handler.
+// Deliver one due row via Web Push. The row is atomically claimed (sent_at
+// CAS) BEFORE any send — a concurrent cron tick loses the claim and returns
+// 'lost' without sending, so a notification delivers at most once even when
+// ticks overlap (the cron fires every minute regardless of whether the prior
+// tick finished). Fan-out reaps dead subscriptions (push service 404/410);
+// total transient failure reverts the claim and bumps the attempt counter for
+// the next pass, up to MAX_ATTEMPTS; a recurring (chore) row advances to its
+// next occurrence instead of retiring. Mirrors fitness-api's deliverNotification.
+export async function deliverNotification(
+  repos: Pick<Repos, 'scheduledNotifications' | 'pushSubscriptions'>,
+  webPush: WebPushService,
+  notification: ScheduledNotificationRecord,
+  now: Date,
+): Promise<DeliverResult> {
+  const base = {
+    reapedSubscriptions: 0,
+    deviceCount: 0,
+    okCount: 0,
+    transientErrors: 0,
+    recurring: false,
+    advanced: false,
+    attempts: null as number | null,
+  }
+
+  const claimed = await repos.scheduledNotifications.claimForSend(notification.id, now)
+  if (!claimed) return { ...base, outcome: 'lost' }
+
+  const subscriptions = await repos.pushSubscriptions.listByUser(notification.userId)
+  if (subscriptions.length === 0) {
+    // No devices to deliver to — the claim already retired the row.
+    return { ...base, outcome: 'retired' }
+  }
+
+  const payload = JSON.stringify({
+    title: notification.title,
+    ...(notification.body ? { body: notification.body } : {}),
+    url: notification.url,
+  })
+
+  let okCount = 0
+  let reaped = 0
+  let transientErrors = 0
+  let lastError = 'no successful delivery'
+  for (const sub of subscriptions) {
+    try {
+      const result = await webPush.send(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        payload,
+      )
+      if (result.ok) {
+        okCount++
+        await repos.pushSubscriptions.markSuccess(sub.idHash, now)
+      } else if (result.expired) {
+        await repos.pushSubscriptions.deleteByIdHash(sub.idHash)
+        reaped++
+      } else {
+        transientErrors++
+        lastError = `push service status ${result.statusCode}`
+      }
+    } catch (err) {
+      transientErrors++
+      lastError = err instanceof Error ? err.message : 'send threw'
+    }
+  }
+
+  const common = { reapedSubscriptions: reaped, deviceCount: subscriptions.length, okCount, transientErrors }
+
+  if (okCount > 0) {
+    // Success. A recurring (chore) row advances to its next occurrence; a
+    // one-off (or exhausted-series) row stays retired — the claim already set
+    // sent_at, so there's nothing more to write for it.
+    const nextFireAt = advanceRecurringFireAt(notification)
+    let advanced = false
+    if (nextFireAt) {
+      // Conditional CAS advance (audit E2 #14): commit only if the row still
+      // holds our claim and points at the occurrence we just fired — so a
+      // concurrent isolate or a reschedule upsert can't be stomped.
+      advanced = await repos.scheduledNotifications.advanceFireAt(
+        { id: notification.id, currentFireAt: notification.fireAt, nextFireAt, claimedAt: now },
+        now,
+      )
+    }
+    return { ...common, outcome: 'delivered', recurring: nextFireAt !== null, advanced, attempts: null }
+  }
+
+  if (transientErrors === 0) {
+    // Every target was expired/reaped — nothing left to deliver to. The claim
+    // already retired the row.
+    return { ...common, outcome: 'retired', recurring: false, advanced: false, attempts: null }
+  }
+
+  // Total failure: one guarded write either reverts the claim so the next cron
+  // pass retries, or keeps it at MAX_ATTEMPTS so the row stays retired. A null
+  // result means the row was revived (reschedule upsert) or re-claimed while
+  // the sends were in flight — leave it to that newer schedule.
+  const attempts = await repos.scheduledNotifications.recordFailure(
+    notification.id,
+    lastError,
+    now,
+    MAX_ATTEMPTS,
+  )
+  if (attempts === null) return { ...common, outcome: 'lost', recurring: false, advanced: false, attempts: null }
+  if (attempts >= MAX_ATTEMPTS) return { ...common, outcome: 'gaveUp', recurring: false, advanced: false, attempts }
+  return { ...common, outcome: 'failed', recurring: false, advanced: false, attempts }
+}
+
+// Drain due notifications and deliver them via Web Push. A thin loop over
+// deliverNotification, mapping each outcome to the tick counters and the
+// per-user PostHog events. Called from the Worker's `scheduled` cron handler.
 export async function runNotificationTick(
   repos: Pick<Repos, 'scheduledNotifications' | 'pushSubscriptions'>,
   webPush: WebPushService,
@@ -406,84 +557,71 @@ export async function runNotificationTick(
   let gaveUp = 0
   let retired = 0
   let advanced = 0
+  let lost = 0
   let reapedSubscriptions = 0
+  const events: PushEvent[] = []
 
   for (const notification of due) {
-    const subscriptions = await repos.pushSubscriptions.listByUser(notification.userId)
-    if (subscriptions.length === 0) {
-      // No devices to deliver to — retire the row so it doesn't linger.
-      await repos.scheduledNotifications.markSent(notification.id, now)
-      retired++
-      continue
+    const r = await deliverNotification(repos, webPush, notification, now)
+    reapedSubscriptions += r.reapedSubscriptions
+    // One reaped event per dead subscription (per-row properties).
+    for (let i = 0; i < r.reapedSubscriptions; i++) {
+      events.push({
+        name: 'push_subscription_reaped',
+        userId: notification.userId,
+        properties: { source: notification.source, dedupeKey: notification.dedupeKey },
+      })
     }
-
-    const payload = JSON.stringify({
-      title: notification.title,
-      ...(notification.body ? { body: notification.body } : {}),
-      url: notification.url,
-    })
-
-    let okCount = 0
-    let transientErrors = 0
-    for (const sub of subscriptions) {
-      try {
-        const result = await webPush.send(
-          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-          payload,
-        )
-        if (result.ok) {
-          okCount++
-          await repos.pushSubscriptions.markSuccess(sub.idHash, now)
-        } else if (result.expired) {
-          await repos.pushSubscriptions.deleteByIdHash(sub.idHash)
-          reapedSubscriptions++
-        } else {
-          transientErrors++
-        }
-      } catch {
-        transientErrors++
-      }
+    const failProps = {
+      source: notification.source,
+      dedupeKey: notification.dedupeKey,
+      attempts: r.attempts,
+      transientErrors: r.transientErrors,
     }
-
-    if (okCount > 0) {
-      // A recurring (chore) row advances to its next occurrence instead of
-      // retiring; a one-off (or exhausted) row is marked sent.
-      const nextFireAt = advanceRecurringFireAt(notification)
-      if (nextFireAt) {
-        await repos.scheduledNotifications.upsert(
-          {
-            id: notification.id,
-            userId: notification.userId,
-            dedupeKey: notification.dedupeKey,
+    switch (r.outcome) {
+      case 'delivered':
+        delivered++
+        if (r.advanced) advanced++
+        events.push({
+          name: 'push_delivered',
+          userId: notification.userId,
+          properties: {
             source: notification.source,
-            title: notification.title,
-            body: notification.body,
-            url: notification.url,
-            fireAt: nextFireAt,
-            tz: notification.tz,
-            recurrence: notification.recurrence,
+            dedupeKey: notification.dedupeKey,
+            deviceCount: r.deviceCount,
+            okCount: r.okCount,
+            recurring: r.recurring,
           },
-          now,
-        )
-        advanced++
-      } else {
-        await repos.scheduledNotifications.markSent(notification.id, now)
-      }
-      delivered++
-    } else if (transientErrors === 0) {
-      // Every target was expired/reaped — nothing left to deliver to.
-      await repos.scheduledNotifications.markSent(notification.id, now)
-      retired++
-    } else if (notification.attempts + 1 >= MAX_ATTEMPTS) {
-      await repos.scheduledNotifications.markSent(notification.id, now)
-      gaveUp++
-    } else {
-      await repos.scheduledNotifications.recordFailure(notification.id, 'no successful delivery', now)
-      failed++
+        })
+        break
+      case 'retired':
+        retired++
+        break
+      case 'gaveUp':
+        gaveUp++
+        events.push({ name: 'push_gave_up', userId: notification.userId, properties: failProps })
+        break
+      case 'failed':
+        failed++
+        events.push({ name: 'push_failed', userId: notification.userId, properties: failProps })
+        break
+      case 'lost':
+        lost++
+        break
     }
   }
 
-  return { due: due.length, delivered, failed, gaveUp, retired, advanced, reapedSubscriptions }
+  return {
+    due: due.length,
+    delivered,
+    failed,
+    gaveUp,
+    retired,
+    advanced,
+    lost,
+    reapedSubscriptions,
+    events,
+  }
 }
 
 // ── direct delivery (test notification) ─────────────────────────────

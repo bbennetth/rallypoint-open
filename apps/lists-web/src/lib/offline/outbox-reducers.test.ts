@@ -51,7 +51,7 @@ describe('synthItemFromCreate', () => {
       type: 'item:create' as const,
       listId: 'lst_1',
       tmpId: 'tmp_abc',
-      input: { title: 'Bring rope' },
+      input: { title: 'Bring rope', priority: null },
     }
     const synth = synthItemFromCreate(op, USER)
     expect(synth.id).toBe('tmp_abc')
@@ -72,6 +72,7 @@ describe('synthItemFromCreate', () => {
         tmpId: 'tmp_x',
         input: {
           title: 'Sub',
+          priority: null,
           parentId: 'lit_parent',
           labelIds: ['lbl_a'],
           customFields: { lfd_1: 'v' },
@@ -125,14 +126,14 @@ describe('applyPatchToItem', () => {
 
 describe('applyOpToItems', () => {
   it('create appends a synthetic row', () => {
-    const out = applyOpToItems([], { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A' } }, USER)
+    const out = applyOpToItems([], { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A', priority: null } }, USER)
     expect(out).toHaveLength(1)
     expect(out[0]!.id).toBe('tmp_1')
   })
 
   it('create is idempotent when the temp id is already present', () => {
     const items = [item({ id: 'tmp_1' })]
-    const out = applyOpToItems(items, { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A' } }, USER)
+    const out = applyOpToItems(items, { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A', priority: null } }, USER)
     expect(out).toHaveLength(1)
   })
 
@@ -169,7 +170,7 @@ describe('applyOpToItems', () => {
     const out = applyOpsToItems(
       [],
       [
-        { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A' } },
+        { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A', priority: null } },
         { type: 'item:update', listId: 'lst_1', itemId: 'tmp_1', patch: { completed: true } },
       ],
       USER,
@@ -194,7 +195,7 @@ describe('remapTmpId', () => {
 
   it('rewrites a sub-item create that parented onto the temp id', () => {
     const entries = [
-      entry({ type: 'item:create', listId: 'lst_1', tmpId: 'tmp_2', input: { title: 'Sub', parentId: 'tmp_1' } }),
+      entry({ type: 'item:create', listId: 'lst_1', tmpId: 'tmp_2', input: { title: 'Sub', priority: null, parentId: 'tmp_1' } }),
     ]
     const out = remapTmpId(entries, 'tmp_1', 'lit_real')
     expect((out[0]!.op as Extract<OutboxOp, { type: 'item:create' }>).input.parentId).toBe('lit_real')
@@ -284,7 +285,7 @@ describe('shouldFlushEntry', () => {
 
 describe('resolveFlushError', () => {
   const del: OutboxOp = { type: 'item:delete', listId: 'lst_1', itemId: 'lit_1' }
-  const create: OutboxOp = { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A' } }
+  const create: OutboxOp = { type: 'item:create', listId: 'lst_1', tmpId: 'tmp_1', input: { title: 'A', priority: null } }
 
   it('401 anywhere → auth', () => {
     expect(resolveFlushError({ status: 401 }, del)).toBe('auth')

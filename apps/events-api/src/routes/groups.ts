@@ -11,10 +11,10 @@ import {
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type { GroupMemberRecord, GroupRecord, GroupRole } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
-import { loadForAction, recordActivity, requireIdPrefix } from './_access.js'
+import { actorRole, loadForAction, recordActivity, requireIdPrefix } from './_access.js'
 import { assertFeatureEnabled } from './_features.js'
 import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
 import {
@@ -23,6 +23,7 @@ import {
   normalizeShortCode,
 } from '@rallypoint/events-shared'
 import { GROUP_ROLE_RANK, groupActorRole, loadGroupForAction } from './_group-access.js'
+import { hasAppIcon } from '../lib/pwa-manifest.js'
 
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000 // 14 days
 
@@ -47,21 +48,34 @@ function serializeGroup(
   return out
 }
 
-function serializeMember(m: GroupMemberRecord): Record<string, unknown> {
+function serializeMember(
+  m: GroupMemberRecord,
+  displayName: string | null = null,
+): Record<string, unknown> {
   return {
     id: m.id,
     user_id: m.userId,
     role: m.role,
+    // RPID is the source of truth for names; null when the lookup has
+    // no record for the user (the UI falls back to the raw id).
+    display_name: displayName,
     joined_at: m.joinedAt.toISOString(),
   }
 }
 
 export const groupsRoutes = new Hono<HonoApp>()
-  // --- create (event editor+) --------------------------------------
+  // --- create (event viewer+ — any attendee can start a group) -----
   .post('/api/v1/ui/events/:id/groups', async (c) => {
-    const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
+    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
     assertFeatureEnabled(event, role, 'groups')
     const userId = c.var.session!.userId
+    // Open to every attendee (was editor+), so throttle group spam.
+    await applyPerUserRateLimit(c, {
+      userId,
+      route: 'group-create',
+      limit: 10,
+      windowSeconds: 3600,
+    })
     const parsed = CreateGroupSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
@@ -70,8 +84,10 @@ export const groupsRoutes = new Hono<HonoApp>()
     // #171: groups row + owner member row + (conditional) attendee row
     // all in one DB transaction. UniqueConstraintError still bubbles on
     // name collision; no phantom owner-member or attendee row on the
-    // sad path. Phase 0 attendee rule: event owners don't carry an
-    // attendees row, so `attendeeId: null` skips that write.
+    // sad path. The event owner's access never depends on an
+    // event_attendees row (they may add one via the self-join
+    // attendance endpoint), so `attendeeId: null` skips that write
+    // for them.
     //
     // #440: also mint a 6-char short code. A collision on the
     // short-code unique index retries with a fresh code (32^6 space —
@@ -98,7 +114,7 @@ export const groupsRoutes = new Hono<HonoApp>()
       } catch (err) {
         // D1 reports "groups.short_code", the memory repo
         // "groups_short_code_idx" — match on the column name.
-        if (err instanceof UniqueConstraintError && err.constraintName.includes('short_code')) {
+        if (err instanceof UniqueConstraintError && err.constraint.includes('short_code')) {
           continue
         }
         if (err instanceof UniqueConstraintError) {
@@ -155,22 +171,49 @@ export const groupsRoutes = new Hono<HonoApp>()
     )
   })
 
-  // --- list MY groups for an event (event viewer+) ------------------
+  // --- list MY groups for an event ----------------------------------
   // Phase 0 privacy rule (platform/v-1.1 #16): event owners no longer
   // see every group in their event. This endpoint returns *only* the
-  // groups the caller is a member of (i.e. "my groups in this event").
-  // Owners not in any group get an empty list. groupActorRole no longer
-  // short-circuits event ownership to `owner`, so the role filter and
-  // the membership check below collapse to the same predicate.
+  // groups the caller is a member of (i.e. "my groups in this event"),
+  // ALL of them — the attendee Group tab renders straight off this, and
+  // dropping any of them is how a second group becomes unreachable.
+  //
+  // Access is "event viewer+ OR a member of some group in this event".
+  // The second arm matters: joining by group code writes group_members +
+  // event_attendees but NOT event_members (see createWithOwner /
+  // joinWithAttendee), and actorRole requires event ownership or an
+  // event_members row — so a code-joined attendee would 404 on the one
+  // endpoint that lists their own groups. Same reason
+  // /groups/:id/attendees exists alongside /events/:id/attendees.
+  // Nothing leaks: the response only ever contains the caller's groups.
   .get('/api/v1/ui/events/:id/groups', async (c) => {
-    const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
-    assertFeatureEnabled(event, role, 'groups')
+    const eventId = c.req.param('id')
+    if (!eventId.startsWith('event_')) throw errors.eventNotFound()
     const userId = c.var.session!.userId
-    const groups = await c.var.repos.groups.listForEvent(event.id)
+    const event = await c.var.repos.events.findById(eventId)
+    if (!event || event.deletedAt) throw errors.eventNotFound()
+
+    // One membership join for both the access decision and the payload.
+    const mine = await c.var.repos.groups.listUserGroupsForEvent(userId, event.id)
+    const eventRole = await actorRole(c, event, userId)
+    if (eventRole === null && mine.length === 0) throw errors.eventNotFound()
+    // Group access dies with the parent-event attendance (the rule
+    // groupActorRole applies per group), enforced once here instead of
+    // once per group. Only the group-membership-only arm needs it — a
+    // non-null eventRole means actorRole already settled the question,
+    // one of three ways: the caller's attendee row passed the check
+    // inside actorRole, or they're the event owner, or they're an
+    // events-admin on a system event. The latter two never read the
+    // attendee row at all: for them a soft-removed row means "not
+    // attending", never "no access".
+    if (eventRole === null) {
+      const attendee = await c.var.repos.attendees.findByEventAndUser(event.id, userId)
+      if (attendee && attendee.removedAt !== null) throw errors.eventNotFound()
+    }
+    assertFeatureEnabled(event, eventRole ?? 'viewer', 'groups')
+
     const items: ReturnType<typeof serializeGroup>[] = []
-    for (const group of groups) {
-      const role = await groupActorRole(c, group, userId)
-      if (role === null) continue
+    for (const { group, role } of mine) {
       const count = await c.var.repos.groupMembers.countForGroup(group.id)
       items.push(serializeGroup(group, role, count))
     }
@@ -326,7 +369,7 @@ export const groupsRoutes = new Hono<HonoApp>()
           if (updated) group = updated
           break
         } catch (err) {
-          if (err instanceof UniqueConstraintError && err.constraintName.includes('short_code')) {
+          if (err instanceof UniqueConstraintError && err.constraint.includes('short_code')) {
             continue
           }
           throw err
@@ -343,10 +386,27 @@ export const groupsRoutes = new Hono<HonoApp>()
       }
     }
 
+    // Parent-event display bits the attendee shell needs but can't get
+    // without a second round-trip: the event name labels the chrome and
+    // the installed per-event PWA (iOS reads
+    // `apple-mobile-web-app-title`), and the icon flag decides whether
+    // to repoint `apple-touch-icon` at the event's uploaded icon. The
+    // slug lets the group shell link back to the event's Group tab
+    // (`/events/:slug/attending/group`) for the caller's other groups.
+    const parentEvent = await c.var.repos.events.findById(group.eventId)
+    // Resolve member display names from RPID in one batch — same
+    // pattern as the /groups/:id/attendees handler below. Without this
+    // the member list renders raw `user_...` ids.
+    const memberUserIds = Array.from(new Set(members.map((m) => m.userId)))
+    const memberLookup = await c.var.services.idClient.batchLookupUsers(memberUserIds)
+    const memberNameById = new Map(memberLookup.map((u) => [u.userId, u.displayName ?? null]))
     return c.json({
       ...serializeGroup(group, role, members.length),
       short_code: group.shortCode,
-      members: members.map(serializeMember),
+      event_name: parentEvent?.name ?? null,
+      event_slug: parentEvent?.slug ?? null,
+      event_has_app_icon: hasAppIcon(parentEvent?.publicPageConfig),
+      members: members.map((m) => serializeMember(m, memberNameById.get(m.userId) ?? null)),
     })
   })
 
@@ -362,6 +422,13 @@ export const groupsRoutes = new Hono<HonoApp>()
     const userId = c.var.session!.userId
     assertFeatureEnabled(event, event.ownerUserId === userId ? 'owner' : 'viewer', 'attendees')
 
+    // #675: this endpoint gates on *group* membership, so it must only
+    // ever return attendees who are members of this group — not the
+    // whole event roster. Resolve the group's member userIds first and
+    // filter the event-attendees page down to that set.
+    const groupMembers = await c.var.repos.groupMembers.listForGroup(group.id)
+    const groupUserIds = new Set(groupMembers.map((m) => m.userId))
+
     // First page only, capped at the endpoint max (200) — matches the
     // event-scoped community endpoint's max. Very large events show a
     // truncated roster here; the card is a social glance, not a census.
@@ -369,14 +436,49 @@ export const groupsRoutes = new Hono<HonoApp>()
       limit: 200,
       cursor: null,
     })
-    const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
+    const groupItems = page.items.filter((a) => groupUserIds.has(a.userId))
+    const userIds = Array.from(new Set(groupItems.map((a) => a.userId)))
     const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
     const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
     return c.json({
-      items: page.items.map((a) => ({
+      items: groupItems.map((a) => ({
         user_id: a.userId,
         display_name: nameById.get(a.userId) ?? null,
         joined_at: a.joinedAt.toISOString(),
+      })),
+    })
+  })
+
+  // --- group artist favorites overlay ---------------------------------
+  // Which artists each member of this group favorited on the group's
+  // event. Group-scoped (not on the event lineup endpoints) so the
+  // social overlay never leaks to solo/public viewers of the same
+  // event. Includes the requester's own rows; the client separates
+  // self vs. others. Display names only, same as /attendees above.
+  .get('/api/v1/ui/groups/:id/artist-favorites', async (c) => {
+    const { group } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const event = await c.var.repos.events.findById(group.eventId)
+    if (!event || event.deletedAt) throw errors.notFound('Not found.')
+    const userId = c.var.session!.userId
+    assertFeatureEnabled(event, event.ownerUserId === userId ? 'owner' : 'viewer', 'lineup')
+
+    const members = await c.var.repos.groupMembers.listForGroup(group.id)
+    const favorites = await c.var.repos.eventArtistFavorites.listForUsersEvent(
+      members.map((m) => m.userId),
+      group.eventId,
+    )
+    const userIds = Array.from(new Set(favorites.map((f) => f.userId)))
+    // Skip the RPC entirely when nobody has favorited yet (common on
+    // fresh groups) — same guard as the group-day overlay.
+    const lookup = userIds.length
+      ? await c.var.services.idClient.batchLookupUsers(userIds)
+      : []
+    const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
+    return c.json({
+      items: favorites.map((f) => ({
+        artist_id: f.artistId,
+        user_id: f.userId,
+        display_name: nameById.get(f.userId) ?? null,
       })),
     })
   })
@@ -387,10 +489,11 @@ export const groupsRoutes = new Hono<HonoApp>()
   // to lists-api's /sdk/lists. Read-only — see #84.
   .get('/api/v1/ui/groups/:id/lists', async (c) => {
     const { group } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const actor = c.var.session!.userId
     const items = await c.var.services.listsClient.listLists({
       scopeType: 'group',
       scopeId: group.id,
-    })
+    }, actor)
     return c.json({ items })
   })
 
@@ -402,13 +505,14 @@ export const groupsRoutes = new Hono<HonoApp>()
   // endpoint. Read-only — part of #84.
   .get('/api/v1/ui/groups/:id/lists/:listId/items', async (c) => {
     const { group } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const actor = c.var.session!.userId
     const listId = c.req.param('listId')
     const lists = await c.var.services.listsClient.listLists({
       scopeType: 'group',
       scopeId: group.id,
-    })
+    }, actor)
     if (!lists.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-    const items = await c.var.services.listsClient.listItems(listId)
+    const items = await c.var.services.listsClient.listItems(listId, actor)
     return c.json({ items })
   })
 
@@ -417,15 +521,18 @@ export const groupsRoutes = new Hono<HonoApp>()
   // events-web inline ledger window calls this to render the recent-
   // expenses list. The ledger lookup is done server-side, so the
   // client never names a ledger_id directly (no confused-deputy risk).
+  // viewerUserId is passed so money-api can independently enforce
+  // membership (E1 #4 follow-up — mirrors the /balances route below).
   .get('/api/v1/ui/groups/:id/ledger/expenses', async (c) => {
     const { group } = await loadGroupForAction(c, c.req.param('id'), 'member')
+    const viewerUserId = c.var.session!.userId
     try {
       const ledgers = await c.var.services.moneyClient.listLedgers({
         scopeType: 'group',
         scopeId: group.id,
       })
       if (ledgers.length === 0) return c.json({ items: [] })
-      const items = await c.var.services.moneyClient.listExpenses(ledgers[0]!.id)
+      const items = await c.var.services.moneyClient.listExpenses(ledgers[0]!.id, viewerUserId)
       return c.json({ items })
     } catch (err) {
       c.var.logger.warn(
@@ -656,8 +763,6 @@ export const groupsRoutes = new Hono<HonoApp>()
     if (role === null) throw errors.groupNotFound() // don't leak existence
 
     const isSelf = targetUserId === userId
-    // Non-self removal requires group ownership.
-    if (!isSelf && GROUP_ROLE_RANK[role] < GROUP_ROLE_RANK.owner) throw errors.forbidden()
     // The owner can neither be removed nor leave without transferring first.
     if (targetUserId === group.ownerUserId) {
       throw errors.conflict('group_owner_must_transfer', 'Transfer ownership before leaving the group.')
@@ -665,6 +770,19 @@ export const groupsRoutes = new Hono<HonoApp>()
     const target = await c.var.repos.groupMembers.findByGroupAndUser(group.id, targetUserId)
     if (!target) {
       throw new ApiError({ code: 'group_member_not_found', message: 'Member not found.', status: 404 })
+    }
+    // Non-self removal: owners can remove anyone (below); sidekicks may
+    // only remove members ranked BELOW sidekick (i.e. plain members) —
+    // removing another sidekick still requires owner (#675 product
+    // decision). Self-removal (leaving) stays unrestricted here.
+    if (!isSelf) {
+      if (GROUP_ROLE_RANK[role] < GROUP_ROLE_RANK.sidekick) throw errors.forbidden()
+      if (
+        GROUP_ROLE_RANK[role] < GROUP_ROLE_RANK.owner &&
+        GROUP_ROLE_RANK[target.role] >= GROUP_ROLE_RANK.sidekick
+      ) {
+        throw errors.forbidden()
+      }
     }
     await c.var.repos.groupMembers.remove(group.id, targetUserId)
     // Drop the departed member's RSVPs so they stop inflating each

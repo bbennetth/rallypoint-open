@@ -26,7 +26,10 @@ export default defineConfig({
     }),
   ],
   test: {
-    include: ['apps/money-api/**/*.d1.test.ts'],
+    // `*.d1.test.ts` = repo + route contract tests; `*.workers.test.ts`
+    // = other in-isolate tests (e.g. MoneyRPC RPC contract tests added
+    // in feat/rpc-bindings PR 1). Both run in the same workerd isolate.
+    include: ['apps/money-api/**/*.{d1,workers}.test.ts'],
     setupFiles: ['apps/money-api/test/apply-d1-migrations.ts'],
     testTimeout: 30_000,
   },

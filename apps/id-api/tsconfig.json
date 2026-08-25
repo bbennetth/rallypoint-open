@@ -16,6 +16,9 @@
   ],
   "references": [
     {
+      "path": "../../packages/api-kit"
+    },
+    {
       "path": "../../packages/crypto"
     },
     {

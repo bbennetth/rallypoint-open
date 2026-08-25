@@ -1,5 +1,5 @@
 import { TOKEN_PREFIXES, type UserId } from '@rallypoint/shared'
-import { generateRawToken, hashToken } from '@rallypoint/crypto'
+import { generateRawToken, hashTokenHmac } from '@rallypoint/crypto'
 import type { SessionRepo } from '../repos/session.js'
 
 // Session-issue helper. Used by signin + post-password-change +
@@ -17,6 +17,9 @@ export interface IssueSessionInput {
   tenantId: string
   ipHash: string
   uaHash: string
+  // SESSION_HMAC_KEY — keys the stored idHash so it can't be recomputed
+  // from the raw token alone (needs the server-side key too).
+  sessionHmacKey: string
   now?: () => Date
   // When true, all OTHER sessions for this user are invalidated
   // (e.g. password change "sign out everywhere else").
@@ -48,7 +51,7 @@ export async function issueSession(
 ): Promise<IssueSessionResult> {
   const now = input.now ?? (() => new Date())
   const rawToken = generateRawToken(TOKEN_PREFIXES.session)
-  const idHash = hashToken(rawToken)
+  const idHash = await hashTokenHmac(rawToken, input.sessionHmacKey)
   const expiresAt = new Date(now().getTime() + SESSION_LIFETIME_MS)
   await repo.create({
     idHash,

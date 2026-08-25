@@ -7,7 +7,6 @@ import {
   CreateDaySchema,
   PatchDaySchema,
   CreateArtistSchema,
-  PatchArtistSchema,
   LineupSlotSchema,
   BulkLineupSchema,
   GenerateDaysSchema,
@@ -16,7 +15,7 @@ import {
 } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type {
   ArtistRecord,
   DayRecord,
@@ -32,11 +31,11 @@ import { eventChannel, envelope } from '../realtime/channels.js'
 
 const ARTIST_SEARCH_LIMIT = 20
 
-function serializeStage(s: StageRecord): Record<string, unknown> {
+export function serializeStage(s: StageRecord): Record<string, unknown> {
   return { id: s.id, event_id: s.eventId, name: s.name, sort_order: s.sortOrder }
 }
 
-function serializeDay(d: DayRecord): Record<string, unknown> {
+export function serializeDay(d: DayRecord): Record<string, unknown> {
   return {
     id: d.id,
     event_id: d.eventId,
@@ -57,13 +56,21 @@ function serializeArtist(a: ArtistRecord): Record<string, unknown> {
     apple_music: a.appleMusic,
     youtube_music: a.youtubeMusic,
     instagram: a.instagram,
+    genre: a.genre,
     updated_at: a.updatedAt.toISOString(),
   }
 }
 
-function serializeSlot(
+// The catalog fields serializeSlot folds into each slot so read clients
+// (attendee lineup, browse preview) can render without a catalog lookup.
+export type SlotArtistMeta = Pick<
+  ArtistRecord,
+  'name' | 'genre' | 'soundcloud' | 'spotify' | 'appleMusic' | 'youtubeMusic' | 'instagram'
+>
+
+export function serializeSlot(
   s: EventArtistRecord,
-  artistName: string | null = null,
+  artist: SlotArtistMeta | null = null,
 ): Record<string, unknown> {
   return {
     event_id: s.eventId,
@@ -71,30 +78,39 @@ function serializeSlot(
     // Canonical catalog name, so read clients (attendee lineup, editor
     // grid) can label a slot without a separate catalog lookup. Distinct
     // from display_name, which is an optional per-slot override.
-    artist_name: artistName,
+    artist_name: artist?.name ?? null,
     day_id: s.dayId,
     stage_id: s.stageId,
     tier: s.tier,
     genre: s.genre,
+    // Catalog-level genre — the per-slot `genre` above is an optional
+    // event override; clients fall back to this when the slot has none.
+    artist_genre: artist?.genre ?? null,
+    soundcloud: artist?.soundcloud ?? null,
+    spotify: artist?.spotify ?? null,
+    apple_music: artist?.appleMusic ?? null,
+    youtube_music: artist?.youtubeMusic ?? null,
+    instagram: artist?.instagram ?? null,
     start_time: s.startTime,
     end_time: s.endTime,
     display_name: s.displayName,
   }
 }
 
-// Resolve catalog names for a set of slots in one pass (deduped), so the
-// serialized lineup can carry artist_name without N+1 lookups per render.
-async function slotArtistNames(
-  repo: { findById(id: string): Promise<{ name: string } | null> },
+// Resolve catalog metadata for a set of slots in one pass (deduped), so the
+// serialized lineup can carry artist name/genre/links without N+1 lookups
+// per render.
+export async function slotArtistMeta(
+  repo: { findById(id: string): Promise<ArtistRecord | null> },
   slots: EventArtistRecord[],
-): Promise<Map<string, string>> {
+): Promise<Map<string, SlotArtistMeta>> {
   const ids = [...new Set(slots.map((s) => s.artistId))]
   const found = await Promise.all(
-    ids.map(async (id) => [id, (await repo.findById(id))?.name ?? null] as const),
+    ids.map(async (id) => [id, await repo.findById(id)] as const),
   )
-  const names = new Map<string, string>()
-  for (const [id, name] of found) if (name) names.set(id, name)
-  return names
+  const meta = new Map<string, SlotArtistMeta>()
+  for (const [id, artist] of found) if (artist) meta.set(id, artist)
+  return meta
 }
 
 function badRequest(code: string, message: string): ApiError {
@@ -295,11 +311,11 @@ export const lineupRoutes = new Hono<HonoApp>()
 
   // --- artists (global catalog) ------------------------------------
   // The artist catalog is GLOBAL and cross-event (design §5.2): it has
-  // no tenant/event scope, so these routes are gated by session only,
-  // not by event role. Any signed-in user can search, find-or-create,
-  // and edit catalog rows — the same collaborative model the
-  // festival-planner registry used. Edit provenance / row-locking is a
-  // deliberate follow-up (see PR), not an oversight.
+  // no tenant/event scope, so search and find-or-create are gated by
+  // session only, not by event role. There is deliberately NO catalog
+  // edit endpoint: rows carry no provenance, so an open PATCH would let
+  // any signed-in user overwrite another event's artist (epic #675 P1).
+  // Reintroduce edits only alongside a created_by/ownership model.
   .get('/api/v1/ui/artists', async (c) => {
     const q = (c.req.query('q') ?? '').trim()
     if (q.length === 0) return c.json({ items: [] })
@@ -326,29 +342,14 @@ export const lineupRoutes = new Hono<HonoApp>()
       throw err
     }
   })
-  .patch('/api/v1/ui/artists/:artistId', async (c) => {
-    const artist = await c.var.repos.artists.findById(c.req.param('artistId'))
-    if (!artist) throw errors.notFound('Artist not found.')
-    const parsed = PatchArtistSchema.safeParse(await readJsonBody(c))
-    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-    try {
-      const updated = await c.var.repos.artists.update(artist.id, parsed.data)
-      return c.json(serializeArtist(updated!))
-    } catch (err) {
-      if (err instanceof UniqueConstraintError) {
-        throw errors.conflict('artist_name_taken', 'An artist with that name already exists.')
-      }
-      throw err
-    }
-  })
 
   // --- lineup slots (event_artists) --------------------------------
   .get('/api/v1/ui/events/:id/lineup', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
     assertFeatureEnabled(event, role, 'lineup')
     const slots = await c.var.repos.eventArtists.listForEvent(event.id)
-    const names = await slotArtistNames(c.var.repos.artists, slots)
-    return c.json({ items: slots.map((s) => serializeSlot(s, names.get(s.artistId) ?? null)) })
+    const meta = await slotArtistMeta(c.var.repos.artists, slots)
+    return c.json({ items: slots.map((s) => serializeSlot(s, meta.get(s.artistId) ?? null)) })
   })
   .post('/api/v1/ui/events/:id/lineup', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
@@ -361,9 +362,9 @@ export const lineupRoutes = new Hono<HonoApp>()
       artist_id: saved.artistId,
       day_id: saved.dayId,
     })
-    publishLineup(c, event.id, 'event_artists', 'update', `${saved.artistId}:${saved.dayId}`)
+    publishLineup(c, event.id, 'event_artists', 'update', `${saved.artistId}:${saved.dayId ?? 'none'}`)
     const artist = await c.var.repos.artists.findById(saved.artistId)
-    return c.json(serializeSlot(saved, artist?.name ?? null), 200)
+    return c.json(serializeSlot(saved, artist ?? null), 200)
   })
   .post('/api/v1/ui/events/:id/lineup/bulk', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
@@ -372,12 +373,15 @@ export const lineupRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const slots: EventArtistRecord[] = []
     for (const raw of parsed.data.slots ?? []) slots.push(await resolveSlot(c, event.id, raw))
-    const deletes = parsed.data.deletes ?? []
+    const deletes = (parsed.data.deletes ?? []).map((d) => ({
+      artistId: d.artistId,
+      dayId: d.dayId ?? null,
+    }))
     // Capture a pre-apply version so a bad bulk edit can be reverted.
     // The grid restates the whole lineup each save, so every apply
     // overwrites — worth a snapshot regardless of deletes (#191 Phase 2).
     if (slots.length > 0 || deletes.length > 0) {
-      await captureSnapshot(c, event.id, 'lineup', 'before bulk lineup edit', c.var.session!.userId)
+      await captureSnapshot(c.var.repos, event.id, 'lineup', 'before bulk lineup edit', c.var.session!.userId)
     }
     const { upserted, deleted } = await c.var.repos.eventArtists.bulkApply(event.id, {
       upserts: slots,
@@ -388,21 +392,25 @@ export const lineupRoutes = new Hono<HonoApp>()
       deleted,
     })
     publishLineup(c, event.id, 'event_artists', 'update', event.id)
-    const names = await slotArtistNames(c.var.repos.artists, upserted)
-    return c.json({ items: upserted.map((s) => serializeSlot(s, names.get(s.artistId) ?? null)) }, 200)
+    const meta = await slotArtistMeta(c.var.repos.artists, upserted)
+    return c.json({ items: upserted.map((s) => serializeSlot(s, meta.get(s.artistId) ?? null)) }, 200)
   })
   .delete('/api/v1/ui/events/:id/lineup/:artistId/:dayId', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
     assertFeatureEnabled(event, role, 'lineup')
+    // Literal `none` addresses the artist's unscheduled (TBA) slot —
+    // real day ids are `evd_<ulid>`, so the sentinel can't collide.
+    const dayParam = c.req.param('dayId')
+    const dayId = dayParam === 'none' ? null : dayParam
     const removed = await c.var.repos.eventArtists.delete(
       event.id,
       c.req.param('artistId'),
-      c.req.param('dayId'),
+      dayId,
     )
     if (!removed) throw errors.notFound('Lineup entry not found.')
     await recordActivity(c, event.id, 'event.lineup_removed', {
       artist_id: c.req.param('artistId'),
-      day_id: c.req.param('dayId'),
+      day_id: dayId,
     })
     publishLineup(
       c,
@@ -426,9 +434,12 @@ async function resolveSlot(
   const artist = await c.var.repos.artists.findById(body.artistId)
   if (!artist) throw badRequest('artist_not_found', 'Referenced artist does not exist.')
 
-  const day = await c.var.repos.days.findById(body.dayId)
-  if (!day || day.eventId !== eventId) {
-    throw badRequest('day_not_in_event', 'Referenced day does not belong to this event.')
+  // dayId null/absent = unscheduled (TBA) booking — no day to validate.
+  if (body.dayId != null) {
+    const day = await c.var.repos.days.findById(body.dayId)
+    if (!day || day.eventId !== eventId) {
+      throw badRequest('day_not_in_event', 'Referenced day does not belong to this event.')
+    }
   }
 
   let stageId: string | null = null
@@ -443,7 +454,7 @@ async function resolveSlot(
   return {
     eventId,
     artistId: body.artistId,
-    dayId: body.dayId,
+    dayId: body.dayId ?? null,
     stageId,
     tier: body.tier ?? null,
     genre: body.genre ?? null,

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ConfirmDialog, SwipeActions } from '@rallypoint/ui'
 import {
   ApiError,
   createGroupInvite,
@@ -108,10 +109,11 @@ function EditForm({ group, onSaved }: { group: GroupDetailDto; onSaved: () => vo
     <form onSubmit={(e) => void handleSave(e)} className="space-y-3">
       {error && (
         <div
-          className="p-3 text-sm text-[color:var(--ink)]"
+          className="p-3 text-sm"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            color: 'var(--hot-text)',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           {error}
@@ -199,6 +201,8 @@ function MembersList({
 }) {
   const [busyUserId, setBusyUserId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Swipe/hover Leave/Remove stages the member here; ConfirmDialog commits.
+  const [confirmRemove, setConfirmRemove] = useState<{ userId: string; isSelf: boolean } | null>(null)
 
   async function changeRole(userId: string, role: AssignableGroupRole) {
     setError(null)
@@ -213,11 +217,7 @@ function MembersList({
     }
   }
 
-  async function remove(userId: string, isSelf: boolean) {
-    const prompt = isSelf
-      ? 'Leave this group?'
-      : 'Remove this member from the group?'
-    if (!confirm(prompt)) return
+  async function remove(userId: string) {
     setError(null)
     setBusyUserId(userId)
     try {
@@ -243,28 +243,45 @@ function MembersList({
       </h3>
       {error && (
         <div
-          className="p-3 text-sm text-[color:var(--ink)]"
+          className="p-3 text-sm"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            color: 'var(--hot-text)',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           {error}
         </div>
       )}
-      <ul className="divide-y divide-[color:var(--line)]" style={{ border: '1px solid var(--line)' }}>
+      <ul className="space-y-2">
         {group.members.map((m) => {
           const isSelf = m.user_id === currentUserId
           const isOwner = m.role === 'owner'
           const busy = busyUserId === m.user_id
+          const label = m.display_name ?? m.user_id
+          const removable = !isOwner && (isSelf || canManage) && !busy
           return (
-            <li
+            <SwipeActions
               key={m.id}
-              className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm"
+              as="li"
+              contentClassName="ev-editrow text-sm justify-between"
+              actions={
+                removable
+                  ? [
+                      {
+                        key: 'delete',
+                        text: isSelf ? 'Leave' : 'Remove',
+                        label: isSelf ? 'Leave this group' : `Remove ${label} from the group`,
+                        icon: <>✕</>,
+                        onAction: () => setConfirmRemove({ userId: m.user_id, isSelf }),
+                      },
+                    ]
+                  : []
+              }
             >
               <div className="min-w-0">
-                <p className="mono truncate">
-                  {m.user_id}
+                <p className={(m.display_name ? '' : 'mono ') + 'truncate'}>
+                  {label}
                   {isSelf && <span className="ml-2 text-xs text-[color:var(--ink-mute)]">(you)</span>}
                 </p>
                 <p className="text-xs text-[color:var(--ink-mute)]">joined {formatDate(m.joined_at)}</p>
@@ -288,33 +305,34 @@ function MembersList({
                     {m.role}
                   </span>
                 )}
-                {isSelf && !isOwner && (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void remove(m.user_id, true)}
-                    className="btn-ghost"
-                    style={{ width: 'auto' }}
-                  >
-                    Leave
-                  </button>
-                )}
-                {canManage && !isSelf && !isOwner && (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void remove(m.user_id, false)}
-                    className="btn-ghost"
-                    style={{ width: 'auto', color: 'var(--hot)', borderColor: 'var(--hot)' }}
-                  >
-                    Remove
-                  </button>
-                )}
               </div>
-            </li>
+            </SwipeActions>
           )
         })}
       </ul>
+      <ConfirmDialog
+        open={confirmRemove !== null}
+        title={confirmRemove?.isSelf ? 'Leave this group?' : 'Remove this member?'}
+        body={
+          confirmRemove?.isSelf
+            ? 'You will lose access to the group and its shared plans.'
+            : confirmRemove
+              ? `Remove ${confirmRemove.userId} from the group.`
+              : undefined
+        }
+        confirmLabel={confirmRemove?.isSelf ? 'Leave' : 'Remove'}
+        confirmVariant="hot"
+        busy={confirmRemove !== null && busyUserId === confirmRemove.userId}
+        onConfirm={async () => {
+          if (!confirmRemove) return
+          try {
+            await remove(confirmRemove.userId)
+          } finally {
+            setConfirmRemove(null)
+          }
+        }}
+        onCancel={() => setConfirmRemove(null)}
+      />
     </div>
   )
 }
@@ -345,11 +363,11 @@ function InviteSection({ groupId }: { groupId: string }) {
   }
 
   return (
-    <div className="p-4 space-y-3" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+    <div className="p-4 space-y-3 pl-card">
       <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Invite someone</h3>
-      {error && <p className="text-sm text-[color:var(--ink)]" style={{ color: 'var(--hot)' }}>{error}</p>}
+      {error && <p className="text-sm" style={{ color: 'var(--hot-text)' }}>{error}</p>}
       {created ? (
-        <div className="p-3 space-y-1" style={{ border: '1.5px solid var(--line)', background: 'var(--surface-2)' }}>
+        <div className="p-3 space-y-1" style={{ background: 'var(--surface-2)', borderRadius: 'var(--radius-lg)' }}>
           <p className="text-xs text-[color:var(--ink-dim)]">Invite created — share this code:</p>
           <p className="text-sm break-all" style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{created.code}</p>
           <p className="text-xs text-[color:var(--ink-mute)]">
@@ -418,13 +436,13 @@ function TransferSection({
   }
 
   return (
-    <div className="p-4 space-y-3" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+    <div className="p-4 space-y-3 pl-card">
       <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Transfer ownership</h3>
       <p className="text-xs text-[color:var(--ink-dim)]">
         The new owner must already be a member. You will become a sidekick after the
         transfer.
       </p>
-      {error && <p className="text-sm text-[color:var(--ink)]" style={{ color: 'var(--hot)' }}>{error}</p>}
+      {error && <p className="text-sm" style={{ color: 'var(--hot-text)' }}>{error}</p>}
       <form onSubmit={(e) => void handleTransfer(e)} className="space-y-3">
         <input
           type="text"
@@ -451,31 +469,46 @@ function TransferSection({
 
 function DangerZone({ groupId, onDeleted }: { groupId: string; onDeleted: () => void }) {
   const [deleting, setDeleting] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleDelete() {
-    if (!confirm('Delete this group? This cannot be undone.')) return
+    setError(null)
     setDeleting(true)
     try {
       await deleteGroup(groupId)
       onDeleted()
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : 'Delete failed.')
+      setError(err instanceof ApiError ? err.message : 'Delete failed.')
       setDeleting(false)
+    } finally {
+      setConfirming(false)
     }
   }
 
   return (
     <div className="space-y-2">
       <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Danger zone</h3>
+      {error && <p className="text-sm" style={{ color: 'var(--hot-text)' }}>{error}</p>}
       <button
         type="button"
         disabled={deleting}
-        onClick={() => void handleDelete()}
+        onClick={() => setConfirming(true)}
         className="btn-hot"
         style={{ width: 'auto' }}
       >
         {deleting ? 'Deleting…' : 'Delete group'}
       </button>
+      <ConfirmDialog
+        open={confirming}
+        title="Delete this group?"
+        body="This cannot be undone."
+        confirmLabel="Delete"
+        confirmVariant="hot"
+        busy={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setConfirming(false)}
+      />
     </div>
   )
 }

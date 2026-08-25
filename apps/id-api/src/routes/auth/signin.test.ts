@@ -13,6 +13,7 @@ import { createPasswordHasher } from '../../crypto/password.js'
 
 const PEPPER = 'pepper-12345678901234567890123456789012'
 const CODE_KEY = 'signin-hmac-key-1234567890123456789012345678'
+const SESSION_KEY = 'session-hmac-key-123456789012345678901234567'
 
 function buildCtx() {
   const repos = buildInMemoryRepos()
@@ -31,6 +32,7 @@ function buildCtx() {
       publicBaseUrl: 'https://id.example.com',
       argon2PepperKey: PEPPER,
       signinCodeHmacKey: CODE_KEY,
+      sessionHmacKey: SESSION_KEY,
       ipAddress: '203.0.113.5',
       userAgent: 'test-agent/1.0',
     },
@@ -339,5 +341,110 @@ describe('handleSigninResend', () => {
     await handleSigninResend({ challengeId: start.challengeId }, setup.ctx)
     c = await setup.repos.signinChallenges.findByChallengeId(start.challengeId)
     expect(c!.attemptsRemaining).toBe(5)
+  })
+})
+
+// Account lockout (2.5): 10 consecutive wrong passwords lock the account
+// for 15 minutes. A locked account refuses even the correct password, with
+// the SAME generic response as a wrong one (no "account locked" leak). A
+// correct password (when not locked) resets the counter. The lock TTL is
+// enforced against ctx.now, so we drive a controllable clock.
+const LOCK_THRESHOLD = 10
+const LOCK_MS = 15 * 60 * 1000
+const WRONG = 'definitely-not-the-password'
+const RIGHT = 'a-very-strong-password'
+
+describe('handleSigninStart — account lockout', () => {
+  async function setupWithClock() {
+    const s = buildCtx()
+    const clock = { now: new Date('2026-08-07T12:00:00Z') }
+    const ctx = { ...s.ctx, now: () => clock.now }
+    await handleSignup(VALID_SIGNUP, ctx)
+    const user = await s.repos.users.findByEmail('rallypoint', 'alice@example.com')
+    await s.repos.users.setEmailVerified(user!.id, true)
+    return { repos: s.repos, mailer: s.mailer, ctx, clock }
+  }
+
+  const readUser = (s: { repos: ReturnType<typeof buildCtx>['repos'] }) =>
+    s.repos.users.findByEmail('rallypoint', 'alice@example.com')
+
+  it(`locks the account after ${LOCK_THRESHOLD} consecutive wrong passwords`, async () => {
+    const s = await setupWithClock()
+    for (let i = 0; i < LOCK_THRESHOLD; i++) {
+      await handleSigninStart({ email: 'alice@example.com', password: WRONG }, s.ctx)
+    }
+    const user = (await readUser(s))!
+    expect(user.failedSigninCount).toBe(LOCK_THRESHOLD)
+    expect(user.lockedUntil).not.toBeNull()
+    expect(user.lockedUntil!.getTime()).toBe(s.clock.now.getTime() + LOCK_MS)
+  })
+
+  it('does not lock below the threshold, and a correct password resets the counter', async () => {
+    const s = await setupWithClock()
+    for (let i = 0; i < 3; i++) {
+      await handleSigninStart({ email: 'alice@example.com', password: WRONG }, s.ctx)
+    }
+    let user = (await readUser(s))!
+    expect(user.failedSigninCount).toBe(3)
+    expect(user.lockedUntil).toBeNull()
+
+    await handleSigninStart({ email: 'alice@example.com', password: RIGHT }, s.ctx)
+    user = (await readUser(s))!
+    expect(user.failedSigninCount).toBe(0)
+    expect(user.lockedUntil).toBeNull()
+  })
+
+  it('while locked, refuses even the correct password with the generic response (no 2FA, no enumeration)', async () => {
+    const s = await setupWithClock()
+    for (let i = 0; i < LOCK_THRESHOLD; i++) {
+      await handleSigninStart({ email: 'alice@example.com', password: WRONG }, s.ctx)
+    }
+    const sentBefore = s.mailer.sent.length
+    const result = await handleSigninStart(
+      { email: 'alice@example.com', password: RIGHT },
+      s.ctx,
+    )
+    // Same shape as any other attempt — ok + a (fake) challengeId.
+    expect(result.ok).toBe(true)
+    expect(typeof result.challengeId).toBe('string')
+    // The correct password did NOT start a real challenge: no 2FA code mailed.
+    expect(s.mailer.sent.length).toBe(sentBefore)
+    const audits = await s.repos.audit.list({
+      tenantId: 'rallypoint',
+      eventType: 'signin.failure',
+    })
+    expect(audits.some((e) => e.meta.reason === 'account_locked')).toBe(true)
+  })
+
+  it('after the lock expires, the correct password works again and the counter resets', async () => {
+    const s = await setupWithClock()
+    for (let i = 0; i < LOCK_THRESHOLD; i++) {
+      await handleSigninStart({ email: 'alice@example.com', password: WRONG }, s.ctx)
+    }
+    // Jump past the 15-minute lock window.
+    s.clock.now = new Date(s.clock.now.getTime() + LOCK_MS + 1000)
+    const sentBefore = s.mailer.sent.length
+    const result = await handleSigninStart(
+      { email: 'alice@example.com', password: RIGHT },
+      s.ctx,
+    )
+    expect(result.ok).toBe(true)
+    // A real 2FA challenge email goes out now.
+    expect(s.mailer.sent.length).toBe(sentBefore + 1)
+    const user = (await readUser(s))!
+    expect(user.failedSigninCount).toBe(0)
+    expect(user.lockedUntil).toBeNull()
+  })
+
+  it('never locks a nonexistent email (no row to lock; still enumeration-safe)', async () => {
+    const s = await setupWithClock()
+    for (let i = 0; i < LOCK_THRESHOLD + 2; i++) {
+      const r = await handleSigninStart(
+        { email: 'ghost@example.com', password: WRONG },
+        s.ctx,
+      )
+      expect(r.ok).toBe(true)
+    }
+    expect(await s.repos.users.findByEmail('rallypoint', 'ghost@example.com')).toBeNull()
   })
 })

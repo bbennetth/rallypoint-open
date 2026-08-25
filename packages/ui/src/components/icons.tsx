@@ -48,12 +48,41 @@ export type IconName =
   | 'chevron'
   | 'pencil'
   | 'more'
+  | 'chat'
   | 'cart'
   | 'trash'
   | 'calendar'
   | 'gear'
+  // Fitness glyphs — drawn to the same 16px / 1.5px spec as the chrome set.
+  // Promoted from the prototype's FitIcon in the Fitness design handoff so the
+  // four Fitness tabs and modality chips don't need an app-local icon set.
+  | 'barbell'
+  | 'flame'
+  | 'stopwatch'
+  | 'pause'
+  | 'play'
+  | 'run'
+  | 'trophy'
+  | 'heart'
+  | 'ruler'
+  | 'bolt'
+  | 'star'
+  | 'history'
+  | 'bar-chart'
+  | 'week-grid'
+  // Food-logging glyphs (Fitness /food quick-add menu) — same 16px / 1.5px spec.
+  | 'barcode'
+  | 'camera'
+  | 'cup'
+  | 'search'
 
 const PATHS: Record<IconName, JSX.Element> = {
+  search: (
+    <>
+      <circle cx="6.8" cy="6.8" r="4.6" />
+      <path d="M10.2 10.2L14 14" />
+    </>
+  ),
   myday: (
     <>
       <circle cx="8" cy="9" r="3.1" />
@@ -156,6 +185,16 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="12" cy="8" r="1" fill="currentColor" stroke="none" />
     </>
   ),
+  // Chat bubble — rounded rect with a tail pointing down-left. Used by
+  // the Events attendee chrome's Social tab (Rallypoint MVP kit).
+  chat: (
+    <>
+      <path d="M2.4 3h11.2v8h-7l-3.2 2.6V11h-1V3z" />
+      <circle cx="6" cy="7" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="8.5" cy="7" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="11" cy="7" r="0.8" fill="currentColor" stroke="none" />
+    </>
+  ),
   // Shopping cart.
   cart: (
     <>
@@ -189,23 +228,86 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M8 1.4v2.1M8 12.5v2.1M1.4 8h2.1M12.5 8h2.1M3.3 3.3l1.5 1.5M11.2 11.2l1.5 1.5M12.7 3.3l-1.5 1.5M4.8 11.2l-1.5 1.5" />
     </>
   ),
+  barbell: <path d="M2 6v4M4 5v6M12 5v6M14 6v4M4 8h8" />,
+  flame: <path d="M8 1.5s3.5 2.8 3.5 6a3.5 3.5 0 0 1-7 0c0-1 .5-2 .5-2s.6.8 1.3 1c-.3-2 1.7-3.6 1.7-5z" />,
+  stopwatch: (
+    <>
+      <circle cx="8" cy="9" r="5.2" />
+      <path d="M8 9V6M6.5 1.5h3M8 1.5v2.3" />
+    </>
+  ),
+  pause: <path d="M5.5 3v10M10.5 3v10" />,
+  play: <path d="M5 3l7 5-7 5V3z" />,
+  run: (
+    <>
+      <circle cx="9.5" cy="3" r="1.3" />
+      <path d="M8.5 6 6 7.5 7.5 10M8.5 6l2 1 1.5-.5M8.5 6 7 9.5l-2.5 3M10.5 7l.8 3 2.2.8" />
+    </>
+  ),
+  trophy: <path d="M5 2h6v3a3 3 0 0 1-6 0V2zM5 3H3v1a2 2 0 0 0 2 2M11 3h2v1a2 2 0 0 1-2 2M6.5 8.5 6 11h4l-.5-2.5M4.5 13.5h7" />,
+  heart: <path d="M8 13.5S2.5 10 2.5 6.2A2.7 2.7 0 0 1 8 5a2.7 2.7 0 0 1 5.5 1.2C13.5 10 8 13.5 8 13.5z" />,
+  ruler: (
+    <>
+      <rect x="2" y="5" width="12" height="6" rx="0.5" />
+      <path d="M5 5v2M8 5v2.5M11 5v2" />
+    </>
+  ),
+  bolt: <path d="M9 1.5 3.5 8.5H7.5L6.5 14.5 12.5 7H8.5L9 1.5z" />,
+  star: <path d="M8 1.8l1.7 3.9 4.2.4-3.2 2.8 1 4.1L8 11l-3.7 2 1-4.1-3.2-2.8 4.2-.4L8 1.8z" />,
+  history: (
+    <>
+      <path d="M8 3.4a4.6 4.6 0 1 1-4.4 3.3" />
+      <path d="M3.1 3v2.5h2.5" />
+      <path d="M8 5.6V8l1.7 1" />
+    </>
+  ),
+  // Compact bar-chart for the Stats tab (Training default).
+  'bar-chart': <path d="M2 13.5V2.5M2 13.5h12M5 11V8M8 11V5M11 11V9" />,
+  // Weekly grid for the Plan tab — frame + day columns.
+  'week-grid': (
+    <>
+      <rect x="2" y="2.5" width="12" height="11" rx="1" />
+      <path d="M2 6h12M6 6v7.5M10 6v7.5" />
+    </>
+  ),
+  // UPC stripes of varied heights.
+  barcode: <path d="M2 3.5v9M4.5 3.5v9M7 3.5v6.5M9.5 3.5v9M12 3.5v6.5M14 3.5v9" />,
+  // Body + top bump + lens.
+  camera: (
+    <>
+      <path d="M1.5 5.5h2.5l1.2-1.8h5.6l1.2 1.8h2.5v8h-13v-8z" />
+      <circle cx="8" cy="9.2" r="2.4" />
+    </>
+  ),
+  // Tapered tumbler with a fill line.
+  cup: (
+    <>
+      <path d="M4 2.5h8l-1 11H5l-1-11z" />
+      <path d="M4.4 6.5h7.2" />
+    </>
+  ),
 }
 
 export function Icon({
   name,
   size = 16,
   stroke = 1.5,
+  filled = false,
 }: {
   name: IconName
   size?: number
   stroke?: number
+  // Solid fill in `currentColor` on top of the stroke. Keeps a toggled
+  // icon (e.g. a favorite heart) the exact same geometry — and so the
+  // exact same size — in both its on and off states.
+  filled?: boolean
 }) {
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 16 16"
-      fill="none"
+      fill={filled ? 'currentColor' : 'none'}
       stroke="currentColor"
       strokeWidth={stroke}
       strokeLinecap="round"

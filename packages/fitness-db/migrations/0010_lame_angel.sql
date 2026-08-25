@@ -1,0 +1,1 @@
+ALTER TABLE `wod_templates` ADD `kind` text;

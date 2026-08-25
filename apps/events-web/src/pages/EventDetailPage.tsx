@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { useAsync, useAsyncTask } from '@rallypoint/web-kit'
 import { shouldRefetch, subscribeEventStream } from '../lib/realtime.js'
 import {
   ApiError,
   createInvite,
   deleteEvent,
+  deleteEventAppIcon,
   getEvent,
   getEventWeather,
   listEventAttendees,
@@ -12,6 +14,7 @@ import {
   removeEventAttendee,
   restoreEvent,
   transferOwnership,
+  uploadEventAppIcon,
   type AssignableRole,
   type AttendeeDto,
   type EventDto,
@@ -103,8 +106,8 @@ function EditForm({ event, onSave, onCancel }: EditFormProps) {
       {error && (
         <div
           role="alert"
-          className="p-3 text-sm text-white/80"
-          style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+          className="p-3 text-sm"
+          style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
         >
           {error}
         </div>
@@ -246,7 +249,7 @@ export function InviteSection({ eventId }: InviteSectionProps) {
   }
 
   return (
-    <div className="p-4 space-y-3" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+    <div className="p-4 space-y-3 pl-card">
       <h3 className="text-sm font-medium">Invite someone</h3>
 
       {error && (
@@ -254,7 +257,7 @@ export function InviteSection({ eventId }: InviteSectionProps) {
       )}
 
       {created && (
-        <div className="p-3 space-y-1" style={{ border: '1.5px solid var(--line)', background: 'var(--surface-2)' }}>
+        <div className="p-3 space-y-1" style={{ background: 'var(--surface-2)', borderRadius: 'var(--radius-lg)' }}>
           <p className="text-xs text-white/60">Invite created — share this code:</p>
           <p className="font-mono text-sm text-[color:var(--ink)] break-all">{created.code}</p>
           <p className="text-xs text-white/40">
@@ -345,7 +348,7 @@ export function TransferSection({ eventId, onTransferred }: TransferSectionProps
   }
 
   return (
-    <div className="p-4 space-y-3" style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}>
+    <div className="p-4 space-y-3" style={{ background: 'var(--hot-soft)', borderRadius: 'var(--radius-xl)' }}>
       <h3 className="text-sm font-medium text-white/80">Transfer ownership</h3>
       <p className="text-xs text-white/60">
         The new owner must already be an editor. You will become an editor after the transfer.
@@ -404,36 +407,27 @@ interface AttendeesSectionProps {
 }
 
 function AttendeesSection({ eventId, viewerUserId }: AttendeesSectionProps) {
-  const [attendees, setAttendees] = useState<AttendeeDto[]>([])
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
-
-  const load = useCallback(() => {
-    let cancelled = false
-    listEventAttendees(eventId)
-      .then((page) => {
-        if (!cancelled) setAttendees(page.items)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled)
-          setLoadError(err instanceof ApiError ? err.message : 'Failed to load attendees.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [eventId])
-
-  useEffect(() => {
-    const cancel = load()
-    return cancel
-  }, [load])
+  // Optimistically hidden ids — cleared implicitly whenever the load
+  // resolves for a different eventId (new Set() below).
+  const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(new Set())
+  const attendeesLoad = useAsync<AttendeeDto[]>(
+    () => listEventAttendees(eventId).then((page) => page.items),
+    [eventId],
+  )
+  const attendees = (attendeesLoad.data ?? []).filter((a) => !removedIds.has(a.user_id))
+  const loadError = attendeesLoad.error
+    ? attendeesLoad.error instanceof ApiError
+      ? attendeesLoad.error.message
+      : 'Failed to load attendees.'
+    : null
 
   async function handleRemove(userId: string, label: string) {
     if (!window.confirm(`Remove ${label} from the event?`)) return
     setRemovingId(userId)
     try {
       await removeEventAttendee(eventId, userId)
-      setAttendees((prev) => prev.filter((a) => a.user_id !== userId))
+      setRemovedIds((prev) => new Set(prev).add(userId))
     } catch (err) {
       window.alert(
         err instanceof ApiError ? err.message : 'Failed to remove attendee.',
@@ -457,7 +451,7 @@ function AttendeesSection({ eventId, viewerUserId }: AttendeesSectionProps) {
       {attendees.length === 0 ? (
         <p className="text-sm text-white/40">No attendees yet.</p>
       ) : (
-        <ul className="divide-y divide-white/10" style={{ border: '1.5px solid var(--line)' }}>
+        <ul className="pl-card overflow-hidden divide-y divide-[color:var(--hairline-soft)]">
           {attendees.map((a) => {
             const isSelf = a.user_id === viewerUserId
             const isOwner = a.role === 'owner'
@@ -512,38 +506,39 @@ export function EventDetailPage({ userId }: { userId: string }) {
   const [lineupReload, setLineupReload] = useState(0)
 
   // `silent` skips the loading flash — used by realtime refetches so a live
-  // update from another collaborator doesn't blank the page. `shouldApply`
-  // lets the slug-driven load discard a stale response after navigation.
+  // update from another collaborator doesn't blank the page. The
+  // generation gate (#675 R5) replaces the hand-rolled `shouldApply`
+  // cancel-flag: stale responses (superseded by a newer load, or landing
+  // after unmount) never commit.
+  const run = useAsyncTask()
   const load = useCallback(
-    async (opts: { silent?: boolean; shouldApply?: () => boolean } = {}) => {
+    async (opts: { silent?: boolean } = {}) => {
       if (!slug) return
       if (!opts.silent) setState({ status: 'loading' })
-      try {
-        const event = await getEvent(slug)
-        if (opts.shouldApply && !opts.shouldApply()) return
-        setState({ status: 'ready', event })
-      } catch (err) {
-        if (opts.shouldApply && !opts.shouldApply()) return
-        if (err instanceof ApiError && err.status === 404) {
-          setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
-        } else {
-          setState({
-            status: 'error',
-            code: err instanceof ApiError ? err.code : 'unexpected_error',
-            message: err instanceof Error ? err.message : 'Unknown error.',
-          })
+      await run(async (ctx) => {
+        try {
+          const event = await getEvent(slug)
+          if (ctx.stale()) return
+          setState({ status: 'ready', event })
+        } catch (err) {
+          if (ctx.stale()) return
+          if (err instanceof ApiError && err.status === 404) {
+            setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
+          } else {
+            setState({
+              status: 'error',
+              code: err instanceof ApiError ? err.code : 'unexpected_error',
+              message: err instanceof Error ? err.message : 'Unknown error.',
+            })
+          }
         }
-      }
+      })
     },
-    [slug],
+    [slug, run],
   )
 
   useEffect(() => {
-    let cancelled = false
-    void load({ shouldApply: () => !cancelled })
-    return () => {
-      cancelled = true
-    }
+    void load()
   }, [load])
 
   // Live updates: subscribe once we know the event id. The server fans the
@@ -606,7 +601,7 @@ export function EventDetailPage({ userId }: { userId: string }) {
   if (state.status === 'error') {
     return (
       <main className="page-pad flex items-center justify-center">
-        <div className="max-w-md w-full p-4" style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}>
+        <div className="max-w-md w-full p-4" style={{ background: 'var(--hot-soft)', borderRadius: 'var(--radius-xl)' }}>
           <h1 className="display text-lg">
             {state.code === 'not_found' ? 'Event not found' : 'Error'}
           </h1>
@@ -653,7 +648,7 @@ export function EventDetailPage({ userId }: { userId: string }) {
           <p className="text-white/80 text-sm leading-relaxed">{event.description}</p>
         )}
 
-        <dl className="p-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+        <dl className="p-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm pl-card">
           <dt className="text-white/40">Timezone</dt>
           <dd>{event.timezone}</dd>
           <dt className="text-white/40">Start</dt>
@@ -810,11 +805,20 @@ export function PublicPagePanel({
 
   // If the parent reloads the event (e.g. via realtime invalidation),
   // re-sync our local form state.
+  //
+  // Keyed on the two PRIMITIVES this panel owns, not on the
+  // public_page_config object identity: sibling editors write other
+  // fields of the same config (the app-icon upload below, and any
+  // future background-image editor) and hand back a fresh object. On
+  // identity, that would reset an in-progress "Make public" toggle or
+  // accent pick to server truth mid-edit — silently, since `dirty`
+  // would also flip back to false and grey out Save.
+  const serverEnabled = event.public_page_config?.enabled ?? false
+  const serverAccent = event.public_page_config?.theme?.accent_color ?? DEFAULT_ACCENT_COLOR
   useEffect(() => {
-    const next = event.public_page_config ?? null
-    setEnabled(next?.enabled ?? false)
-    setAccentColor(next?.theme?.accent_color ?? DEFAULT_ACCENT_COLOR)
-  }, [event.public_page_config])
+    setEnabled(serverEnabled)
+    setAccentColor(serverAccent)
+  }, [serverEnabled, serverAccent])
 
   async function handleSave() {
     setError(null)
@@ -932,6 +936,124 @@ export function PublicPagePanel({
       <p className="text-[10px] font-medium text-[color:var(--ink-mute)]">
         The slug is auto-generated. Custom slugs are a paid-tier feature.
       </p>
+
+      <AppIconRow event={event} onChanged={onSaved} />
     </section>
+  )
+}
+
+// --- App icon (per-event PWA install) -----------------------------
+// Attendees can save an event to their home screen as its own app; this
+// picks the icon it gets. Independent of the `enabled` public-page
+// toggle — private events are installable too, so the row is always
+// available. Uploads go straight to their own endpoint rather than
+// through the panel's Save, so the bytes and the JSON config never
+// contend for the same write.
+
+const APP_ICON_MAX_BYTES = 512 * 1024
+
+function AppIconRow({
+  event,
+  onChanged,
+}: {
+  event: EventDto
+  onChanged: (updated: EventDto) => void
+}) {
+  const hasIcon = Boolean(event.public_page_config?.theme?.icon_image_key)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Bumped after a successful upload to bust the browser's cache of the
+  // (stable) icon URL — the bytes change but the path doesn't.
+  const [version, setVersion] = useState(0)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const iconSrc = hasIcon
+    ? `/api/v1/sdk/events/${event.id}/app-icon?v=${version}`
+    : '/icons/rallypt-192.png'
+
+  async function handleFile(file: File): Promise<void> {
+    setError(null)
+    if (file.type !== 'image/png') {
+      setError('App icon must be a PNG.')
+      return
+    }
+    if (file.size > APP_ICON_MAX_BYTES) {
+      setError('App icon must be under 512 KB.')
+      return
+    }
+    setBusy(true)
+    try {
+      await uploadEventAppIcon(event.id, file)
+      setVersion((v) => v + 1)
+      onChanged(await getEvent(event.slug))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Upload failed.')
+    } finally {
+      setBusy(false)
+      // Allow re-picking the same file after a failure.
+      if (inputRef.current) inputRef.current.value = ''
+    }
+  }
+
+  async function handleRemove(): Promise<void> {
+    setError(null)
+    setBusy(true)
+    try {
+      await deleteEventAppIcon(event.id)
+      onChanged(await getEvent(event.slug))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Remove failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 pt-2">
+      <h3 className="text-sm font-medium text-white/80">App icon</h3>
+      <p className="text-xs text-white/60">
+        Shown when someone saves this event to their home screen. Square PNG, 512×512
+        recommended, under 512 KB. Defaults to the Rallypoint logo.
+      </p>
+
+      <div className="flex items-center gap-3">
+        <img
+          src={iconSrc}
+          alt={hasIcon ? 'Current app icon' : 'Default Rallypoint app icon'}
+          width={48}
+          height={48}
+          style={{ width: 48, height: 48, borderRadius: 'var(--radius-md)' }}
+        />
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png"
+          disabled={busy}
+          aria-label="Upload app icon"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) void handleFile(file)
+          }}
+          className="text-xs"
+        />
+        {hasIcon && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleRemove()}
+            className="btn-ghost"
+            style={{ width: 'auto' }}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <p role="alert" className="text-sm" style={{ color: 'var(--hot)' }}>
+          {error}
+        </p>
+      )}
+    </div>
   )
 }

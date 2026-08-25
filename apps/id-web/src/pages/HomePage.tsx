@@ -72,6 +72,10 @@ export function HomePage() {
             size={size}
             profile={profile}
             onSignout={handleSignout}
+            // id-web IS the account app — route to /account/settings in-app
+            // (same tab) so the account area (incl. Passkeys / Linked
+            // accounts) is reachable from the launcher.
+            onAccount={() => navigate('/account/settings')}
           />
         )}
       >

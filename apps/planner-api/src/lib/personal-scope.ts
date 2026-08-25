@@ -1,10 +1,4 @@
 import type { GroupDto, ListDto, ListsClient } from '@rallypoint/lists-client'
-import {
-  fieldDefCreateInput,
-  itemCreateInput,
-  planFieldDefs,
-  seriesCreateInput,
-} from './task-merge.js'
 
 // Planner models a user's personal task lists as a per-user Lists
 // `list_group` (see docs/design/planner-v1.md). planner-api is stateless
@@ -53,13 +47,18 @@ export const CHORES_LIST_NAME = 'Chores'
 // chores/notes/shopping it is system-managed and kept OUT of every task surface.
 export const DIARY_LIST_NAME = 'Diary'
 
+// The reserved display name for the per-user brain-dump list. Identity is
+// resolved the stateless way (keyed off `listType === 'braindump'`, not the
+// name). Like diary it is system-managed and kept OUT of every task surface.
+export const BRAINDUMP_LIST_NAME = 'Brain Dump'
+
 // The reserved display name minted for the single canonical Tasks list when
 // the user has none yet (issue #543 — Tasks became a single system-managed
 // list like Shopping/Notes). Unlike notes/shopping there is no dedicated
 // `listType` discriminator for tasks (the generic `tasks` type is shared by
 // every personal task list), so the canonical list is identified positionally
 // — the OLDEST `tasks`-type list in the personal group — and any other
-// `tasks` lists are folded into it (see mergeTaskListsInto). The name is
+// `tasks` lists are folded into it (via listsClient.mergeLists). The name is
 // cosmetic; resolution keys off "oldest tasks list", not the name.
 export const TASKS_LIST_NAME = 'Tasks'
 
@@ -103,7 +102,7 @@ export async function listPersonalLists(
 ): Promise<ListDto[]> {
   const group = selectPersonalGroup(await listsClient.listGroups(actor), actor)
   if (!group) return []
-  return listsClient.listLists({ scopeType: 'list_group', scopeId: group.id })
+  return listsClient.listLists({ scopeType: 'list_group', scopeId: group.id }, actor)
 }
 
 // --- notes list ------------------------------------------------------
@@ -210,18 +209,44 @@ export function excludeDiaryLists(lists: ListDto[]): ListDto[] {
   return lists.filter((l) => l.listType !== 'diary')
 }
 
-// The actor's task lists only — notes, shopping, chores AND diary lists
-// filtered out. The single read used by every task surface (rail, My Day,
-// Upcoming).
+// --- brain-dump list -------------------------------------------------
+// The user's free-text captures live in a single Lists list of
+// `list_type = 'braindump'` in the SAME personal group, resolved the stateless
+// identity way (listType, not a stored mapping). Like diary it is kept OUT of
+// every task surface (excludeBraindumpLists) AND out of the canonical-Tasks
+// merge, so a brain-dump entry never shows up as a task.
+
+// Pure selection: the brain-dump list out of a group's lists (oldest on the
+// unlikely duplicate, mirroring selectDiaryList). Unit-tested.
+export function selectBraindumpList(lists: ListDto[]): ListDto | null {
+  const mine = lists.filter((l) => l.listType === 'braindump')
+  if (mine.length === 0) return null
+  return mine.reduce((oldest, l) => (l.createdAt < oldest.createdAt ? l : oldest))
+}
+
+// Pure filter: the non-brain-dump task-facing lists. Brain-dump lists are
+// excluded from the Tasks rail / My Day / Upcoming / merge so captures only
+// appear on the dedicated Brain Dump tab. Unit-tested.
+export function excludeBraindumpLists(lists: ListDto[]): ListDto[] {
+  return lists.filter((l) => l.listType !== 'braindump')
+}
+
+// Every non-task list type in one filter — the composition every task surface
+// (and the canonical-Tasks selection) applies.
+function excludeNonTaskLists(lists: ListDto[]): ListDto[] {
+  return excludeBraindumpLists(
+    excludeDiaryLists(excludeChoresLists(excludeShoppingLists(excludeNotesList(lists)))),
+  )
+}
+
+// The actor's task lists only — notes, shopping, chores, diary AND brain-dump
+// lists filtered out. The single read used by every task surface (rail, My
+// Day, Upcoming).
 export async function listPersonalTaskLists(
   listsClient: ListsClient,
   actor: string,
 ): Promise<ListDto[]> {
-  return excludeDiaryLists(
-    excludeChoresLists(
-      excludeShoppingLists(excludeNotesList(await listPersonalLists(listsClient, actor))),
-    ),
-  )
+  return excludeNonTaskLists(await listPersonalLists(listsClient, actor))
 }
 
 // --- canonical Tasks list (issue #543) -------------------------------
@@ -230,17 +255,15 @@ export async function listPersonalTaskLists(
 // by every personal task list, including the legacy multi-list ones), so the
 // canonical list is identified POSITIONALLY: the oldest `tasks`-type list in
 // the personal group. Any other `tasks` lists are folded into it on resolve
-// (mergeTaskListsInto), so the user only ever sees one Tasks list in Planner
-// even if they created several before this change.
+// (listsClient.mergeLists), so the user only ever sees one Tasks list in
+// Planner even if they created several before this change.
 
 // Pure selection: the canonical (oldest) task list out of a group's lists.
 // Notes + shopping are excluded first so a notes/shopping list can never be
 // mistaken for the canonical Tasks list. Oldest-wins mirrors
 // selectPersonalGroup / selectNotesList. Unit-tested.
 export function selectTasksList(lists: ListDto[]): ListDto | null {
-  const taskLists = excludeDiaryLists(
-    excludeChoresLists(excludeShoppingLists(excludeNotesList(lists))),
-  )
+  const taskLists = excludeNonTaskLists(lists)
   if (taskLists.length === 0) return null
   return taskLists.reduce((oldest, l) => (l.createdAt < oldest.createdAt ? l : oldest))
 }
@@ -249,9 +272,7 @@ export function selectTasksList(lists: ListDto[]): ListDto | null {
 // oldest) — the ones whose items get folded into the canonical list. Unit-
 // tested. Deterministically ordered oldest-first so the merge is stable.
 export function selectNonCanonicalTaskLists(lists: ListDto[]): ListDto[] {
-  const taskLists = excludeDiaryLists(
-    excludeChoresLists(excludeShoppingLists(excludeNotesList(lists))),
-  ).sort((a, b) =>
+  const taskLists = excludeNonTaskLists(lists).sort((a, b) =>
     a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1,
   )
   // Drop the first (oldest = canonical); the rest are sources to fold in.
@@ -269,79 +290,16 @@ export async function findTasksList(
   return selectTasksList(await listPersonalLists(listsClient, actor))
 }
 
-// Fold every NON-canonical task list's contents into `canonical`, then return
-// nothing. Idempotent: after a run the source lists hold no live items/series,
-// so a re-run copies nothing (no marker table needed). The source LIST rows
-// are left in place (per #543 they remain visible in the Lists app); only
-// their items + series are moved. The Lists SDK rejects cross-list item moves,
-// so "move" = recreate-in-canonical + soft-delete-source.
-//
-// Per source list, in deterministic (oldest-first) order:
-//  1. Field defs — unify the source's custom-field schema into the canonical
-//     list by (label, fieldType); reuse a matching canonical def or create a
-//     new one. Build an old-def-id → canonical-def-id remap.
-//  2. Series — recreate each recurring series in the canonical list (which
-//     materializes fresh occurrences carrying a canonical seriesId), then
-//     soft-delete the source series (which removes its source occurrences).
-//     The recurrence RULE + template are preserved; per-occurrence completion
-//     history on past occurrences is regenerated, not copied (the SDK can't
-//     set seriesId on a plain item, so a series can only be preserved via
-//     re-materialization).
-//  3. One-off items (seriesId == null) — recreate in the canonical list with
-//     title/notes/completion/priority/dueDate and the remapped customFields,
-//     then soft-delete the source item. Duplicate titles are preserved as
-//     distinct items (merge folds in, it does not dedupe).
-//
-// A best-effort operation composed of independent SDK calls: each item/series
-// is copied-then-deleted, so a mid-run failure leaves a safe partial state
-// (some items already moved, the rest still live on the source) that the next
-// resolve completes — never a lost or duplicated item.
-async function mergeTaskListsInto(
-  listsClient: ListsClient,
-  actor: string,
-  canonical: ListDto,
-  sources: ListDto[],
-): Promise<void> {
-  for (const source of sources) {
-    // (1) Unify custom-field schema. Re-read canonical defs each source pass
-    // so defs created for an earlier source are reused, not duplicated.
-    const sourceDefs = await listsClient.listFieldDefs(source.id)
-    const canonicalDefs = await listsClient.listFieldDefs(canonical.id)
-    const plan = planFieldDefs(sourceDefs, canonicalDefs)
-    const remap = new Map(plan.remap)
-    for (const def of plan.toCreate) {
-      const created = await listsClient.createFieldDef(canonical.id, fieldDefCreateInput(def), actor)
-      remap.set(def.id, created.id)
-    }
-
-    // (2) Recreate recurring series, then delete each source series.
-    const series = await listsClient.listSeries(source.id)
-    for (const s of series) {
-      await listsClient.createListItemSeries(canonical.id, seriesCreateInput(s), actor)
-      await listsClient.deleteSeries(s.id, actor)
-    }
-
-    // (3) Recreate one-off items, then delete each source item. Series-
-    // occurrence items (seriesId != null) are NOT copied — they were
-    // regenerated by the recreated series — but they ARE deleted so the
-    // source list ends up empty (its series deletion already removed them;
-    // belt-and-braces in case any survived).
-    const items = await listsClient.listItems(source.id)
-    for (const item of items) {
-      if (item.seriesId == null) {
-        await listsClient.createListItem(canonical.id, itemCreateInput(item, remap), actor)
-      }
-      await listsClient.deleteListItem(source.id, item.id, actor)
-    }
-  }
-}
-
 // Find-or-create the actor's single canonical Tasks list, folding any other
 // personal task lists into it, and return the canonical list. Provisions the
 // personal group + a 'Tasks' list on first access (mirroring
 // resolveNotesList / resolveShoppingList). The merge runs every resolve but
 // is idempotent + cheap once the user is consolidated (one listLists read +,
-// for each already-empty residual source list, a couple of empty reads).
+// for each already-empty residual source list, a couple of empty reads inside
+// the Lists mergeLists RPC). Planner keeps only the POLICY here — which list
+// is canonical (selectTasksList) and which are sources (selectNonCanonicalTask
+// Lists, excluding notes/shopping/chores/diary); the generic fold-in mechanics
+// live in lists-api's mergeListsCore (issue #543, thin-BFF push-down).
 export async function resolveTasksList(
   listsClient: ListsClient,
   actor: string,
@@ -365,7 +323,9 @@ export async function resolveTasksList(
     return canonical
   }
   const sources = selectNonCanonicalTaskLists(lists)
-  if (sources.length > 0) await mergeTaskListsInto(listsClient, actor, canonical, sources)
+  if (sources.length > 0) {
+    await listsClient.mergeLists(canonical.id, sources.map((s) => s.id), actor)
+  }
   return canonical
 }
 
@@ -428,6 +388,42 @@ export async function resolveDiaryList(
     {
       name: DIARY_LIST_NAME,
       listType: 'diary',
+      scopeType: 'list_group',
+      scopeId,
+      visibility: 'all',
+    },
+    actor,
+  )
+  return { list, created: true }
+}
+
+// Read-only lookup of the actor's brain-dump list, or null if it doesn't exist
+// yet (never provisions — GET-side mirror of findDiaryList).
+export async function findBraindumpList(
+  listsClient: ListsClient,
+  actor: string,
+): Promise<ListDto | null> {
+  return selectBraindumpList(await listPersonalLists(listsClient, actor))
+}
+
+// Find-or-create the actor's single brain-dump list. Provisions the personal
+// group (resolvePersonalScope) and the list on first access — mirroring
+// resolveDiaryList. Created with listType 'braindump' so it stays out of every
+// task surface (excludeBraindumpLists). Returns `created` so the caller can
+// seed the default Category / AI Analysis fields exactly once, on creation —
+// seeding lives in the braindump route (it needs the Lists field SDK), not
+// here.
+export async function resolveBraindumpList(
+  listsClient: ListsClient,
+  actor: string,
+): Promise<{ list: ListDto; created: boolean }> {
+  const existing = await findBraindumpList(listsClient, actor)
+  if (existing) return { list: existing, created: false }
+  const scopeId = await resolvePersonalScope(listsClient, actor)
+  const list = await listsClient.createList(
+    {
+      name: BRAINDUMP_LIST_NAME,
+      listType: 'braindump',
       scopeType: 'list_group',
       scopeId,
       visibility: 'all',

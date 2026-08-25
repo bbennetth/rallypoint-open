@@ -46,8 +46,7 @@ export function GroupInviteCard({
 
   return (
     <section
-      className="p-4 space-y-4"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-4 pl-card"
     >
       <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Invite friends</h3>
 
@@ -67,6 +66,7 @@ export function GroupInviteCard({
 
         {shortCode && (
           <div
+            /* QR quiet zone must stay white in both modes */
             style={{ background: '#fff', padding: 8, lineHeight: 0 }}
             aria-label="Scan to join QR code"
           >

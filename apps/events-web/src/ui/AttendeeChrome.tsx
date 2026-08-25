@@ -8,24 +8,30 @@ import {
   useConnectionView,
   type AppChromeNavItem,
 } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { useActiveGroupStore } from '../stores/active-group.js'
 import { getGroup } from '../lib/api.js'
 import { readGroupDetail, writeGroupDetail } from '../lib/cache.js'
 import { publishRefresh } from '../lib/refresh-bus.js'
 import { subscribeGroupStream } from '../lib/realtime.js'
+import { useEventPwaHead } from '../lib/installPrompt.js'
+import { InstallEventBanner } from './InstallEventBanner.js'
 
 // Attendee-side shell (slice 13). Migrated onto the shared @rallypoint/ui
 // AppChrome (Ink shell). Data-loading hooks are preserved exactly — only
 // the chrome JSX has changed. Mounts on /groups/:groupId/* routes.
 
-function buildNav(groupId: string): readonly AppChromeNavItem[] {
+export function buildNav(groupId: string): readonly AppChromeNavItem[] {
   const base = `/groups/${encodeURIComponent(groupId)}`
+  // Now / Lineup / Map / Group / Rallies. "My Day" used to sit between
+  // Lineup and Group; it merged into Now, which now carries the day picker
+  // and that day's agenda. Map took Social's slot when chat was dropped.
   return [
     { to: `${base}/now`, label: 'Now', icon: 'clock', end: true },
-    { to: `${base}/day`, label: 'My Day', icon: 'myday', end: true },
+    { to: `${base}/lineup`, label: 'Lineup', icon: 'events', end: true },
+    { to: `${base}/map`, label: 'Map', icon: 'pin', end: true },
     { to: base, label: 'Group', icon: 'grid', end: true },
     { to: `${base}/rallies`, label: 'Rallies', icon: 'bell', end: true },
-    { to: `${base}/chat`, label: 'Chat', icon: 'more', end: true },
   ]
 }
 
@@ -34,58 +40,63 @@ function buildNav(groupId: string): readonly AppChromeNavItem[] {
 function useHydrateActiveGroup(groupId: string | undefined): void {
   const set = useActiveGroupStore((s) => s.set)
   const clear = useActiveGroupStore((s) => s.clear)
+  const run = useAsyncTask()
   useEffect(() => {
     if (!groupId) return
-    let active = true
-    void (async () => {
+    void run(async (ctx) => {
       const cached = await readGroupDetail<{
         id: string
         name: string
         event_id: string
-        viewer_role: import('../lib/api.js').MemberRole
+        event_name?: string | null
+        event_has_app_icon?: boolean
+        viewer_role: import('../lib/api.js').GroupRole
       }>(groupId)
-      if (active && cached) {
+      if (!ctx.stale() && cached) {
         set({
           groupId: cached.id,
           groupName: cached.name,
           eventId: cached.event_id,
           eventSlug: null,
-          eventName: null,
+          // Optional on the cached shape: entries written before these
+          // fields existed replay without them.
+          eventName: cached.event_name ?? null,
+          eventHasAppIcon: cached.event_has_app_icon ?? false,
           viewerRole: cached.viewer_role,
         })
       }
       try {
         const fresh = await getGroup(groupId)
-        if (!active) return
+        if (ctx.stale()) return
         await writeGroupDetail(groupId, fresh).catch(() => {})
         set({
           groupId: fresh.id,
           groupName: fresh.name,
           eventId: fresh.event_id,
           eventSlug: null, // group DTO doesn't carry event slug; populated lazily by callers if needed
-          eventName: null,
+          eventName: fresh.event_name,
+          eventHasAppIcon: fresh.event_has_app_icon,
           viewerRole: fresh.viewer_role,
         })
       } catch {
         // Network failure — leave the cached values (if any) in the
         // store. Pages will degrade per their own error handling.
       }
-    })()
+    })
     return () => {
-      active = false
       clear()
     }
-  }, [groupId, set, clear])
+  }, [groupId, set, clear, run])
 }
 
 // Mount the group SSE for the lifetime of the chrome — without it the
-// connection-status store would only flip `synced=true` when ChatPage
-// was open, so the BrandLockup dot would age amber→red on the other
-// attendee tabs (Now, My Day, Rallies, Group) even though everything
-// was healthy. The chrome subscriber uses a no-op `onEvent`; pages
-// that want event-driven refetches still mount their own subscription
-// alongside (e.g. ChatPage) and the realtime ref-counter keeps the
-// store coherent across both.
+// connection-status store would only flip `synced=true` when a
+// subscribing page was open, so the BrandLockup dot would age
+// amber→red on the other attendee tabs (Now, Lineup, Rallies, Group)
+// even though everything was healthy. The chrome subscriber uses a
+// no-op `onEvent`; pages that want event-driven refetches still mount
+// their own subscription alongside (e.g. the Map tab) and the realtime
+// ref-counter keeps the store coherent across both.
 function useChromeGroupStream(groupId: string | undefined): void {
   useEffect(() => {
     if (!groupId) return
@@ -119,7 +130,18 @@ export function AttendeeLayout({ userId }: { userId: string }) {
   useHydrateActiveGroup(groupId)
   useChromeGroupStream(groupId)
   const groupName = useActiveGroupStore((s) => s.groupName)
+  const eventId = useActiveGroupStore((s) => s.eventId)
+  const eventName = useActiveGroupStore((s) => s.eventName)
+  const eventHasAppIcon = useActiveGroupStore((s) => s.eventHasAppIcon)
   const connectionView = useConnectionView()
+
+  // Per-event PWA head tags for the group surface. `start=group:<id>`
+  // makes an install from here cold-launch into this group's Now view.
+  useEventPwaHead(
+    eventId && eventName && groupId
+      ? { eventId, name: eventName, groupId, hasIcon: eventHasAppIcon }
+      : null,
+  )
   const nav = groupId ? buildNav(groupId) : []
   const mainRef = useRef<HTMLElement | null>(null)
 
@@ -174,6 +196,9 @@ export function AttendeeLayout({ userId }: { userId: string }) {
         <PullToRefresh scrollRef={mainRef} onRefresh={onRefresh} disabled={false} />
       }
     >
+      {eventId && eventName && (
+        <InstallEventBanner eventId={eventId} eventName={eventName} />
+      )}
       <Outlet context={{ groupId: groupId ?? '', userId } satisfies AttendeeOutlet} />
     </SharedAppChrome>
   )

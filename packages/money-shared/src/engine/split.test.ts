@@ -61,6 +61,26 @@ describe('largestRemainder', () => {
       }
     }
   })
+
+  // Audit E3 #18: with the float impl, total*weight overflowed safe-int
+  // for totals > 2^53/weight, corrupting the fractional remainder used
+  // for tie-breaking. BigInt math returns an exact split that still sums
+  // to `total`.
+  it('handles totals beyond Number.MAX_SAFE_INTEGER weight-product without precision loss', () => {
+    // 2^53 - 1 = 9_007_199_254_740_991. Pick a total and weights whose
+    // product overflows: total ~= 1e16 (still within safe int as a total)
+    // × weight 1e6 ≈ 1e22, far beyond.
+    const total = 10_000_000_000_000_000 // 1e16
+    const weights = [1_000_000, 999_999, 500_001]
+    const out = largestRemainder(total, weights)
+    expect(out.reduce((a, b) => a + b, 0)).toBe(total)
+    // Tie-breaking via exact BigInt remainder: the lowest-index winner
+    // for any tie matches the spec (no float drift).
+    for (const cents of out) {
+      expect(Number.isInteger(cents)).toBe(true)
+      expect(cents).toBeGreaterThanOrEqual(0)
+    }
+  })
 })
 
 describe('splitModeOf', () => {
@@ -126,6 +146,41 @@ describe('validateCustomAmounts', () => {
         100,
       ),
     ).toThrow(SplitInvariantError)
+  })
+
+  // Audit E3 #18: the sum accumulator is BigInt so a payload whose
+  // amounts sum past Number.MAX_SAFE_INTEGER is detected exactly. Pre-fix,
+  // the JS-number `sum` would have lost low-bit precision and could
+  // compare equal to a legitimate total.
+  it('detects sum-vs-total mismatch beyond Number.MAX_SAFE_INTEGER (BigInt accumulator)', () => {
+    // Total is MAX_SAFE_INTEGER. Two amounts each at MAX_SAFE_INTEGER/2
+    // sum (exactly) to MAX_SAFE_INTEGER - 1 — but a JS-number sum would
+    // round to MAX_SAFE_INTEGER. With BigInt the mismatch is caught.
+    const half = Math.floor(Number.MAX_SAFE_INTEGER / 2) // 4_503_599_627_370_495
+    const total = Number.MAX_SAFE_INTEGER
+    expect(() =>
+      validateCustomAmounts(
+        [
+          rowFor('a', { amountCents: half }),
+          rowFor('b', { amountCents: half }),
+        ],
+        total,
+      ),
+    ).toThrow(SplitInvariantError)
+  })
+
+  it('passes when BigInt sum exactly equals the total at MAX_SAFE_INTEGER scale', () => {
+    const half = Math.floor(Number.MAX_SAFE_INTEGER / 2)
+    const total = half * 2 // sums exactly in JS (both ops fit + result is even)
+    expect(() =>
+      validateCustomAmounts(
+        [
+          rowFor('a', { amountCents: half }),
+          rowFor('b', { amountCents: half }),
+        ],
+        total,
+      ),
+    ).not.toThrow()
   })
 })
 

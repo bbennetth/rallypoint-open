@@ -1,30 +1,34 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
   deleteDiaryEntry,
-  getDiaryList,
-  listDiaryEntries,
-  listFieldDefs,
+  diaryEntriesQuery,
+  diaryListQuery,
+  fieldDefsQuery,
   updateDiaryEntry,
   type DiaryEntryDto,
-  type DiaryListDto,
   type FieldDefDto,
 } from '../lib/api.js'
+import { useCachedQuery } from '../lib/offline/use-cached-query.js'
 import {
   choiceLabel,
   dataPointFields,
+  entryTimeLabel,
   findMoodField,
   formatEntryDate,
   formatFieldValue,
+  isDayOnlyDueDate,
   sortDiaryEntries,
   ymdFromDueDate,
 } from '../lib/diary-helpers.js'
+import { combineDueDateTime, instantToTimeInput } from '../lib/planner-helpers.js'
 import { FieldManager } from '../components/FieldManager.js'
 import { MoodPicker } from '../ui/MoodPicker.js'
 import { SkeletonRows } from '../ui/Skeleton.js'
 import { onCreated } from '../lib/refresh-bus.js'
 import { Drawer } from '@rallypoint/ui'
 import { Icon } from '../ui/icons.js'
+import { QuickAdd } from '../ui/QuickAdd.js'
 
 // Diary surface (Phase B, capture-only). A single system-managed `diary` Lists
 // list per user; entries are generic list items (notes = body, dueDate = the
@@ -139,6 +143,11 @@ function EntryEditor({
   const moodField = useMemo(() => findMoodField(defs), [defs])
   const points = useMemo(() => dataPointFields(defs), [defs])
   const [date, setDate] = useState(ymdFromDueDate(entry.dueDate) || todayYmd())
+  // Prefills from the stored instant for timed entries; day-only entries
+  // leave it blank (clearing it turns a timed entry back into day-only).
+  const [time, setTime] = useState(
+    isDayOnlyDueDate(entry.dueDate) ? '' : instantToTimeInput(entry.dueDate),
+  )
   const [body, setBody] = useState(entry.notes ?? '')
   const [fields, setFields] = useState<Record<string, unknown>>(entry.customFields)
   const [busy, setBusy] = useState(false)
@@ -158,7 +167,9 @@ function EntryEditor({
       await updateDiaryEntry(listId, entry.id, {
         title: formatEntryDate(date),
         notes: body.trim() ? body.trim() : null,
-        dueDate: date,
+        // Timed entries store a true local instant; an empty time keeps the
+        // legacy day-only shape (raw date string → midnight-UTC).
+        dueDate: date && time ? combineDueDateTime(date, time) : date,
         customFields: fields,
       })
       onSaved()
@@ -194,14 +205,28 @@ function EntryEditor({
     >
       <label className="pl-fab-label">
         Date
-        <input
-          className="pl-input"
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          aria-label="Entry date"
-          disabled={busy}
-        />
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            className="pl-input"
+            type="date"
+            value={date}
+            onChange={(e) => {
+              setDate(e.target.value)
+              // A time with no date is meaningless — clear it with the date.
+              if (!e.target.value) setTime('')
+            }}
+            aria-label="Entry date"
+            disabled={busy}
+          />
+          <input
+            className="pl-input"
+            type="time"
+            value={time}
+            onChange={(e) => setTime(e.target.value)}
+            aria-label="Entry time"
+            disabled={busy || !date}
+          />
+        </div>
       </label>
 
       {moodField && (
@@ -258,10 +283,17 @@ function EntryEditor({
 }
 
 export function DiaryPage() {
-  const [list, setList] = useState<DiaryListDto | null>(null)
-  const [entries, setEntries] = useState<DiaryEntryDto[]>([])
-  const [defs, setDefs] = useState<FieldDefDto[]>([])
-  const [loading, setLoading] = useState(true)
+  // Render-from-cache: all three reads paint the last-known value instantly
+  // (skeletons only on a true cold cache miss) and re-render on every cache
+  // write. Entry/field-def mutations are request-response (not local-first),
+  // so they still explicitly refetch below.
+  const listQ = useCachedQuery(useMemo(() => diaryListQuery(), []))
+  const list = listQ.data ?? null
+  const listId = list?.id ?? null
+  const entriesQ = useCachedQuery(useMemo(() => (listId ? diaryEntriesQuery(listId) : null), [listId]))
+  const defsQ = useCachedQuery(useMemo(() => (listId ? fieldDefsQuery(listId) : null), [listId]))
+  const entries = useMemo(() => entriesQ.data ?? [], [entriesQ.data])
+  const defs = useMemo(() => defsQ.data ?? [], [defsQ.data])
   const [error, setError] = useState<string | null>(null)
 
   const [editing, setEditing] = useState<DiaryEntryDto | null>(null)
@@ -271,54 +303,22 @@ export function DiaryPage() {
   const points = useMemo(() => dataPointFields(defs), [defs])
   const sorted = useMemo(() => sortDiaryEntries(entries), [entries])
 
-  const refreshEntries = useCallback(async (listId: string) => {
-    try {
-      setEntries(await listDiaryEntries(listId))
-    } catch (err) {
-      setError(errMessage(err))
-    }
-  }, [])
-
-  const refreshDefs = useCallback(async (listId: string) => {
-    try {
-      setDefs(await listFieldDefs(listId))
-    } catch (err) {
-      setError(errMessage(err))
-    }
-  }, [])
+  const loading = listQ.status === 'loading'
 
   useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    void getDiaryList()
-      .then(async (l) => {
-        if (cancelled) return
-        setList(l)
-        await Promise.all([refreshEntries(l.id), refreshDefs(l.id)])
-      })
-      .catch((err) => {
-        if (!cancelled) setError(errMessage(err))
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [refreshEntries, refreshDefs])
+    if (listQ.status === 'error') setError(errMessage(listQ.error))
+    else if (entriesQ.status === 'error') setError(errMessage(entriesQ.error))
+    else if (defsQ.status === 'error') setError(errMessage(defsQ.error))
+  }, [listQ.status, listQ.error, entriesQ.status, entriesQ.error, defsQ.status, defsQ.error])
 
   // A diary entry added from the global quick-add FAB refreshes the list.
-  useEffect(
-    () =>
-      onCreated('diary', () => {
-        if (list) void refreshEntries(list.id)
-      }),
-    [list, refreshEntries],
-  )
+  const refetchEntries = entriesQ.refetch
+  const refetchDefs = defsQ.refetch
+  useEffect(() => onCreated('diary', () => void refetchEntries()), [refetchEntries])
 
   return (
     <>
-      <div className="pg-head">
+      <div className="pg-head pl-wide">
         <div>
           <h1>Diary</h1>
         </div>
@@ -352,12 +352,22 @@ export function DiaryPage() {
               No entries yet — use the + button to add one.
             </p>
           ) : (
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 10 }}>
+            <ul className="diary-grid">
               {sorted.map((entry) => {
                 const moodLabel = choiceLabel(
                   moodField,
                   moodField ? entry.customFields[moodField.id] : null,
                 )
+                // The Ink kit's `.pl-mood` is a 26px accent-soft circle
+                // showing a single emoji glyph. Planner-web's seeded mood
+                // choices carry a leading emoji + space + text (e.g.
+                // "😄 Great"), so slicing the first character gives the
+                // emoji for free. For custom field labels without a
+                // leading emoji, the CSS's `text-transform: uppercase`
+                // capitalizes the letter so plain-text fields still
+                // degrade gracefully. The full label still shows in the
+                // trailing chip on the right.
+                const moodGlyph = moodLabel ? moodLabel.slice(0, 1) : null
                 const chips = points
                   .map((def) => {
                     const value = formatFieldValue(def, entry.customFields[def.id])
@@ -365,40 +375,46 @@ export function DiaryPage() {
                   })
                   .filter((x): x is { key: string; name: string; value: string } => x !== null)
                 return (
-                  <li
-                    key={entry.id}
-                    className="pl-card"
-                    style={{ padding: 14, display: 'grid', gap: 8 }}
-                  >
-                    <div
-                      style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
-                    >
-                      <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>
+                  <li key={entry.id} className="pl-diary">
+                    <div className="pl-diary-hd">
+                      {moodGlyph && (
+                        <span className="pl-mood" aria-hidden>
+                          {moodGlyph}
+                        </span>
+                      )}
+                      <span className="pl-diary-date">
                         {formatEntryDate(ymdFromDueDate(entry.dueDate))}
                       </span>
-                      {moodLabel && <span className="pl-chip accent">{moodLabel}</span>}
-                      <span style={{ flex: 1 }} />
-                      <button
-                        type="button"
-                        className="pl-iconbtn"
-                        onClick={() => setEditing(entry)}
-                        aria-label="Edit entry"
-                        title="Edit"
-                      >
-                        <Icon name="pencil" size={13} />
-                      </button>
-                    </div>
-                    {entry.notes && (
-                      <p
+                      {entryTimeLabel(entry.dueDate) && (
+                        <span className="meta" style={{ color: 'var(--ink-mute)', fontSize: 12 }}>
+                          {entryTimeLabel(entry.dueDate)}
+                        </span>
+                      )}
+                      {/* Stable trailing slot: one container owns marginLeft:auto,
+                          so the pencil's anchor doesn't hop between elements
+                          depending on whether a mood chip renders. */}
+                      <span
                         style={{
-                          margin: 0,
-                          fontSize: 13.5,
-                          color: 'var(--ink-dim)',
-                          whiteSpace: 'pre-wrap',
+                          marginLeft: 'auto',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
                         }}
                       >
-                        {entry.notes}
-                      </p>
+                        {moodLabel && <span className="pl-chip accent">{moodLabel}</span>}
+                        <button
+                          type="button"
+                          className="pl-iconbtn"
+                          onClick={() => setEditing(entry)}
+                          aria-label="Edit entry"
+                          title="Edit"
+                        >
+                          <Icon name="pencil" size={13} />
+                        </button>
+                      </span>
+                    </div>
+                    {entry.notes && (
+                      <p className="pl-diary-body">{entry.notes}</p>
                     )}
                     {chips.length > 0 && (
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -434,9 +450,7 @@ export function DiaryPage() {
             listId={list.id}
             entry={editing}
             defs={defs}
-            onSaved={() => {
-              if (list) void refreshEntries(list.id)
-            }}
+            onSaved={() => void refetchEntries()}
             onClose={() => setEditing(null)}
           />
         )}
@@ -450,9 +464,10 @@ export function DiaryPage() {
         mobileSheet
       >
         {list && (
-          <FieldManager listId={list.id} defs={defs} onChanged={() => refreshDefs(list.id)} />
+          <FieldManager listId={list.id} defs={defs} onChanged={() => void refetchDefs()} />
         )}
       </Drawer>
+      <QuickAdd anchor="float" />
     </>
   )
 }

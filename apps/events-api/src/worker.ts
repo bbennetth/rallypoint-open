@@ -1,4 +1,10 @@
-import type { D1Database, DurableObjectNamespace, ExecutionContext, Fetcher, R2Bucket } from '@cloudflare/workers-types'
+/// <reference types="@cloudflare/workers-types" />
+import type { D1Database, DurableObjectNamespace, ExecutionContext, Fetcher, R2Bucket, Service } from '@cloudflare/workers-types'
+import type { IdRPC } from '@rallypoint/id-api'
+import type { AiRPC } from '@rallypoint/ai-api'
+import type { AiRunResult, AiRunner } from '@rallypoint/ai'
+import type { ListsRPC } from '@rallypoint/lists-api'
+import type { MoneyRPC } from '@rallypoint/money-api'
 import {
   createDoRealtimeBus,
   type RealtimeBus,
@@ -6,7 +12,7 @@ import {
 } from '@rallypoint/realtime'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
-import { buildLogger, type Logger } from './logger.js'
+import { buildLoggerWithFlush, type Logger } from './logger.js'
 import { buildD1Repos, createDb } from './repos/d1/index.js'
 import { buildServices } from './services/index.js'
 import { startEventsPruner, type EventsStoragePort } from './pruner.js'
@@ -27,29 +33,39 @@ import type { Services } from './services/types.js'
 //                    non-/api paths; the Worker only handles /api/*
 //                    (wrangler.toml `assets.run_worker_first`), so we never
 //                    call ASSETS.fetch ourselves.
-//   - string vars/secrets (EVENTS_API_KEY, EVENTS_SESSION_KEY_V1,
+//   - string vars/secrets (EVENTS_SESSION_KEY_V1,
 //     REALTIME_TOKEN_HMAC_KEY, …) that feed parseEnv.
 
-interface WorkerEnv {
+export interface WorkerEnv {
   DB: D1Database
   // R2 bucket binding for map image + ticket object storage (#409).
   OBJECT_STORE: R2Bucket
   HUB: DurableObjectNamespace
   ASSETS?: Fetcher
-  // Cloudflare service bindings to the same-account producers
-  // (wrangler.toml [[env.<env>.services]]): RPID -> rallypoint-id-<env>,
-  // LISTS -> rallypoint-lists-<env>, MONEY -> rallypoint-money-<env>.
-  // Present only in deployed envs; absent in local `wrangler dev`, where
-  // buildServices falls back to global fetch.
-  RPID?: Fetcher
-  LISTS?: Fetcher
-  MONEY?: Fetcher
+  // Cloudflare WorkerEntrypoint RPC bindings to same-account producers
+  // (wrangler.toml [[services]] + [[env.<env>.services]]): RPID -> IdRPC on
+  // rallypoint-id, LISTS -> ListsRPC, MONEY -> MoneyRPC. Required in every
+  // env (local dev uses wrangler's dev registry; both Workers must be up
+  // under the same dev session — `scripts/dev.sh` boots all 5). Service is
+  // typed so route code can call `env.RPID.verifySession(token)` directly.
+  RPID?: Service<IdRPC>
+  LISTS?: Service<ListsRPC>
+  MONEY?: Service<MoneyRPC>
+  // Workers AI binding for the admin lineup-ingestion extraction
+  // (wrangler.toml [ai]). Optional so tests and AI-less deploys keep
+  // working — the ingest RPC reports 'ai_unavailable' when absent.
+  AI?: AiRunner<AiRunResult>
+  // Typed RPC binding to ai-api's AiRPC entrypoint — AI trace-corpus
+  // ingest for the extraction calls. Optional: absent (dev) just means
+  // untraced.
+  AI_TRACES?: Service<AiRPC>
   [key: string]: unknown
 }
 
 interface Deps {
   env: Env
   logger: Logger
+  flushLogs: () => Promise<void>
   repos: Repos
   services: Services
   realtime: RealtimeBus
@@ -67,7 +83,7 @@ interface Deps {
 let deps: Deps | null = null
 let app: ReturnType<typeof buildApp> | null = null
 
-function ensureDeps(env: WorkerEnv): Deps {
+export function ensureDeps(env: WorkerEnv): Deps {
   if (deps) return deps
   // parseEnv reads string vars/secrets; the D1/HUB/ASSETS bindings are
   // objects, so feed it only the string-valued keys.
@@ -76,21 +92,21 @@ function ensureDeps(env: WorkerEnv): Deps {
     if (typeof v === 'string') vars[k] = v
   }
   const parsed = parseEnv(vars as NodeJS.ProcessEnv)
-  const logger = buildLogger(parsed)
+  const { logger, flushLogs } = buildLoggerWithFlush(parsed)
   // A DurableObjectNamespace satisfies the structural RealtimeHubNamespace
   // (idFromName + get); see do-bus.ts.
   const hub = env.HUB as unknown as RealtimeHubNamespace
   const repos = buildD1Repos(createDb(env.DB))
-  // Bind each service-binding fetcher when present (deployed envs); else
-  // undefined so buildServices uses the global fetch (local dev).
-  const rpidFetch = env.RPID ? (env.RPID.fetch.bind(env.RPID) as unknown as typeof fetch) : undefined
-  const listsFetch = env.LISTS
-    ? (env.LISTS.fetch.bind(env.LISTS) as unknown as typeof fetch)
-    : undefined
-  const moneyFetch = env.MONEY
-    ? (env.MONEY.fetch.bind(env.MONEY) as unknown as typeof fetch)
-    : undefined
-  const services = buildServices(parsed, { objectStore: env.OBJECT_STORE }, { rpidFetch, listsFetch, moneyFetch })
+  const services = buildServices(
+    parsed,
+    { objectStore: env.OBJECT_STORE },
+    {
+      ...(env.RPID ? { rpid: env.RPID } : {}),
+      ...(env.LISTS ? { lists: env.LISTS } : {}),
+      ...(env.MONEY ? { money: env.MONEY } : {}),
+    },
+    logger,
+  )
   // Storage port for the pruner — a thin wrapper over the full objectStore
   // so pruner.ts doesn't depend on the Services type.
   const storage: EventsStoragePort = {
@@ -99,6 +115,7 @@ function ensureDeps(env: WorkerEnv): Deps {
   deps = {
     env: parsed,
     logger,
+    flushLogs,
     repos,
     services,
     realtime: createDoRealtimeBus({
@@ -124,6 +141,7 @@ export default {
       app = buildApp({
         env: d.env,
         logger: d.logger,
+        flushLogs: d.flushLogs,
         repos: d.repos,
         services: d.services,
         realtime: d.realtime,
@@ -147,16 +165,21 @@ export default {
         // the isolate-cached handles (built once in ensureDeps).
         d.pruner.tickOnce(),
         d.weather.tickOnce(),
-      ]).then((results) => {
-        for (const result of results) {
-          if (result.status === 'rejected') {
-            d.logger.warn(
-              { err: result.reason instanceof Error ? result.reason.message : String(result.reason) },
-              'events-worker: scheduled tick threw',
-            )
+      ])
+        .then((results) => {
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              d.logger.warn(
+                { err: result.reason instanceof Error ? result.reason.message : String(result.reason) },
+                'events-worker: scheduled tick threw',
+              )
+            }
           }
-        }
-      }),
+        })
+        // Drain the warn+ log buffer for the cron path — no per-request
+        // logFlush middleware runs here, and a cron-only isolate may be
+        // evicted before any HTTP request flushes it.
+        .finally(() => d.flushLogs()),
     )
   },
 }
@@ -165,3 +188,30 @@ export default {
 // entry so wrangler can bind the HUB namespace to it (wrangler.toml
 // [[durable_objects.bindings]] + [[migrations]] new_classes).
 export { RealtimeHub } from '@rallypoint/realtime'
+
+// Named WorkerEntrypoint exposing the cross-Worker SDK surface as typed
+// RPC methods (PR 1 of feat/rpc-bindings). See ./rpc.ts.
+export { EventsRPC } from './rpc.js'
+
+// DTO/result types for the admin system-events RPC surface — imported by
+// admin-api's service layer (mirrors how fitness-shared exports DTOs).
+export type {
+  AdminConflict,
+  AdminForbidden,
+  AdminInvalid,
+  AdminListSystemEventsOpts,
+  AdminNotFound,
+  AdminOk,
+  AdminSystemEventsPage,
+  SystemEventDto,
+  AdminIngestFailed,
+  AdminIngestLineupResult,
+  AdminApproveLineupIngestionResult,
+  LineupIngestApplied,
+  LineupIngestionDto,
+  LineupIngestionProposal,
+  AdminArtistMbReviewResult,
+  AdminDecideArtistMbReviewResult,
+  AdminListArtistsOpts,
+  AdminPatchArtistResult,
+} from './services/rpc-core/index.js'

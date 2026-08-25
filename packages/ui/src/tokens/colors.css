@@ -1,0 +1,111 @@
+/* Rallypoint "Ink" — color tokens.
+ *
+ * Soft Ink, dark-default. DUAL-AXIS theming:
+ *   data-mode  (dark default / light)  → chassis  (bg / surface / ink)
+ *   data-color (blue/orange/purple/pink/red/green) → accent (--acid)
+ * Both attributes are written to <html>. With no attribute you get the
+ * dark Ink chassis + blue accent.
+ *
+ * Back-compat: the legacy single-axis `data-theme` attribute still works
+ * (`:root[data-theme='dark']` maps to the dark chassis, `'light']` to
+ * light) so the four sibling apps (events-web/lists-web/money-web/id-web)
+ * keep rendering correctly whether they emit `data-mode` (new store) or
+ * only `data-theme`. Token NAMES are unchanged so existing component CSS
+ * keeps resolving. */
+
+:root {
+  /* Theme-agnostic constants. */
+  --map-highlight: #39ff14;  /* neon green — direction line / nearest-POI halo */
+  --hot: #ef4444;            /* destructive red, mode-independent */
+  --focus-ring: var(--acid);
+}
+
+/* ─── CHASSIS (data-mode) ───────────────────────────────────
+   Dark is the default; applied to bare `:root` so apps that have not
+   yet written any theme attribute render the Ink dark chassis. */
+:root,
+[data-mode='dark'],
+:root[data-theme='dark'] {
+  --bg: #0b1b2b;
+  --surface: #152638;
+  --surface-2: #1d2f45;
+  --line: #24364e;
+  --ink: #ffffff;
+  --ink-dim: #a8bcd4;
+  --ink-mute: #7a8fa6;
+  /* Soft Ink danger + edge tokens (dark). */
+  --hot-text: #f87171;
+  --hot-soft: rgba(239, 68, 68, 0.18);
+  --edge-highlight: color-mix(in srgb, #fff 4%, transparent);
+  color-scheme: dark;
+}
+
+[data-mode='light'],
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --surface: #f5f7fa;
+  --surface-2: #eaf0f7;
+  --line: #d7dfe8;
+  --ink: #0b1b2b;
+  --ink-dim: #4a5a70;
+  --ink-mute: #7d8ca1;
+  /* Soft Ink danger + edge tokens (light) — darker red for contrast on
+     white; edge highlight is a dark-chassis trick, near-invisible here. */
+  --hot-text: #dc2626;
+  --hot-soft: rgba(220, 38, 38, 0.12);
+  --edge-highlight: color-mix(in srgb, #0b1b2b 5%, transparent);
+  color-scheme: light;
+}
+
+/* Light-mode soft-shadow overrides. These MUST out-specify the `:root`
+   base in tokens/spacing.css: theme.css @imports spacing.css AFTER
+   colors.css, so a bare `[data-mode='light']` (equal specificity, earlier
+   source) would lose the cascade and light mode would inherit the heavy
+   dark rgba(0,0,0,…) shadows. `:root[data-mode='light']` (0,2,0) beats
+   spacing.css's `:root` (0,1,0). Soft shadows read heavy on a white page —
+   same shapes, lower + navy-tinted alpha. */
+:root[data-mode='light'],
+:root[data-theme='light'] {
+  --shadow-card: 0 2px 10px rgba(11, 27, 43, 0.08);
+  --shadow-panel: 0 4px 16px rgba(11, 27, 43, 0.1);
+}
+
+/* ─── ACCENTS (data-color) ──────────────────────────────────
+   `:root` carries the default (blue) so `--acid`/`--accent` resolve when
+   no data-color is set. `--accent` always aliases `--acid`. */
+:root,
+[data-color='blue'] {
+  --acid: #0ea5e9;
+  --accent: var(--acid);
+  --accent-ink: #ffffff;
+}
+[data-color='orange'] { --acid: #fb923c; --accent: var(--acid); --accent-ink: #0b1b2b; }
+[data-color='purple'] { --acid: #a855f7; --accent: var(--acid); --accent-ink: #000000; }
+[data-color='pink']   { --acid: #ff2d7a; --accent: var(--acid); --accent-ink: #ffffff; }
+[data-color='red']    { --acid: #ef4444; --accent: var(--acid); --accent-ink: #ffffff; }
+[data-color='green']  { --acid: #22c55e; --accent: var(--acid); --accent-ink: #0b1b2b; }
+
+/* Light-mode accents run a touch darker for contrast on white, and all
+   use white accent-ink. */
+[data-mode='light'][data-color='blue']   { --acid: #0284c7; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='orange'] { --acid: #c2410c; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='purple'] { --acid: #7c3aed; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='pink']   { --acid: #db2777; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='red']    { --acid: #dc2626; --accent-ink: #ffffff; }
+[data-mode='light'][data-color='green']  { --acid: #15803d; --accent-ink: #ffffff; }
+
+/* ─── DERIVED ACCENT WASHES ─────────────────────────────────
+   Soft accent fills derived from the live accent — used for active-nav
+   backgrounds, hover washes, secondary accent text/borders. */
+:root,
+[data-mode] {
+  --accent-soft: color-mix(in srgb, var(--acid) 14%, transparent);
+  --accent-soft-2: color-mix(in srgb, var(--acid) 8%, transparent);
+  --accent-soft-strong: color-mix(in srgb, var(--acid) 18%, transparent);
+  --accent-ring: color-mix(in srgb, var(--acid) 35%, transparent);
+  --accent-avatar: color-mix(in srgb, var(--acid) 22%, transparent);
+  --acid-dim: color-mix(in srgb, var(--acid) 60%, transparent);
+  /* Ink-derived washes — hover fills and residual hairlines. */
+  --wash-hover: color-mix(in srgb, var(--ink) 4%, transparent);
+  --hairline-soft: color-mix(in srgb, var(--ink) 6%, transparent);
+}

@@ -91,6 +91,7 @@ describe('D1 integration — Phase 0 attendees + privacy rule', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -152,6 +153,46 @@ describe('D1 integration — Phase 0 attendees + privacy rule', () => {
     }
     expect(items.find((x) => x.user_id === guest)?.email).toBe('guest@example.test')
     expect(items.find((x) => x.user_id === guest)?.role).toBe('viewer')
+  })
+
+  it('neutralizes formula-injection in the attendees.csv export', async () => {
+    const owner = `user_${Date.now()}_csvo`
+    const guest = `user_${Date.now()}_csvg`
+    lookupTable.set(owner, {
+      userId: owner,
+      email: 'csv-owner@example.test',
+      emailVerified: true,
+      displayName: 'CSV Owner',
+      pictureUrl: null,
+    })
+    // Attacker-controlled display name that would execute as a formula if
+    // the organizer opened the export in a spreadsheet.
+    lookupTable.set(guest, {
+      userId: guest,
+      email: 'csv-guest@example.test',
+      emailVerified: true,
+      displayName: '=HYPERLINK("http://evil","click")',
+      pictureUrl: null,
+    })
+    const ownerBearer = await loginAs(owner)
+    const guestBearer = await loginAs(guest)
+    const eventId = await createEvent(ownerBearer, 'CSV Injection')
+
+    const inviteRes = await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/invites`, {
+      role: 'viewer',
+      invitedEmail: 'csv-guest@example.test',
+    })
+    const { code } = (await inviteRes.json()) as { code: string }
+    await req(guestBearer, 'POST', '/api/v1/ui/invites/accept', { code })
+
+    const csvRes = await req(ownerBearer, 'GET', `/api/v1/ui/events/${eventId}/attendees.csv`)
+    expect(csvRes.status).toBe(200)
+    const csv = await csvRes.text()
+    // The dangerous value is present but defused: single-quote prefixed
+    // and RFC-quoted (the embedded comma forces quoting).
+    expect(csv).toContain('"\'=HYPERLINK(""http://evil"",""click"")"')
+    // The raw, unescaped formula must NOT appear at a field boundary.
+    expect(csv).not.toContain(',=HYPERLINK')
   })
 
   it('soft-removes an attendee and blocks owner self-removal', async () => {
@@ -354,5 +395,87 @@ describe('D1 integration — Phase 0 attendees + privacy rule', () => {
     const inviteRow = await repos.invites.findById(invite.id)
     expect(inviteRow?.consumedByUserId).toBe(guest)
     expect(inviteRow?.consumedAt).not.toBeNull()
+  })
+
+  // ── pagination (opaque v1 cursor + legacy accept) ─────────────────
+  describe('attendees pagination', () => {
+    it('walks all pages with an opaque cursor and ends at next_cursor: null', async () => {
+      const owner = `user_${Date.now()}_apo`
+      const ownerBearer = await loginAs(owner)
+      const eventId = await createEvent(ownerBearer, 'Attendees Paging')
+      // Seed six attendees directly so paging spans multiple pages at limit=2.
+      const seeded: string[] = []
+      for (let i = 0; i < 6; i++) {
+        await repos.attendees.upsert({
+          id: `eva_page_${i}`,
+          eventId,
+          userId: `user_att_${i}`,
+        })
+        seeded.push(`user_att_${i}`)
+      }
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      let guard = 0
+      do {
+        const url: string = `/api/v1/ui/events/${eventId}/attendees?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        const page = (await (await req(ownerBearer, 'GET', url)).json()) as {
+          items: Array<{ user_id: string }>
+          next_cursor: string | null
+        }
+        expect(page.items.length).toBeLessThanOrEqual(2)
+        for (const it of page.items) seen.push(it.user_id)
+        cursor = page.next_cursor
+        if (cursor) expect(cursor).not.toContain('|')
+      } while (cursor && ++guard < 10)
+
+      expect(cursor).toBeNull()
+      // Every seeded attendee appears exactly once across the pages, and the
+      // walk spanned multiple pages (took more than one iteration).
+      for (const uid of seeded) expect(seen).toContain(uid)
+      expect(seen.length).toBe(new Set(seen).size)
+      expect(guard).toBeGreaterThan(1)
+    })
+
+    it('accepts a legacy `<iso>|<id>` cursor (raw, not base64) via the fallback', async () => {
+      const owner = `user_${Date.now()}_apl`
+      const ownerBearer = await loginAs(owner)
+      const eventId = await createEvent(ownerBearer, 'Attendees Legacy Cursor')
+      for (let i = 0; i < 3; i++) {
+        await repos.attendees.upsert({
+          id: `eva_leg_${i}`,
+          eventId,
+          userId: `user_leg_${i}`,
+        })
+      }
+      const first = (await (
+        await req(ownerBearer, 'GET', `/api/v1/ui/events/${eventId}/attendees?limit=2`)
+      ).json()) as { items: Array<{ user_id: string; joined_at: string }> }
+      const boundary = first.items[first.items.length - 1]!
+      // The pre-unification attendee cursor was raw `<iso>|<id>` (not base64).
+      const boundaryRow = await repos.attendees.findByEventAndUser(eventId, boundary.user_id)
+      const legacy = `${boundaryRow!.joinedAt.toISOString()}|${boundaryRow!.id}`
+      const next = (await (
+        await req(
+          ownerBearer,
+          'GET',
+          `/api/v1/ui/events/${eventId}/attendees?limit=2&cursor=${encodeURIComponent(legacy)}`,
+        )
+      ).json()) as { items: Array<{ user_id: string }> }
+      expect(next.items.map((i) => i.user_id)).not.toContain(boundary.user_id)
+      expect(next.items.length).toBeGreaterThan(0)
+    })
+
+    it('rejects an undecodable cursor with 400', async () => {
+      const owner = `user_${Date.now()}_apbad`
+      const ownerBearer = await loginAs(owner)
+      const eventId = await createEvent(ownerBearer, 'Attendees Bad Cursor')
+      const res = await req(
+        ownerBearer,
+        'GET',
+        `/api/v1/ui/events/${eventId}/attendees?cursor=not-a-real-cursor`,
+      )
+      expect(res.status).toBe(400)
+    })
   })
 })

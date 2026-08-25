@@ -1,14 +1,12 @@
-// Per-run unique event identity. The events table has a (tenant, slug)
-// unique constraint and the suite runs against a shared, persistent dev
-// DB — reusing a fixed slug would collide on the second run. A timestamp
-// + random suffix keeps every created event distinct and kebab-valid
-// (eventSlugField: kebab, 1–50 chars).
+// Per-run unique event identity. Slug is server-generated
+// (`<slugified-name>-<4 random chars>` in `packages/events-shared/src/slug.ts`),
+// so the test only mints a unique name — the suffix the server appends
+// makes the slug unique even when two runs happen to share a stamp.
 
-export function uniqueEvent(): { name: string; slug: string } {
+export function uniqueEvent(): { name: string } {
   const stamp = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   return {
     name: `E2E Event ${stamp}`,
-    slug: `e2e-${stamp}`,
   }
 }
 

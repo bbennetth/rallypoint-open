@@ -6,6 +6,7 @@ import {
   UpdateListItemSchema,
   CreateSeriesSchema,
   UpdateSeriesSchema,
+  resolveRecurrenceDues,
 } from '@rallypoint/lists-shared'
 import { eventTimezoneField } from '@rallypoint/events-shared'
 import type { ListsClient } from '@rallypoint/lists-client'
@@ -13,9 +14,9 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
+import { parsePlannerPage } from './_page.js'
 import { proxyLists } from '../lib/sdk-error.js'
 import { resolveChoresList, findChoresList } from '../lib/personal-scope.js'
-import { resolveRecurrenceDues } from '../lib/recurrence-time.js'
 import { syncChoreSeriesNotification, type NotifiableChoreSeries } from '../lib/notifications.js'
 
 // Best-effort: keep a chore series' scheduled push notification (its next
@@ -90,9 +91,22 @@ export const choresRoutes = new Hono<HonoApp>()
     // re-anchor). tz defaults to UTC, where resolution is the identity.
     const tzParsed = eventTimezoneField.safeParse(c.req.query('tz') ?? 'UTC')
     if (!tzParsed.success) throw errors.validation({ tz: 'must be a valid IANA timezone' })
+    // Opt-in pagination: `?limit=`/`?cursor=` switch to `{items, next_cursor}`;
+    // without them the legacy whole-array shape is preserved for planner-web.
+    const page = parsePlannerPage(c)
+    if (page) {
+      const result = await proxyLists(async () => {
+        await assertIsActorChoresList(lists, actor, listId)
+        return lists.listItemsPage(listId, actor, { limit: page.limit, cursor: page.cursor ?? null })
+      })
+      return c.json({
+        items: resolveRecurrenceDues(result.items, tzParsed.data),
+        next_cursor: result.nextCursor,
+      })
+    }
     const items = await proxyLists(async () => {
       await assertIsActorChoresList(lists, actor, listId)
-      return lists.listItems(listId)
+      return lists.listItems(listId, actor)
     })
     return c.json(resolveRecurrenceDues(items, tzParsed.data))
   })
@@ -150,7 +164,7 @@ export const choresRoutes = new Hono<HonoApp>()
     const lists = c.var.services.listsClient
     const rows = await proxyLists(async () => {
       await assertIsActorChoresList(lists, actor, listId)
-      return lists.listSeries(listId)
+      return lists.listSeries(listId, actor)
     })
     return c.json(rows)
   })
@@ -186,7 +200,7 @@ export const choresRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const updated = await proxyLists(async () => {
       await assertIsActorChoresList(lists, actor, listId)
-      const series = await lists.listSeries(listId)
+      const series = await lists.listSeries(listId, actor)
       if (!series.some((s) => s.id === seriesId)) throw errors.notFound('Series not found.')
       return lists.updateSeries(seriesId, parsed.data, actor)
     })
@@ -203,7 +217,7 @@ export const choresRoutes = new Hono<HonoApp>()
     const lists = c.var.services.listsClient
     await proxyLists(async () => {
       await assertIsActorChoresList(lists, actor, listId)
-      const series = await lists.listSeries(listId)
+      const series = await lists.listSeries(listId, actor)
       if (!series.some((s) => s.id === seriesId)) throw errors.notFound('Series not found.')
       return lists.deleteSeries(seriesId, actor)
     })

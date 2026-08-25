@@ -11,6 +11,7 @@ import {
 } from '@rallypoint/shared'
 import { ApiError, errors } from '../../errors.js'
 import { dailySalt, hashIp, hashUserAgent } from '../../crypto/ip-hash.js'
+import { emailDomain } from '../../lib/email-domain.js'
 import {
   generateRawToken,
   hashToken,
@@ -22,7 +23,7 @@ import {
   renderEmailChangeCompleted,
 } from '../../mailer-templates/email-change.js'
 import { renderAccountDeleted } from '../../mailer-templates/account-deleted.js'
-import { UniqueConstraintError } from '../../repos/memory.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { issueSession } from '../../session/issue.js'
 import type { PasswordHasher } from '../../crypto/password.js'
 import type { Services } from '../../services/types.js'
@@ -61,6 +62,7 @@ interface MeCtxBase {
   services: Services
   passwordHasher: PasswordHasher
   argon2PepperKey: string
+  sessionHmacKey: string
   publicBaseUrl: string
   ipAddress: string
   userAgent: string
@@ -126,6 +128,7 @@ export async function handleChangePassword(
     tenantId: user.tenantId,
     ipHash: ctxBase.ipHash,
     uaHash: ctxBase.uaHash,
+    sessionHmacKey: ctx.sessionHmacKey,
     ...(ctx.now ? { now: ctx.now } : {}),
   })
 
@@ -341,7 +344,10 @@ export async function handleEmailChangeConfirm(
     userId: row.userId,
     ipHash: ctxBase.ipHash,
     uaHash: ctxBase.uaHash,
-    meta: { old_email: row.oldEmail, new_email: row.newEmail },
+    meta: {
+      old_email_domain: emailDomain(row.oldEmail),
+      new_email_domain: emailDomain(row.newEmail),
+    },
   })
   return { ok: true, email: row.newEmail }
 }
@@ -376,7 +382,10 @@ export async function handleEmailChangeCancel(
     userId: row.userId,
     ipHash: ctxBase.ipHash,
     uaHash: ctxBase.uaHash,
-    meta: { old_email: row.oldEmail, new_email: row.newEmail },
+    meta: {
+      old_email_domain: emailDomain(row.oldEmail),
+      new_email_domain: emailDomain(row.newEmail),
+    },
   })
   return { ok: true }
 }

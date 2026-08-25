@@ -1,7 +1,14 @@
 // Minimal RFC-4180-ish CSV parse + serialize, client-side (issue #191
-// Phase 3). No dependency: the import flow only needs to read a small
-// spreadsheet the user exported. Handles quoted fields with embedded
-// commas, quotes (doubled `""`), and CR/LF inside quotes.
+// Phase 3). The import flow reads a small spreadsheet the user exported;
+// serialize (toCsv) builds downloadable templates that are re-parsed by
+// parseCsv. Handles quoted fields with embedded commas, quotes (doubled
+// `""`), and CR/LF inside quotes. Field escaping is shared with the server
+// export via @rallypoint/events-shared so the RFC-4180 rules can't drift —
+// toCsv uses the round-trip-safe escapeCsvCell (no formula-guard
+// apostrophe, which parseCsv wouldn't strip); the formula guard lives on
+// the attendees export (escapeCsvField) which is never re-parsed by us.
+
+import { escapeCsvCell } from '@rallypoint/events-shared'
 
 // Parse CSV text into rows of string cells. A leading UTF-8 BOM is
 // stripped. Fully-empty lines (e.g. a trailing newline) are dropped so a
@@ -85,14 +92,12 @@ export function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ''))
 }
 
-function escapeCell(s: string): string {
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-}
-
 // Serialize rows of cells back to CSV (CRLF line endings, the safe default
-// for spreadsheet apps).
+// for spreadsheet apps). Uses escapeCsvCell (RFC-4180 only) so the output
+// round-trips losslessly through parseCsv — templates are re-parsed on
+// re-upload, and a formula-guard apostrophe would not survive that.
 export function toCsv(rows: string[][]): string {
-  return rows.map((r) => r.map(escapeCell).join(',')).join('\r\n')
+  return rows.map((r) => r.map(escapeCsvCell).join(',')).join('\r\n')
 }
 
 // Map a header row to normalised column keys: lowercased, trimmed, spaces

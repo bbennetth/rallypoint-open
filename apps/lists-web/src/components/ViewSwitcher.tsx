@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { validateListQuery, type ViewConfig, type ViewMode } from '@rallypoint/lists-shared'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   createView,
   deleteView,
@@ -53,20 +54,28 @@ export function ViewSwitcher({
   const [newName, setNewName] = useState('')
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
+  // useAsyncTask (#675 R5): replaces the hand-rolled `cancelled` flag —
+  // a listId/reloadKey change supersedes the previous fetch and stale()
+  // drops its commit instead of racing the newer one.
+  const run = useAsyncTask()
+  const loadViews = useCallback(
+    () =>
+      run(async (ctx) => {
+        try {
+          const page = await listViews(listId)
+          if (ctx.stale()) return
+          setViews(page.items)
+        } catch {
+          if (ctx.stale()) return
+          setViews([])
+        }
+      }),
+    [run, listId],
+  )
+
   useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const page = await listViews(listId)
-        if (!cancelled) setViews(page.items)
-      } catch {
-        if (!cancelled) setViews([])
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [listId, reloadKey])
+    void loadViews()
+  }, [loadViews, reloadKey])
 
   // Drop filters/sorts that don't resolve against the current defs, then
   // strip the `resolved` field validateListQuery attaches — the bar wants

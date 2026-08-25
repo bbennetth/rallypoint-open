@@ -4,17 +4,25 @@ import { D1UserRepo } from './users.js'
 import { D1AuthMethodRepo } from './auth-methods.js'
 import { D1EmailVerificationRepo } from './email-verifications.js'
 import { D1AuditRepo } from './audit.js'
-import { D1RateLimitRepo } from './rate-limit.js'
+import { createRateLimitRepo } from './rate-limit.js'
 import { D1SessionRepo } from './sessions.js'
 import { D1SigninChallengeRepo } from './signin-challenges.js'
 import { D1PasswordResetRepo } from './password-resets.js'
 import { D1EmailChangeRepo } from './email-changes.js'
 import { D1SsoCodeRepo } from './sso-codes.js'
 import { D1SettingsRepo } from './settings.js'
+import { D1OAuthIdentityRepo } from './oauth-identities.js'
+import { D1WebAuthnCredentialRepo } from './webauthn-credentials.js'
+import { D1WebAuthnChallengeRepo } from './webauthn-challenges.js'
+import { D1OAuthStateRepo } from './oauth-states.js'
 import {
   createUserWithAuthMethod,
   confirmEmailChange,
+  confirmEmailVerification,
   confirmPasswordReset,
+  createUserWithOAuthIdentity,
+  deleteWebauthnCredentialGuarded,
+  deleteOAuthIdentityGuarded,
 } from './user-auth.js'
 
 // Thin wrapper that adapts the free functions to the UserAuthRepo interface.
@@ -34,10 +42,35 @@ class D1UserAuthRepo implements UserAuthRepo {
     return confirmEmailChange(this.db, input)
   }
 
+  confirmEmailVerification(
+    input: Parameters<UserAuthRepo['confirmEmailVerification']>[0],
+  ): ReturnType<UserAuthRepo['confirmEmailVerification']> {
+    return confirmEmailVerification(this.db, input)
+  }
+
   confirmPasswordReset(
     input: Parameters<UserAuthRepo['confirmPasswordReset']>[0],
   ): ReturnType<UserAuthRepo['confirmPasswordReset']> {
     return confirmPasswordReset(this.db, input)
+  }
+
+  createUserWithOAuthIdentity(
+    user: Parameters<UserAuthRepo['createUserWithOAuthIdentity']>[0],
+    identity: Parameters<UserAuthRepo['createUserWithOAuthIdentity']>[1],
+  ): ReturnType<UserAuthRepo['createUserWithOAuthIdentity']> {
+    return createUserWithOAuthIdentity(this.db, user, identity)
+  }
+
+  deleteWebauthnCredentialGuarded(
+    input: Parameters<UserAuthRepo['deleteWebauthnCredentialGuarded']>[0],
+  ): ReturnType<UserAuthRepo['deleteWebauthnCredentialGuarded']> {
+    return deleteWebauthnCredentialGuarded(this.db, input)
+  }
+
+  deleteOAuthIdentityGuarded(
+    input: Parameters<UserAuthRepo['deleteOAuthIdentityGuarded']>[0],
+  ): ReturnType<UserAuthRepo['deleteOAuthIdentityGuarded']> {
+    return deleteOAuthIdentityGuarded(this.db, input)
   }
 }
 
@@ -47,7 +80,7 @@ export function buildD1Repos(db: Db): Repos {
     authMethods: new D1AuthMethodRepo(db),
     emailVerifications: new D1EmailVerificationRepo(db),
     audit: new D1AuditRepo(db),
-    rateLimit: new D1RateLimitRepo(db),
+    rateLimit: createRateLimitRepo(db),
     sessions: new D1SessionRepo(db),
     signinChallenges: new D1SigninChallengeRepo(db),
     passwordResets: new D1PasswordResetRepo(db),
@@ -55,6 +88,10 @@ export function buildD1Repos(db: Db): Repos {
     ssoCodes: new D1SsoCodeRepo(db),
     settings: new D1SettingsRepo(db),
     userAuth: new D1UserAuthRepo(db),
+    oauthIdentities: new D1OAuthIdentityRepo(db),
+    webauthnCredentials: new D1WebAuthnCredentialRepo(db),
+    webauthnChallenges: new D1WebAuthnChallengeRepo(db),
+    oauthStates: new D1OAuthStateRepo(db),
   }
 }
 

@@ -170,6 +170,66 @@ describe('PatchRallySchema', () => {
   })
 })
 
+describe('rally map pin', () => {
+  it('accepts a full pin on create', () => {
+    const r = CreateRallySchema.safeParse({
+      title: 'Pinned',
+      pinLayer: 'site',
+      pinXPct: 42.5,
+      pinYPct: 61,
+    })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.pinLayer).toBe('site')
+  })
+
+  it('rejects a partial pin on create', () => {
+    expect(CreateRallySchema.safeParse({ title: 'Half', pinLayer: 'site' }).success).toBe(false)
+    expect(
+      CreateRallySchema.safeParse({ title: 'Half', pinXPct: 10, pinYPct: 20 }).success,
+    ).toBe(false)
+  })
+
+  it('rejects out-of-range percentages', () => {
+    expect(
+      CreateRallySchema.safeParse({
+        title: 'Off map',
+        pinLayer: 'camp',
+        pinXPct: 101,
+        pinYPct: 20,
+      }).success,
+    ).toBe(false)
+    expect(
+      CreateRallySchema.safeParse({
+        title: 'Off map',
+        pinLayer: 'camp',
+        pinXPct: -1,
+        pinYPct: 20,
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects a bogus layer', () => {
+    expect(
+      CreateRallySchema.safeParse({
+        title: 'Bad layer',
+        pinLayer: 'parking',
+        pinXPct: 10,
+        pinYPct: 20,
+      }).success,
+    ).toBe(false)
+  })
+
+  it('accepts clearing the whole pin on patch, rejects a half-clear', () => {
+    expect(
+      PatchRallySchema.safeParse({ pinLayer: null, pinXPct: null, pinYPct: null }).success,
+    ).toBe(true)
+    expect(PatchRallySchema.safeParse({ pinLayer: null }).success).toBe(false)
+    expect(
+      PatchRallySchema.safeParse({ pinLayer: 'site', pinXPct: 10, pinYPct: null }).success,
+    ).toBe(false)
+  })
+})
+
 describe('RallyRsvpSchema', () => {
   it('accepts a valid rsvp', () => {
     expect(RallyRsvpSchema.safeParse({ status: 'going' }).success).toBe(true)

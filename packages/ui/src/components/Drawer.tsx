@@ -46,6 +46,10 @@ export interface DrawerProps {
    * a safe-area bottom inset and scrolls focused inputs above the
    * soft keyboard. Defaults to `false` (desktop right-side behavior). */
   mobileSheet?: boolean
+  /** With `mobileSheet`, the sheet takes the whole screen on mobile
+   * (100dvh, square corners) instead of capping at 90dvh. Ignored
+   * without `mobileSheet`. */
+  mobileFull?: boolean
 }
 
 export function Drawer({
@@ -56,6 +60,7 @@ export function Drawer({
   width = 360,
   ariaLabel,
   mobileSheet = false,
+  mobileFull = false,
 }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
@@ -124,7 +129,7 @@ export function Drawer({
   if (!open) return null
 
   return (
-    <div role="presentation" className={drawerRootClass(mobileSheet)}>
+    <div role="presentation" className={drawerRootClass(mobileSheet, mobileFull)}>
       <div
         aria-hidden
         onClick={onClose}
@@ -139,7 +144,7 @@ export function Drawer({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label={typeof title === 'string' ? title : ariaLabel}
+        aria-label={typeof title === 'string' ? title : (ariaLabel ?? 'Dialog')}
         tabIndex={-1}
         className="rp-drawer-panel"
         style={{ '--rp-drawer-width': `${width}px` } as CSSProperties}

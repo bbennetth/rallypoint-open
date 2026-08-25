@@ -1,8 +1,8 @@
 import { env } from 'cloudflare:test'
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import type { Hono } from 'hono'
 import { ulid } from 'ulid'
-import type { ListDto, ListItemDto } from '@rallypoint/lists-client'
+import type { ListDto, ListItemDto } from '../services/types.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
 import { buildD1Repos, createDb } from '../repos/d1/index.js'
@@ -63,12 +63,24 @@ describe('D1 integration — My Day aggregator', () => {
   // Stubbed lists surface: one group list, items keyed by list id.
   let cannedLists: ListDto[] = []
   let cannedItemsByList: Record<string, ListItemDto[]> = {}
+  // Stubbed id-service display names, keyed by userId — used to resolve
+  // `favorited_by[].display_name` on the lineup overlay.
+  let cannedDisplayNames: Record<string, string> = {}
 
   const services: Services = {
     idClient: {
       verifyRpidBearer: async (bearer: string) => ({ ok: true as const, userId: bearer }),
       signoutRpidBearer: async () => {},
-      batchLookupUsers: async () => [],
+      batchLookupUsers: async (userIds) =>
+        userIds
+          .filter((id) => cannedDisplayNames[id])
+          .map((id) => ({
+            userId: id,
+            email: `${id}@example.test`,
+            emailVerified: true,
+            displayName: cannedDisplayNames[id]!,
+            pictureUrl: null,
+          })),
     },
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
@@ -99,6 +111,11 @@ describe('D1 integration — My Day aggregator', () => {
     app = buildApp({ env: envVars, logger: undefined, repos, services })
   })
 
+  // Keep the id-service stub order-independent: a test that sets no
+  // names must see none, not whatever the previous test left behind.
+  beforeEach(() => {
+    cannedDisplayNames = {}
+  })
 
   async function loginAs(userId: string): Promise<string> {
     const rawBearer = generateRawToken(EVENTS_SESSION_BEARER_PREFIX)
@@ -127,6 +144,7 @@ describe('D1 integration — My Day aggregator', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -299,5 +317,78 @@ describe('D1 integration — My Day aggregator', () => {
   it('requires authentication', async () => {
     const res = await app.request('http://localhost/api/v1/ui/groups/group_x/day?date=2026-06-01')
     expect(res.status).toBe(401)
+  })
+
+  // Day-agnostic artist-favorite overlay (companion to event_set_stars):
+  // the requester's own favorite flags `favorited`, other members' favorites
+  // surface in `favorited_by` with resolved display names, and the
+  // requester never appears in their own `favorited_by` list.
+  it('flags the requester\'s favorite and lists other members\' favorites with display names', async () => {
+    const owner = `user_${Date.now()}_favday_a`
+    const memberB = `${owner}_b`
+    const bearerA = await loginAs(owner)
+    const eventId = await createEvent(bearerA, 'Favorite Day Event')
+    const groupId = await createGroup(bearerA, eventId, 'Favorite Day Group')
+    await repos.groupMembers.add({ id: `grm_${ulid()}`, groupId, userId: memberB, role: 'member' })
+
+    const date = '2026-06-05'
+    const dayId = await seedDay(eventId, date)
+
+    const artistMine = await repos.artists.create({ id: `art_${ulid()}`, name: 'Mine' })
+    await repos.eventArtists.upsert({
+      eventId,
+      artistId: artistMine.id,
+      dayId,
+      stageId: null,
+      tier: null,
+      genre: null,
+      startTime: '20:00:00',
+      endTime: '21:00:00',
+      displayName: null,
+    })
+    const artistTheirs = await repos.artists.create({ id: `art_${ulid()}`, name: 'Theirs' })
+    await repos.eventArtists.upsert({
+      eventId,
+      artistId: artistTheirs.id,
+      dayId,
+      stageId: null,
+      tier: null,
+      genre: null,
+      startTime: '21:00:00',
+      endTime: '22:00:00',
+      displayName: null,
+    })
+
+    cannedDisplayNames = { [memberB]: 'Member B' }
+
+    // A favorites "Mine"; B favorites "Theirs".
+    await req(bearerA, 'POST', `/api/v1/ui/events/${eventId}/lineup/favorites`, {
+      artistId: artistMine.id,
+    })
+    await repos.eventArtistFavorites.favorite(memberB, { eventId, artistId: artistTheirs.id })
+
+    cannedLists = []
+    cannedItemsByList = {}
+
+    const res = await req(bearerA, 'GET', `/api/v1/ui/groups/${groupId}/day?date=${date}`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      lineup: Array<{
+        artist_id: string
+        favorited: boolean
+        favorited_by: Array<{ user_id: string; display_name: string | null }>
+      }>
+    }
+
+    const mine = body.lineup.find((l) => l.artist_id === artistMine.id)
+    const theirs = body.lineup.find((l) => l.artist_id === artistTheirs.id)
+    expect(mine?.favorited).toBe(true)
+    expect(mine?.favorited_by).toEqual([])
+
+    expect(theirs?.favorited).toBe(false)
+    expect(theirs?.favorited_by).toEqual([{ user_id: memberB, display_name: 'Member B' }])
+    // Requester A never appears in favorited_by, even for their own set.
+    expect(mine?.favorited_by.some((f) => f.user_id === owner)).toBe(false)
+    expect(theirs?.favorited_by.some((f) => f.user_id === owner)).toBe(false)
   })
 })

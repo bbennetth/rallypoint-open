@@ -123,6 +123,26 @@ describe('nextFocusAfterTrap', () => {
     expect(nextFocusAfterTrap(container, a, 'forward')).toBe(c)
   })
 
+  it('skips visibility:hidden focusables (offsetParent is non-null for those)', () => {
+    // visibility:hidden elements keep their offsetParent — only the
+    // computed-style check catches them.
+    document.body.innerHTML = ''
+    const container = document.createElement('div')
+    const a = document.createElement('button')
+    a.textContent = 'a'
+    const hidden = document.createElement('button')
+    hidden.textContent = 'hidden'
+    hidden.style.visibility = 'hidden'
+    const c = document.createElement('button')
+    c.textContent = 'c'
+    container.append(a, hidden, c)
+    document.body.appendChild(container)
+    makeFocusable(a)
+    makeFocusable(hidden) // non-null offsetParent, like a real browser
+    makeFocusable(c)
+    expect(nextFocusAfterTrap(container, a, 'forward')).toBe(c)
+  })
+
   it('falls back to first focusable when current is outside the container', () => {
     const { container, focusables } = setup(
       '<button>a</button><button>b</button>',

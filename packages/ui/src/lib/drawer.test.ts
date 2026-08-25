@@ -9,6 +9,14 @@ describe('drawerRootClass', () => {
   it('adds the sheet modifier when mobileSheet is on', () => {
     expect(drawerRootClass(true)).toBe('rp-drawer-root rp-drawer-root--sheet')
   })
+
+  it('adds the full-height modifier only alongside the sheet modifier', () => {
+    expect(drawerRootClass(true, true)).toBe(
+      'rp-drawer-root rp-drawer-root--sheet rp-drawer-root--full',
+    )
+    // mobileFull without mobileSheet is a no-op — desktop panel unchanged.
+    expect(drawerRootClass(false, true)).toBe('rp-drawer-root')
+  })
 })
 
 describe('drawerCss', () => {
@@ -34,6 +42,14 @@ describe('drawerCss', () => {
     expect(css).toContain('border-radius: 16px 16px 0 0')
     expect(css).toContain('max-height: 90dvh')
     expect(css).toContain('@keyframes rp-drawer-slide-up')
+  })
+
+  it('defines the full-height sheet treatment: 100dvh, square corners', () => {
+    const css = drawerCss()
+    expect(css).toContain('.rp-drawer-root--full .rp-drawer-panel')
+    expect(css).toContain('height: 100dvh')
+    expect(css).toContain('max-height: 100dvh')
+    expect(css).toContain('border-radius: 0')
   })
 
   it('keeps the desktop right-side keyframes', () => {

@@ -16,17 +16,26 @@ export function OverviewPage() {
   return (
     <main className="page-pad">
       <div className="max-w-3xl mx-auto space-y-6">
-        <header className="space-y-1">
-          <p className="text-xs font-medium" style={{ color: 'var(--acid)' }}>
-            Overview
-          </p>
-          <h1 className="display text-2xl">{event.name}</h1>
-          {event.description && (
-            <p className="text-white/80 text-sm leading-relaxed">{event.description}</p>
-          )}
-        </header>
+        {/* Ink kit: `.pg-head` carrying the eyebrow context tag +
+            display-font H1. The eyebrow uses the live accent so it
+            reads as the active owner tab. */}
+        <div className="pg-head" style={{ marginBottom: 8 }}>
+          <div>
+            <span className="eyebrow" style={{ color: 'var(--acid)' }}>
+              Overview
+            </span>
+            <h1 style={{ marginTop: 6 }}>{event.name}</h1>
+            {event.description && (
+              <p className="sub" style={{ marginTop: 8, maxWidth: '62ch' }}>
+                {event.description}
+              </p>
+            )}
+          </div>
+        </div>
 
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* Kit's `.md-stats` 4-up tile row — already defined in the
+            planner-web index.css. Reuses the `.pl-stat` tile shape. */}
+        <section className="md-stats" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
           <StatCard
             label="Privacy"
             value={privacyLabel(event.privacy_mode)}
@@ -82,27 +91,25 @@ function StatCard({
   value: string
   href?: string
 }) {
+  // Ink kit's `.pl-stat` tile: display-font value + mono-eyebrow label.
+  // `.pl-stat` + `.md-stats` are defined in `apps/events-web/src/events.css`
+  // (duplicated from planner-web's index.css since the apps don't share
+  // a CSS bundle at runtime).
+  //
+  // The .pl-stat .v CSS default is 26px desktop / 18px mobile. We
+  // override to 18px on every viewport here because Overview shows 4
+  // tiles in a row (vs Planner's 3), so the larger display font would
+  // wrap or ellipsize too aggressively on common desktop widths.
   const inner = (
-    <div
-      className="p-3 space-y-1"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
-    >
-      <div
-        className="mono"
-        style={{
-          fontSize: 9,
-          letterSpacing: '0.14em',
-          color: 'var(--ink-mute)',
-          textTransform: 'uppercase',
-        }}
-      >
-        {label}
+    <div className="pl-stat">
+      <div className="v" style={{ fontSize: 18, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {value}
       </div>
-      <div className="text-sm text-white/85 truncate">{value}</div>
+      <div className="k">{label}</div>
     </div>
   )
   return href ? (
-    <Link to={href} style={{ textDecoration: 'none' }}>
+    <Link to={href} style={{ textDecoration: 'none', color: 'inherit' }}>
       {inner}
     </Link>
   ) : (
@@ -122,8 +129,7 @@ function ActionCard({
   return (
     <Link to={href} style={{ textDecoration: 'none' }}>
       <div
-        className="p-4 space-y-2 hover:bg-white/10 transition-colors"
-        style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+        className="p-4 space-y-2 hover:bg-white/10 transition-colors pl-card"
       >
         <h2
           className="display"

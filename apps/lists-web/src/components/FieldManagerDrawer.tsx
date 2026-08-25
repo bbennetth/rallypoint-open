@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { Button, Drawer, useToast } from '@rallypoint/ui'
 import { FIELD_TYPES, type CreateFieldDefInput, type FieldType } from '@rallypoint/lists-shared'
 import {
@@ -66,18 +67,25 @@ export function FieldManagerDrawer({ open, onClose, listId, listName }: FieldMan
   // React reuse the wrong controlled input by array index.
   const [choiceDrafts, setChoiceDrafts] = useState<ChoiceDraft[]>(() => [newChoiceDraft()])
   const [submitting, setSubmitting] = useState(false)
+  // The drawer stays mounted across list switches (deps [open, listId]); gate
+  // the commit so an older list's defs can't overwrite the newer list's.
+  const run = useAsyncTask()
 
   async function load() {
     setState({ status: STATUS_LOADING })
-    try {
-      const page = await listFieldDefs(listId)
-      setState({ status: STATUS_READY, defs: page.items })
-    } catch (err) {
-      setState({
-        status: STATUS_ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load fields.',
-      })
-    }
+    await run(async (ctx) => {
+      try {
+        const page = await listFieldDefs(listId)
+        if (ctx.stale()) return
+        setState({ status: STATUS_READY, defs: page.items })
+      } catch (err) {
+        if (ctx.stale()) return
+        setState({
+          status: STATUS_ERROR,
+          message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load fields.',
+        })
+      }
+    })
   }
 
   useEffect(() => {

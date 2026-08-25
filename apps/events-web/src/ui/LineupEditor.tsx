@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   bulkApplyLineup,
@@ -23,10 +24,11 @@ import {
 } from '../lib/lineup-grid.js'
 
 // A single editable row in the lineup grid. Existing rows are keyed by
-// their composite (artist_id, day_id) PK; the artist + day of an existing
-// row are immutable (changing either is a PK change, which the grid models
-// as a delete + a fresh new row). New rows resolve their artist name to an
-// id on save via find-or-create.
+// their composite (artist_id, day_id) identity; the artist + day of an
+// existing row are immutable (changing either is an identity change, which
+// the grid models as a delete + a fresh new row). New rows resolve their
+// artist name to an id on save via find-or-create. dayId '' = unscheduled
+// (TBA) booking — the artist is on the lineup with no day assigned yet.
 interface DraftRow {
   key: string
   isNew: boolean
@@ -51,12 +53,12 @@ let newRowSeq = 0
 
 function rowFromSlot(slot: LineupSlotDto, artistName: string): DraftRow {
   return {
-    key: `${slot.artist_id}:${slot.day_id}`,
+    key: `${slot.artist_id}:${slot.day_id ?? 'none'}`,
     isNew: false,
     deleted: false,
     artistId: slot.artist_id,
     artistName,
-    dayId: slot.day_id,
+    dayId: slot.day_id ?? '',
     stageId: slot.stage_id ?? '',
     tier: slot.tier ?? '',
     genre: slot.genre ?? '',
@@ -121,23 +123,21 @@ export function LineupEditor({
     setBaseline(new Map(next.map((r) => [r.key, rowSignature(r)])))
   }
 
+  const run = useAsyncTask()
   useEffect(() => {
-    let cancelled = false
-    Promise.all([listStages(eventId), listDays(eventId), listLineup(eventId)])
-      .then(([s, d, l]) => {
-        if (cancelled) return
+    void run(async (ctx) => {
+      try {
+        const [s, d, l] = await Promise.all([listStages(eventId), listDays(eventId), listLineup(eventId)])
+        if (ctx.stale()) return
         setStages(s)
         setDays(d)
         hydrateRows(l)
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
+      } catch (err) {
+        if (ctx.stale()) return
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load lineup data.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [eventId, reloadSignal])
+      }
+    })
+  }, [eventId, reloadSignal, run])
 
   async function refetchLineup() {
     const l = await listLineup(eventId)
@@ -191,8 +191,9 @@ export function LineupEditor({
   }
 
   // Resolve a pasted day cell (label or date) and stage name to ids, mint new
-  // rows, and append them. Unresolved day falls back to the first day; unknown
-  // stage / invalid tier fall back to empty so the user can fix them inline.
+  // rows, and append them. Unresolved/empty day imports as unscheduled (TBA);
+  // unknown stage / invalid tier fall back to empty so the user can fix them
+  // inline.
   function appendPastedRows(text: string) {
     const parsed = parseLineupClipboard(text)
     if (parsed.length === 0) return
@@ -203,13 +204,12 @@ export function LineupEditor({
     }
     const stageByName = new Map(stages.map((s) => [s.name.trim().toLowerCase(), s.id]))
     const validTiers = new Set<string>(TIERS)
-    const fallbackDay = days[0]?.id ?? ''
     const additions: DraftRow[] = parsed
       .filter((p) => p.artist.trim() !== '')
       .map((p) => {
         const tierKey = p.tier.trim().toLowerCase()
         return {
-          ...blankRow(dayByKey.get(p.day.trim().toLowerCase()) ?? fallbackDay),
+          ...blankRow(dayByKey.get(p.day.trim().toLowerCase()) ?? ''),
           artistName: p.artist.trim(),
           stageId: stageByName.get(p.stage.trim().toLowerCase()) ?? '',
           tier: validTiers.has(tierKey) ? (tierKey as LineupTier) : '',
@@ -265,7 +265,7 @@ export function LineupEditor({
   function buildSlotInput(r: DraftRow, artistId: string): LineupSlotInput {
     return {
       artistId,
-      dayId: r.dayId,
+      dayId: r.dayId || null,
       stageId: r.stageId || null,
       tier: r.tier || null,
       genre: r.genre || null,
@@ -283,10 +283,6 @@ export function LineupEditor({
     for (const r of newRows) {
       if (!r.artistName.trim()) {
         setGridError('Every new row needs an artist name.')
-        return
-      }
-      if (!r.dayId) {
-        setGridError('Every new row needs a day.')
         return
       }
     }
@@ -311,7 +307,7 @@ export function LineupEditor({
 
       const deletes: LineupDeleteRef[] = rows
         .filter((r) => !r.isNew && r.deleted && r.artistId)
-        .map((r) => ({ artistId: r.artistId!, dayId: r.dayId }))
+        .map((r) => ({ artistId: r.artistId!, dayId: r.dayId || null }))
 
       await bulkApplyLineup(eventId, { slots: slotInputs, deletes })
       await refetchLineup()
@@ -367,8 +363,8 @@ export function LineupEditor({
     return (
       <div
         role="alert"
-        className="p-3 text-sm text-[color:var(--ink)]"
-        style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+        className="p-3 text-sm"
+        style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
       >
         {loadError}
       </div>
@@ -378,17 +374,16 @@ export function LineupEditor({
   const inputCls = 'cyber-input'
 
   return (
-    <div className="p-4 space-y-6" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+    <div className="p-4 space-y-6 pl-card">
       <div className="space-y-3" onPaste={onGridPaste}>
         <div className="flex items-center gap-2 flex-wrap">
           <h3 className="text-xs font-medium text-[color:var(--ink-mute)] flex-1">Lineup</h3>
           <button
             type="button"
             onClick={addRow}
-            disabled={days.length === 0}
             className="btn-brutal"
             style={{ width: 'auto' }}
-            title={days.length === 0 ? 'Add a day in Settings first' : 'Add a lineup row'}
+            title="Add a lineup row"
           >
             + Add row
           </button>
@@ -405,7 +400,6 @@ export function LineupEditor({
           <button
             type="button"
             onClick={() => void pasteFromClipboard()}
-            disabled={days.length === 0}
             className="btn-ghost"
             style={{ width: 'auto' }}
             title="Paste rows from the clipboard"
@@ -425,20 +419,22 @@ export function LineupEditor({
 
         {days.length === 0 ? (
           <p className="text-xs text-[color:var(--ink-mute)]">
-            No days yet — add days on the Settings tab before building the lineup.
+            No days yet — rows added now import as TBA and can be moved onto days later
+            (days are managed on the Settings tab).
           </p>
         ) : (
           <p className="text-xs text-[color:var(--ink-dim)]">
             Tip: paste rows straight from a spreadsheet (artist, day, stage, tier, start, end,
-            display name). Save changes writes them all at once.
+            display name). Leave the day blank for a TBA booking. Save changes writes them all
+            at once.
           </p>
         )}
 
-        {days.length > 0 && rows.length === 0 && (
+        {rows.length === 0 && (
           <p className="text-xs text-[color:var(--ink-mute)]">No lineup slots yet.</p>
         )}
 
-        {days.length > 0 && rows.length > 0 && (
+        {rows.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
               <thead>
@@ -457,7 +453,7 @@ export function LineupEditor({
                 {rows.map((r) => (
                   <tr
                     key={r.key}
-                    style={{ opacity: r.deleted ? 0.45 : 1, borderTop: '1px solid var(--line)' }}
+                    style={{ opacity: r.deleted ? 0.45 : 1, borderTop: '1px solid var(--hairline-soft)' }}
                   >
                     <td className="p-1 align-top">
                       {r.isNew ? (
@@ -481,7 +477,7 @@ export function LineupEditor({
                           className={`${inputCls} w-full`}
                           aria-label="Day"
                         >
-                          <option value="">Pick a day</option>
+                          <option value="">TBA (no day)</option>
                           {days.map((d) => (
                             <option key={d.id} value={d.id}>
                               {d.day_label}
@@ -490,7 +486,7 @@ export function LineupEditor({
                         </select>
                       ) : (
                         <span className="text-[color:var(--ink-dim)]">
-                          {dayById.get(r.dayId)?.day_label ?? '—'}
+                          {r.dayId ? (dayById.get(r.dayId)?.day_label ?? '—') : 'TBA'}
                         </span>
                       )}
                     </td>
@@ -584,8 +580,8 @@ export function LineupEditor({
         {gridError && (
           <div
             role="alert"
-            className="p-3 text-sm text-[color:var(--ink)]"
-            style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+            className="p-3 text-sm"
+            style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
           >
             {gridError}
           </div>

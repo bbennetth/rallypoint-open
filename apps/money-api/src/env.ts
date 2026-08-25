@@ -16,9 +16,9 @@ const EnvSchema = z.object({
   MONEY_UI_ORIGIN: z.string().url().default('http://localhost:5176'),
   SDK_CORS_ALLOWED_ORIGINS: z.string().default(''),
 
-  // Rallypoint ID coordinates. money-api consumes RPID over HTTP via
-  // @rallypoint/id-client (session verify) and the SSO exchange.
-  RPID_API_URL: z.string().url().default('http://localhost:8080'),
+  // Rallypoint ID UI origin (browser-facing). The id-api server-to-server
+  // origin moved off HTTP in PR 3 of feat/rpc-bindings — money-api now
+  // reaches id-api through its `Service<IdRPC>` binding.
   RPID_UI_URL: z.string().url().default('http://localhost:5173'),
 
   // Trust policy for IP-extraction headers (#33).
@@ -39,19 +39,6 @@ const EnvSchema = z.object({
   TRUSTED_PROXY_HEADER: z
     .enum(['legacy', 'xff', 'cf-connecting-ip', 'none'])
     .default('legacy'),
-
-  // Bearer presented to RPID's *_API_KEY-gated SDK endpoints
-  // (/sdk/sso/exchange). MUST match the value RPID parses for the
-  // money app. Required in production; a dev default is supplied
-  // post-parse so the local stack boots unconfigured.
-  MONEY_API_KEY: z.string().min(32).optional(),
-
-  // Peer-app key that gates the /api/v1/sdk/* surface. events-api
-  // presents its own EVENTS_API_KEY; money-api validates it against
-  // this. Optional → unset means /sdk/* 404s (the route does not
-  // exist on this deployment). the local dev stack exports the same value
-  // to both services.
-  EVENTS_API_KEY: z.string().min(32).optional(),
 
   // Symmetric key material for sealing the RPID session bearer at rest
   // (crypto/encryption.ts). Active version is MONEY_SESSION_KEY_VERSION;
@@ -74,6 +61,18 @@ const EnvSchema = z.object({
   MONEY_CSRF_COOKIE_NAME: z.string().min(1).optional(),
   MONEY_SSO_STATE_COOKIE_NAME: z.string().min(1).optional(),
 
+  // PostHog server-side error tracking. The project API key is a public
+  // `phc_…` write key (same class of value the web bundles ship), so it
+  // lives in wrangler.toml [vars], not secrets. Unset (local dev/FOSS) →
+  // exception capture is a no-op.
+  POSTHOG_KEY: z.string().min(1).optional(),
+  POSTHOG_HOST: z.string().url().optional(),
+  // Deploy target (qa/prod) — becomes the OTel
+  // `deployment.environment` resource attribute on forwarded logs.
+  // QA and prod share one PostHog project, so without it their logs
+  // are indistinguishable. Unset locally.
+  DEPLOY_ENV: z.enum(['qa', 'prod']).optional(),
+
   // Build metadata — set by the Dockerfile at image-build time.
   BUILD_VERSION: z.string().default('dev'),
   BUILD_COMMIT: z.string().default('dev'),
@@ -86,14 +85,12 @@ type ParsedEnv = z.infer<typeof EnvSchema>
 // derivation) and strips their optionality.
 export type Env = Omit<
   ParsedEnv,
-  | 'MONEY_API_KEY'
   | 'MONEY_SESSION_KEY_V1'
   | 'REALTIME_TOKEN_HMAC_KEY'
   | 'MONEY_SESSION_COOKIE_NAME'
   | 'MONEY_CSRF_COOKIE_NAME'
   | 'MONEY_SSO_STATE_COOKIE_NAME'
 > & {
-  MONEY_API_KEY: string
   MONEY_SESSION_KEY_V1: string
   REALTIME_TOKEN_HMAC_KEY: string
   MONEY_SESSION_COOKIE_NAME: string
@@ -101,18 +98,8 @@ export type Env = Omit<
   MONEY_SSO_STATE_COOKIE_NAME: string
 }
 
-// Dev-only fallbacks for the required secrets. Production refuses
-// to boot without explicit values; dev/test get a fixed stand-in so
-// the local stack and the test suite run unconfigured. Must match
-// the local dev stack and .env.example so the SSO exchange works even when
-// an app is started outside the dev stack (RPID and money-api must present
-// the SAME key or RPID 403s the exchange).
-const DEV_API_KEY = 'dev-money-api-key-do-not-use-in-production-32+chars'
 const DEV_SESSION_KEY_V1 = 'dev-money-session-key-v1-0000000000000'
 const DEV_REALTIME_TOKEN_HMAC_KEY = 'dev-realtime-token-hmac-key-0000000000000'
-// MUST match apps/events-api/src/env.ts DEV_API_KEY — that is the value
-// events-api presents to money-api's /sdk/* gate in the dev stack.
-const DEV_EVENTS_API_KEY = 'dev-events-api-key-do-not-use-in-production-32+chars'
 
 export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const result = EnvSchema.safeParse(source)
@@ -125,14 +112,12 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = result.data
   const isProd = parsed.NODE_ENV === 'production'
 
-  const apiKey = parsed.MONEY_API_KEY ?? (isProd ? undefined : DEV_API_KEY)
   const sessionKeyV1 =
     parsed.MONEY_SESSION_KEY_V1 ?? (isProd ? undefined : DEV_SESSION_KEY_V1)
   const realtimeKey =
     parsed.REALTIME_TOKEN_HMAC_KEY ?? (isProd ? undefined : DEV_REALTIME_TOKEN_HMAC_KEY)
-  if (!apiKey || !sessionKeyV1 || !realtimeKey) {
+  if (!sessionKeyV1 || !realtimeKey) {
     const missing = [
-      !apiKey ? 'MONEY_API_KEY' : null,
       !sessionKeyV1 ? 'MONEY_SESSION_KEY_V1' : null,
       !realtimeKey ? 'REALTIME_TOKEN_HMAC_KEY' : null,
     ]
@@ -143,10 +128,6 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
   return {
     ...parsed,
-    MONEY_API_KEY: apiKey,
-    // Unset in prod → /sdk/* 404s (integration off); dev gets the shared
-    // stand-in so a fresh stack proxies group ledgers without manual config.
-    EVENTS_API_KEY: parsed.EVENTS_API_KEY ?? (isProd ? undefined : DEV_EVENTS_API_KEY),
     MONEY_SESSION_KEY_V1: sessionKeyV1,
     REALTIME_TOKEN_HMAC_KEY: realtimeKey,
     MONEY_SESSION_COOKIE_NAME:

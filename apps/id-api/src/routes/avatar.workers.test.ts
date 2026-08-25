@@ -24,11 +24,14 @@ const CSRF_COOKIE_NAME = ENV.CSRF_COOKIE_NAME
 const TEST_CSRF = 'test-csrf-' + 'x'.repeat(40)
 const bucket = env.OBJECT_STORE as unknown as R2Bucket
 
-// Headers for a credentialed, CSRF-bearing raw-bytes upload.
+// Headers for a credentialed, CSRF-bearing raw-bytes upload. State-changing
+// /api/v1/ui/* requests must carry an allowed Origin (audit E1 #19), so every
+// POST/DELETE helper sends UI_ORIGIN.
 function uploadHeaders(cookie: string, contentType: string): Record<string, string> {
   return {
     cookie: [cookie, `${CSRF_COOKIE_NAME}=${TEST_CSRF}`].filter(Boolean).join('; '),
     'x-rp-csrf': TEST_CSRF,
+    origin: ENV.UI_ORIGIN,
     'content-type': contentType,
   }
 }
@@ -37,6 +40,7 @@ function csrfOnly(cookie: string): Record<string, string> {
   return {
     cookie: [cookie, `${CSRF_COOKIE_NAME}=${TEST_CSRF}`].filter(Boolean).join('; '),
     'x-rp-csrf': TEST_CSRF,
+    origin: ENV.UI_ORIGIN,
   }
 }
 
@@ -69,6 +73,7 @@ async function authed(app: ReturnType<typeof buildTestApp>['app'], repos: Return
     tenantId: 'rallypoint',
     ipHash: 'a'.repeat(64),
     uaHash: 'b'.repeat(64),
+    sessionHmacKey: ENV.SESSION_HMAC_KEY,
   })
   return { userId, cookie: `${SESSION_COOKIE_NAME}=${rawToken}` }
 }
@@ -91,7 +96,7 @@ describe('POST /api/v1/ui/me/avatar (upload)', () => {
     const { app } = buildTestApp()
     const res = await app.request('/api/v1/ui/me/avatar', {
       method: 'POST',
-      headers: { 'content-type': 'image/png', 'x-rp-csrf': TEST_CSRF, cookie: `${CSRF_COOKIE_NAME}=${TEST_CSRF}` },
+      headers: { 'content-type': 'image/png', 'x-rp-csrf': TEST_CSRF, origin: ENV.UI_ORIGIN, cookie: `${CSRF_COOKIE_NAME}=${TEST_CSRF}` },
       body: PNG_BYTES,
     })
     expect(res.status).toBe(401)

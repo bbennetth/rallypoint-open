@@ -119,6 +119,7 @@ describe('D1 integration — maps / POIs / no-go zones', () => {
     return {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -179,6 +180,25 @@ describe('D1 integration — maps / POIs / no-go zones', () => {
     )
     expect(serve.status).toBe(200)
     expect(serve.headers.get('Content-Type')).toBe('image/jpeg')
+  })
+
+  it('rejects an over-cap declared Content-Length before parsing the body', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_biglen`)
+    const eventId = await createEvent(bearer, 'Declared Too Big Fest')
+    // Declared length far over the 10 MB cap; the tiny body is never parsed
+    // because the early gate rejects first. Had the gate not fired, the
+    // non-multipart body would instead yield a 'file is required' error.
+    const res = await app.request(`http://localhost/api/v1/ui/events/${eventId}/maps`, {
+      method: 'POST',
+      headers: {
+        ...headers(bearer),
+        'content-type': 'multipart/form-data; boundary=----x',
+        'content-length': String(64 * 1024 * 1024),
+      },
+      body: 'x',
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('image_too_large')
   })
 
   it('upload rejects unsupported mime type', async () => {

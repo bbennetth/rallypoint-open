@@ -1,0 +1,129 @@
+# admin-api as a Cloudflare Worker. `wrangler deploy --env qa`
+# -> admin.rallypt.dev, `--env prod` -> admin.rallypt.app. Entry is
+# src/worker.ts (`{ fetch }`).
+#
+# Admin is a thin BFF: RPID SSO + an ADMIN_USER_IDS allowlist gate in front
+# of fitness-api's FitnessRPC admin methods (exercise-submission review).
+# It carries only the two infra tables every consumer app needs (sessions +
+# rate_limits) in its own D1 — no domain tables, no R2, no Durable Objects,
+# no cron.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned by wrangler /
+# the bootstrap step (rp-admin-{qa,prod} created if absent; database_id
+# injected by cf-deploy.yml at deploy time). Real secrets via
+# `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
+#   ADMIN_SESSION_KEY_V1
+#   ADMIN_USER_IDS   (comma-separated RPID user ids; empty/absent = nobody)
+
+name = "rallypoint-admin"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the admin-web SPA from the assets dir; run the Worker first only for
+# the API, so /api/* hits the Worker while the SPA serves first-party from
+# the same origin (the __Host- cookie config). The deploy build populates
+# ./public from `npm run build -w @rallypoint/admin-web`; a committed
+# placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# admin has no scheduled handler (no pruner/cron), so NO [triggers] block.
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for the secrets. ADMIN_USER_IDS defaults to empty
+# (nobody) — set it in apps/admin-api/.dev.vars to grant yourself access
+# locally (user ids print in the id-api log / RPID account page).
+[vars]
+NODE_ENV = "development"
+ADMIN_UI_ORIGIN = "http://localhost:5179"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-admin-local"
+# Ignored by `wrangler dev --local` (local SQLite store); a real id is only
+# needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/admin-db/migrations"
+
+# Top-level service bindings — required for cross-process RPC under
+# wrangler's local dev registry (feat/rpc-bindings pattern).
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+[[services]]
+binding = "FITNESS"
+service = "rallypoint-fitness"
+entrypoint = "FitnessRPC"
+
+[[services]]
+binding = "EVENTS"
+service = "rallypoint-events"
+entrypoint = "EventsRPC"
+
+# ---- QA: admin.rallypt.dev ------------------------------------------
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
+[env.qa]
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", ADMIN_UI_ORIGIN = "https://admin.rallypt.dev", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-admin-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+migrations_dir = "../../packages/admin-db/migrations"
+
+[[env.qa.services]]
+binding = "RPID"
+entrypoint = "IdRPC"
+service = "rallypoint-id-qa"
+
+[[env.qa.services]]
+binding = "FITNESS"
+entrypoint = "FitnessRPC"
+service = "rallypoint-fitness-qa"
+
+[[env.qa.services]]
+binding = "EVENTS"
+entrypoint = "EventsRPC"
+service = "rallypoint-events-qa"
+
+[[env.qa.routes]]
+pattern = "admin.rallypt.dev"
+custom_domain = true
+
+# ---- Prod: admin.rallypt.app ----------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", ADMIN_UI_ORIGIN = "https://admin.rallypt.app", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-admin-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+migrations_dir = "../../packages/admin-db/migrations"
+
+[[env.prod.services]]
+binding = "RPID"
+entrypoint = "IdRPC"
+service = "rallypoint-id-prod"
+
+[[env.prod.services]]
+binding = "FITNESS"
+entrypoint = "FitnessRPC"
+service = "rallypoint-fitness-prod"
+
+[[env.prod.services]]
+binding = "EVENTS"
+entrypoint = "EventsRPC"
+service = "rallypoint-events-prod"
+
+[[env.prod.routes]]
+pattern = "admin.rallypt.app"
+custom_domain = true

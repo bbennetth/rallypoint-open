@@ -18,3 +18,6 @@ export * from './list-query.js'
 export * from './recurrence.js'
 export * from './views.js'
 export * from './shopping.js'
+// Generic list transfer bundle (data export/import). Planner composes this;
+// the knowledge of what a list contains stays here, next to its rules.
+export * from './transfer.js'

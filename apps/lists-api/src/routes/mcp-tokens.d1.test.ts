@@ -75,6 +75,7 @@ describe('D1 integration — MCP tokens', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -83,15 +84,6 @@ describe('D1 integration — MCP tokens', () => {
       method,
       headers: uiHeaders(bearer),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    })
-  }
-
-  // Resolve via the SDK surface (key-gated, no cookies).
-  async function resolve(token: string, apiKey = envVars.MCP_API_KEY!): Promise<Response> {
-    return app.request('http://localhost/api/v1/sdk/mcp/resolve-token', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
     })
   }
 
@@ -111,81 +103,5 @@ describe('D1 integration — MCP tokens', () => {
     expect(listed.items[0]!.id).toBe(created.id)
     // The secret is never returned on list.
     expect(listed.items[0]!.token).toBeUndefined()
-  })
-
-  it('resolves a valid token to its owner and stamps last_used', async () => {
-    const userId = `user_${Date.now()}_resolve`
-    const bearer = await loginAs(userId)
-    const created = (await (
-      await ui(bearer, 'POST', '/api/v1/ui/mcp-tokens', { label: 'cli' })
-    ).json()) as Token
-
-    const res = await resolve(created.token!)
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { userId: string; tokenId: string }
-    expect(body.userId).toBe(userId)
-    expect(body.tokenId).toBe(created.id)
-
-    // last_used_at is now set.
-    const listed = (await (await ui(bearer, 'GET', '/api/v1/ui/mcp-tokens')).json()) as {
-      items: Token[]
-    }
-    expect(listed.items[0]!.last_used_at).not.toBeNull()
-  })
-
-  it('rejects an unknown token (401) and resolve without an SDK key (403)', async () => {
-    const unknown = await resolve('rplmcp_not_a_real_token')
-    expect(unknown.status).toBe(401)
-
-    const noKey = await app.request('http://localhost/api/v1/sdk/mcp/resolve-token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: 'rplmcp_x' }),
-    })
-    expect(noKey.status).toBe(403)
-  })
-
-  it('a revoked token no longer resolves (401)', async () => {
-    const bearer = await loginAs(`user_${Date.now()}_revoke`)
-    const created = (await (
-      await ui(bearer, 'POST', '/api/v1/ui/mcp-tokens', { label: 'temp' })
-    ).json()) as Token
-
-    expect((await resolve(created.token!)).status).toBe(200)
-
-    const del = await ui(bearer, 'DELETE', `/api/v1/ui/mcp-tokens/${created.id}`)
-    expect(del.status).toBe(204)
-
-    expect((await resolve(created.token!)).status).toBe(401)
-    // Revoking again is a 404 (already revoked).
-    expect((await ui(bearer, 'DELETE', `/api/v1/ui/mcp-tokens/${created.id}`)).status).toBe(404)
-  })
-
-  it('one user cannot revoke another user’s token (404)', async () => {
-    const owner = await loginAs(`user_${Date.now()}_owner`)
-    const created = (await (
-      await ui(owner, 'POST', '/api/v1/ui/mcp-tokens', { label: 'mine' })
-    ).json()) as Token
-
-    const attacker = await loginAs(`user_${Date.now()}_attacker`)
-    const del = await ui(attacker, 'DELETE', `/api/v1/ui/mcp-tokens/${created.id}`)
-    expect(del.status).toBe(404)
-    // Still resolves for the owner — not revoked.
-    expect((await resolve(created.token!)).status).toBe(200)
-  })
-
-  it('an expired token does not resolve (401)', async () => {
-    // Insert a token directly with a past expiry.
-    const userId = `user_${Date.now()}_expired`
-    const raw = generateRawToken('rplmcp_')
-    await repos.mcpTokens.create({
-      id: `mtk_exp_${Date.now()}`,
-      tenantId: 'rallypoint',
-      idHash: hashToken(raw),
-      userId,
-      label: 'old',
-      expiresAt: new Date(Date.now() - 1000),
-    })
-    expect((await resolve(raw)).status).toBe(401)
   })
 })

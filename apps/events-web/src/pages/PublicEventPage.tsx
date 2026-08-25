@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { useAsync, useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   getPublicEvent,
@@ -12,6 +13,7 @@ import {
   type PublicSessionDto,
   type WeatherDto,
 } from '../lib/api.js'
+import { isSafeHttpUrl } from '../lib/url-safety.js'
 
 // Read-only public event landing page (design §11). Cookieless fetch;
 // the section list comes from the SDK response and each section
@@ -28,20 +30,21 @@ type PageState =
 export function PublicEventPage() {
   const { slug } = useParams<{ slug: string }>()
   const [state, setState] = useState<PageState>({ status: 'loading' })
+  const run = useAsyncTask()
 
   useEffect(() => {
     if (!slug) {
       setState({ status: 'hidden' })
       return
     }
-    let active = true
     setState({ status: 'loading' })
-    getPublicEvent(slug)
-      .then((event) => {
-        if (active) setState({ status: 'ready', event })
-      })
-      .catch((err: unknown) => {
-        if (!active) return
+    void run(async (ctx) => {
+      try {
+        const event = await getPublicEvent(slug)
+        if (ctx.stale()) return
+        setState({ status: 'ready', event })
+      } catch (err) {
+        if (ctx.stale()) return
         if (err instanceof ApiError && err.status === 404) {
           setState({ status: 'hidden' })
           return
@@ -50,11 +53,9 @@ export function PublicEventPage() {
           status: 'error',
           message: err instanceof Error ? err.message : 'Unknown error.',
         })
-      })
-    return () => {
-      active = false
-    }
-  }, [slug])
+      }
+    })
+  }, [slug, run])
 
   if (state.status === 'loading') {
     return (
@@ -96,6 +97,9 @@ export function PublicEventPage() {
 function PublicEventBody({ event }: { event: PublicEventDto }) {
   const accent = event.theme.accentColor ?? '#0a0a0a'
   const bg = event.theme.backgroundImageUrl
+  // Stable fetcher reference so WeatherSection's useEffect([fetcher]) dep
+  // doesn't re-trigger on every render of this component.
+  const weatherFetcher = useCallback(() => getPublicEventWeather(event.slug), [event.slug])
 
   return (
     <main
@@ -152,10 +156,10 @@ function PublicEventBody({ event }: { event: PublicEventDto }) {
               has coordinates and falls inside the refresh window. The
               section fetches its own data; an empty/null response
               renders nothing. */}
-          <WeatherSection fetcher={() => getPublicEventWeather(event.slug)} />
+          <WeatherSection fetcher={weatherFetcher} />
         </div>
 
-        <footer className="pt-6 border-t border-white/10 text-xs text-white/40">
+        <footer className="pt-6 border-t border-[color:var(--hairline-soft)] text-xs text-white/40">
           Powered by Rallypoint Events ·{' '}
           <a className="underline hover:text-white/60" href="/">
             Create your own event
@@ -191,7 +195,7 @@ function SectionRenderer({
 
 function DescriptionSection({ text }: { text: string }) {
   return (
-    <section className="p-4" style={{ border: '1.5px solid var(--line)' }}>
+    <section className="p-4 pl-card">
       <h2 className="text-xs font-medium mb-2" style={{ color: 'var(--accent)' }}>
         About
       </h2>
@@ -200,11 +204,6 @@ function DescriptionSection({ text }: { text: string }) {
   )
 }
 
-type LineupState =
-  | { status: 'loading' }
-  | { status: 'ready'; data: PublicLineupDto }
-  | { status: 'error' }
-
 function LineupSection({
   slug,
   limitToTier,
@@ -212,34 +211,19 @@ function LineupSection({
   slug: string
   limitToTier: 'headliner' | 'support' | null
 }) {
-  const [state, setState] = useState<LineupState>({ status: 'loading' })
-
-  useEffect(() => {
-    let active = true
-    setState({ status: 'loading' })
-    getPublicEventLineup(slug)
-      .then((data) => {
-        if (active) setState({ status: 'ready', data })
-      })
-      .catch(() => {
-        if (active) setState({ status: 'error' })
-      })
-    return () => {
-      active = false
-    }
-  }, [slug])
+  const { data, error, loading } = useAsync<PublicLineupDto>(() => getPublicEventLineup(slug), [slug])
 
   return (
-    <section className="p-4 space-y-3" style={{ border: '1.5px solid var(--line)' }}>
+    <section className="p-4 space-y-3 pl-card">
       <h2 className="text-xs font-medium" style={{ color: 'var(--accent)' }}>
         Lineup
       </h2>
-      {state.status === 'loading' && <p className="text-sm text-white/60">Loading lineup…</p>}
-      {state.status === 'error' && (
+      {loading && <p className="text-sm text-white/60">Loading lineup…</p>}
+      {!loading && Boolean(error) && (
         <p className="text-sm text-white/60">Lineup is unavailable right now.</p>
       )}
-      {state.status === 'ready' && (
-        <LineupBody data={state.data} limitToTier={limitToTier} />
+      {!loading && data && (
+        <LineupBody data={data} limitToTier={limitToTier} />
       )}
     </section>
   )
@@ -305,44 +289,28 @@ function LineupBody({
   )
 }
 
-type SessionsState =
-  | { status: 'loading' }
-  | { status: 'ready'; items: PublicSessionDto[] }
-  | { status: 'error' }
-
 function SessionsSection({ slug, dayId }: { slug: string; dayId: string | null }) {
-  const [state, setState] = useState<SessionsState>({ status: 'loading' })
-
-  useEffect(() => {
-    let active = true
-    setState({ status: 'loading' })
-    getPublicEventSessions(slug, dayId ? { dayId } : undefined)
-      .then((items) => {
-        if (active) setState({ status: 'ready', items })
-      })
-      .catch(() => {
-        if (active) setState({ status: 'error' })
-      })
-    return () => {
-      active = false
-    }
-  }, [slug, dayId])
+  const { data, error, loading } = useAsync<PublicSessionDto[]>(
+    () => getPublicEventSessions(slug, dayId ? { dayId } : undefined),
+    [slug, dayId],
+  )
+  const items = data ?? []
 
   return (
-    <section className="p-4 space-y-2" style={{ border: '1.5px solid var(--line)' }}>
+    <section className="p-4 space-y-2 pl-card">
       <h2 className="text-xs font-medium" style={{ color: 'var(--accent)' }}>
         Sessions
       </h2>
-      {state.status === 'loading' && <p className="text-sm text-white/60">Loading sessions…</p>}
-      {state.status === 'error' && (
+      {loading && <p className="text-sm text-white/60">Loading sessions…</p>}
+      {!loading && Boolean(error) && (
         <p className="text-sm text-white/60">Sessions are unavailable right now.</p>
       )}
-      {state.status === 'ready' && state.items.length === 0 && (
+      {!loading && !error && items.length === 0 && (
         <p className="text-sm text-white/60">No sessions announced yet.</p>
       )}
-      {state.status === 'ready' && state.items.length > 0 && (
+      {!loading && !error && items.length > 0 && (
         <ul className="divide-y divide-white/10">
-          {state.items.map((s) => (
+          {items.map((s) => (
             <li key={s.id} className="py-2 text-sm">
               <div className="flex items-baseline justify-between gap-3">
                 <span className="text-white/85">{s.title}</span>
@@ -367,7 +335,7 @@ function SessionsSection({ slug, dayId }: { slug: string; dayId: string | null }
 
 function MapSection({ imageUrl, layer }: { imageUrl: string | null; layer: string | null }) {
   return (
-    <section className="p-4 space-y-2" style={{ border: '1.5px solid var(--line)' }}>
+    <section className="p-4 space-y-2 pl-card">
       <h2 className="text-xs font-medium" style={{ color: 'var(--accent)' }}>
         Map {layer ? `· ${layer}` : ''}
       </h2>
@@ -376,7 +344,7 @@ function MapSection({ imageUrl, layer }: { imageUrl: string | null; layer: strin
           src={imageUrl}
           alt={`Event map${layer ? ` (${layer})` : ''}`}
           className="w-full h-auto"
-          style={{ border: '1px solid var(--line)' }}
+          style={{ border: '1px solid var(--hairline-soft)', borderRadius: 'var(--radius-lg)' }}
         />
       ) : (
         <p className="text-sm text-white/60">Map is unavailable right now.</p>
@@ -386,17 +354,24 @@ function MapSection({ imageUrl, layer }: { imageUrl: string | null; layer: strin
 }
 
 function RsvpLinkSection({ url }: { url: string }) {
+  const safe = isSafeHttpUrl(url)
   return (
-    <section className="p-4" style={{ border: '1.5px solid var(--line)' }}>
-      <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="btn-brutal inline-block"
-        style={{ borderColor: 'var(--accent)' }}
-      >
-        RSVP / register →
-      </a>
+    <section className="p-4 pl-card">
+      {safe ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-brutal inline-block"
+          style={{ borderColor: 'var(--accent)' }}
+        >
+          RSVP / register →
+        </a>
+      ) : (
+        <span className="btn-brutal inline-block" style={{ borderColor: 'var(--accent)', cursor: 'default' }}>
+          RSVP / register →
+        </span>
+      )}
     </section>
   )
 }
@@ -416,40 +391,23 @@ function formatDateRange(start: string | null, end: string | null, _tz: string):
 // either /api/v1/ui/events/:id/weather (authed) or
 // /api/v1/sdk/events/:slug/weather (public).
 
-type WeatherState =
-  | { status: 'loading' }
-  | { status: 'ready'; weather: WeatherDto }
-  | { status: 'hidden' }
-
 export function WeatherSection({ fetcher }: { fetcher: () => Promise<WeatherDto> }) {
-  const [state, setState] = useState<WeatherState>({ status: 'loading' })
-
-  useEffect(() => {
-    let active = true
-    setState({ status: 'loading' })
-    fetcher()
-      .then((weather) => {
-        if (!active) return
-        // The route returns 200 with null fields when the event has
-        // no coordinates / is outside the window. Suppress the
-        // whole section in that case.
-        if (!weather.forecast && !weather.airQuality) {
-          setState({ status: 'hidden' })
-          return
-        }
-        setState({ status: 'ready', weather })
-      })
-      .catch(() => {
-        if (active) setState({ status: 'hidden' })
-      })
-    return () => {
-      active = false
+  // The route returns 200 with null fields when the event has no
+  // coordinates / is outside the window — that (and any fetch failure)
+  // both resolve to `data === null`, hiding the whole section.
+  const { data, loading } = useAsync<WeatherDto | null>(async () => {
+    try {
+      const weather = await fetcher()
+      if (!weather.forecast && !weather.airQuality) return null
+      return weather
+    } catch {
+      return null
     }
   }, [fetcher])
 
-  if (state.status === 'loading') {
+  if (loading) {
     return (
-      <section className="p-4" style={{ border: '1.5px solid var(--line)' }}>
+      <section className="p-4 pl-card">
         <h2
           className="text-xs font-medium"
           style={{ color: 'var(--accent)' }}
@@ -461,11 +419,11 @@ export function WeatherSection({ fetcher }: { fetcher: () => Promise<WeatherDto>
     )
   }
 
-  if (state.status === 'hidden') return null
+  if (!data) return null
 
-  const { forecast, airQuality } = state.weather
+  const { forecast, airQuality } = data
   return (
-    <section className="p-4 space-y-4" style={{ border: '1.5px solid var(--line)' }}>
+    <section className="p-4 space-y-4 pl-card">
       <div className="flex items-baseline justify-between gap-3">
         <h2
           className="text-xs font-medium"
@@ -473,7 +431,7 @@ export function WeatherSection({ fetcher }: { fetcher: () => Promise<WeatherDto>
         >
           Weather
         </h2>
-        {state.weather.isStale && (
+        {data.isStale && (
           <span className="text-[10px] font-medium text-[color:var(--ink-mute)]">
             updating…
           </span>

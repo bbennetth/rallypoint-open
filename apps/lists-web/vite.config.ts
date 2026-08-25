@@ -37,7 +37,7 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       injectRegister: 'auto',
       devOptions: { enabled: false },
       manifest: {
@@ -78,7 +78,8 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Hidden maps — emitted but no sourceMappingURL footer. Audit E1 #10.
+    sourcemap: 'hidden',
   },
   test: {
     environment: 'jsdom',

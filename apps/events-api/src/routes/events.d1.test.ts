@@ -104,6 +104,7 @@ describe('D1 integration — events CRUD + invites + activity', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -399,5 +400,87 @@ describe('D1 integration — events CRUD + invites + activity', () => {
     const types = activity.map((a) => a.eventType)
     expect(types).toContain('event.invite_created')
     expect(types).toContain('event.invite_accepted')
+  })
+
+  describe('pagination (opaque v1 cursor + legacy accept)', () => {
+    it('walks all pages with an opaque cursor and ends at next_cursor: null', async () => {
+      const owner = `user_${Date.now()}_page`
+      const bearer = await loginAs(owner)
+      for (let i = 0; i < 5; i++) {
+        const res = await req(bearer, 'POST', '/api/v1/ui/events', {
+          name: `Paged ${i}`,
+          timezone: 'UTC',
+        })
+        expect(res.status).toBe(201)
+      }
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      let guard = 0
+      do {
+        const url: string = `/api/v1/ui/events?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        const page = (await (await req(bearer, 'GET', url)).json()) as {
+          items: Array<{ id: string }>
+          next_cursor: string | null
+        }
+        expect(page.items.length).toBeLessThanOrEqual(2)
+        for (const it of page.items) seen.push(it.id)
+        cursor = page.next_cursor
+        // Emitted cursor is opaque — never the legacy `<iso>|<id>` plaintext.
+        if (cursor) expect(cursor).not.toContain('|')
+      } while (cursor && ++guard < 10)
+
+      expect(cursor).toBeNull()
+      expect(new Set(seen).size).toBe(5)
+    })
+
+    it('accepts a legacy base64url(<iso>|<id>) cursor', async () => {
+      const owner = `user_${Date.now()}_legacy`
+      const bearer = await loginAs(owner)
+      const created: string[] = []
+      for (let i = 0; i < 3; i++) {
+        const r = (await (
+          await req(bearer, 'POST', '/api/v1/ui/events', { name: `Legacy ${i}`, timezone: 'UTC' })
+        ).json()) as { id: string }
+        created.push(r.id)
+      }
+      // Newest-first: the first page's last row is the oldest of the newest 2.
+      const first = (await (await req(bearer, 'GET', '/api/v1/ui/events?limit=2')).json()) as {
+        items: Array<{ id: string; created_at: string }>
+      }
+      const boundary = first.items[first.items.length - 1]!
+      // Hand-build the pre-unification cursor format the old server emitted.
+      const legacy = Buffer.from(`${boundary.created_at}|${boundary.id}`, 'utf8').toString(
+        'base64url',
+      )
+      const next = (await (
+        await req(bearer, 'GET', `/api/v1/ui/events?limit=2&cursor=${encodeURIComponent(legacy)}`)
+      ).json()) as { items: Array<{ id: string }>; next_cursor: string | null }
+      // The remaining (oldest) event comes back, not re-listing the boundary row.
+      expect(next.items.map((i) => i.id)).not.toContain(boundary.id)
+      expect(next.items.length).toBeGreaterThan(0)
+    })
+
+    it('rejects an undecodable cursor with 400 instead of restarting', async () => {
+      const bearer = await loginAs(`user_${Date.now()}_badcur`)
+      const res = await req(bearer, 'GET', '/api/v1/ui/events?cursor=not-a-real-cursor')
+      expect(res.status).toBe(400)
+      const body = (await res.json()) as { error: { code: string } }
+      expect(body.error.code).toBe('validation_failed')
+    })
+
+    it('clamps an out-of-range or garbage limit instead of 400ing (tolerant reads)', async () => {
+      const bearer = await loginAs(`user_${Date.now()}_lim`)
+      for (let i = 0; i < 3; i++) {
+        await req(bearer, 'POST', '/api/v1/ui/events', { name: `Lim ${i}`, timezone: 'UTC' })
+      }
+      // limit=0 clamps up to 1; limit=9999 clamps down to the 100 max; a
+      // non-numeric limit falls back to the default — none of them 400.
+      const zero = await req(bearer, 'GET', '/api/v1/ui/events?limit=0')
+      expect(zero.status).toBe(200)
+      expect(((await zero.json()) as { items: unknown[] }).items).toHaveLength(1)
+      expect((await req(bearer, 'GET', '/api/v1/ui/events?limit=9999')).status).toBe(200)
+      expect((await req(bearer, 'GET', '/api/v1/ui/events?limit=abc')).status).toBe(200)
+    })
   })
 })

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import {
   PublicPageConfigSchema,
+  isEventScopedObjectKey,
   type PublicPageConfig,
 } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
@@ -138,7 +139,10 @@ async function pickOgImageUrl(
   // route that applies the same public-page-config gate so the bucket
   // stays private but crawlers can reach the og:image URL unauthenticated.
   const origin = new URL(c.req.url).origin
-  if (config.theme?.background_image_key) {
+  if (
+    config.theme?.background_image_key &&
+    isEventScopedObjectKey(config.theme.background_image_key, event.id)
+  ) {
     // background_image_key is an opaque object key. Serve it through
     // the public background-image route keyed on the event id (which
     // has already passed the `gate()` check above).

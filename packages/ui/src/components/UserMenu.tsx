@@ -25,6 +25,13 @@ export interface UserMenuProps {
   onSignout?: () => void | Promise<void>
   /** Absolute URL of the hosted account page; opens in a new tab. Hidden if unset. */
   accountUrl?: string
+  /**
+   * In-app account navigation (same tab). id-web IS the account app, so it
+   * passes this to route to /account/settings in place of the new-tab
+   * `accountUrl` deep-link other apps use. Takes precedence over accountUrl;
+   * the "Account" item shows if either is set.
+   */
+  onAccount?: () => void
 }
 
 function displayName(profile: UserMenuProfile | null): string {
@@ -33,7 +40,13 @@ function displayName(profile: UserMenuProfile | null): string {
   return profile.username?.trim() || full || profile.email?.trim() || 'You'
 }
 
-export function UserMenu({ profile, size = 'desktop', onSignout, accountUrl }: UserMenuProps) {
+export function UserMenu({
+  profile,
+  size = 'desktop',
+  onSignout,
+  accountUrl,
+  onAccount,
+}: UserMenuProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const flyoutRef = useRef<HTMLDivElement>(null)
@@ -99,6 +112,10 @@ export function UserMenu({ profile, size = 'desktop', onSignout, accountUrl }: U
 
   function openAccount() {
     setOpen(false)
+    if (onAccount) {
+      onAccount()
+      return
+    }
     if (accountUrl) window.open(accountUrl, '_blank', 'noopener,noreferrer')
   }
 
@@ -160,7 +177,7 @@ export function UserMenu({ profile, size = 'desktop', onSignout, accountUrl }: U
           onKeyDown={onFlyoutKeyDown}
         >
           <div style={{ display: 'grid', gap: 6 }}>
-            {accountUrl && (
+            {(accountUrl || onAccount) && (
               <button type="button" role="menuitem" className="pl-shortcut" onClick={openAccount}>
                 Account
               </button>

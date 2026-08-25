@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   selectActiveSessions,
   selectCurrentLineup,
@@ -9,14 +10,15 @@ import {
   type ResolvedSession,
 } from '@rallypoint/events-shared'
 import {
+  ApiError,
   getGroup,
-  getEventWeather,
-  listChatMessages,
+  getGroupDay,
   listDays,
   listLineup,
   listRallies,
   listSessions,
   listStages,
+  type GroupDayDto,
   type GroupDetailDto,
   type DayDto,
   type LineupSlotDto,
@@ -24,7 +26,10 @@ import {
   type SessionDtoFull,
   type StageDto,
 } from '../lib/api.js'
+import { defaultDateForEvent, todayIso } from '../lib/attendee-day.js'
+import { artistSummaries } from '../lib/lineup-view.js'
 import { useCachedFetch } from '../lib/cached-fetch.js'
+import { useRefreshBus } from '../lib/refresh-bus.js'
 import {
   readGroupDetail,
   readGroupRallies,
@@ -35,17 +40,26 @@ import {
   writeEventLineup,
   writeEventSessions,
 } from '../lib/cache.js'
-import { WeatherSection } from './PublicEventPage.js'
+import { DayPicker } from '../ui/DayPicker.js'
+import { GroupDayAgenda } from '../ui/GroupDayAgenda.js'
+import { WeatherPanel } from '../ui/WeatherPanel.js'
 
-// "Now" view (slice 13). Aggregates the five most-immediate signals an
-// attendee cares about into a single tab: what's playing right now,
-// next rallies, sessions happening now, weather snapshot, and an
-// unread-chat badge. Each widget loads independently with inline
-// degradation — a 502 on the chat endpoint shouldn't blank the
-// lineup tile.
+// "Now" — the group attendee's home tab. Merges what used to be two tabs:
+// the live signals (what's playing, next rallies, sessions on now)
+// and the day plan that was "My Day". A day picker sits under the header;
+// the live widgets only make sense for today, so they render on today's
+// view and drop out when you look ahead at another day. The day's agenda
+// (rallies + sets + tasks + conflicts) renders for every day.
+//
+// Each widget loads independently with inline degradation — a 502 on one
+// endpoint shouldn't blank the lineup tile.
 
 const RALLY_HORIZON_MS = 3 * 60 * 60 * 1000 // 3h
-const CHAT_PEEK_LIMIT = 20
+
+type DayLoadState =
+  | { status: 'loading' }
+  | { status: 'ready'; day: GroupDayDto }
+  | { status: 'error'; code: string; message: string }
 
 export function NowPage() {
   const { groupId } = useParams<{ groupId: string }>()
@@ -66,9 +80,74 @@ function NowBody({ groupId }: { groupId: string }) {
     saveToCache: (v) => writeGroupDetail(groupId, v),
     revalidate: () => getGroup(groupId),
   })
+  const eventId = group.data?.event_id ?? null
 
-  // Group detail might fail entirely on a cold cache + offline. Render
-  // a thin shell either way; widgets that need eventId wait for it.
+  // Event days drive the picker. Shares the `days:<eventId>` cache row with
+  // the widgets below, so this doesn't cost an extra round trip in practice.
+  const days = useCachedFetch<DayDto[]>({
+    key: `days:${eventId ?? 'pending'}`,
+    loadFromCache: async () =>
+      eventId
+        ? ((await readEventLineup<{ days: DayDto[] }>(`days:${eventId}`))?.days ?? null)
+        : null,
+    saveToCache: async (v) => {
+      if (eventId) await writeEventLineup(`days:${eventId}`, { days: v })
+    },
+    revalidate: async () => (eventId ? listDays(eventId) : []),
+  })
+
+  const today = todayIso()
+  const [date, setDate] = useState<string>(today)
+  // Once the user picks a day themselves, stop auto-snapping — otherwise a
+  // late-landing days fetch would yank them back off their pick.
+  const userPicked = useRef(false)
+  const dayList = days.data
+
+  useEffect(() => {
+    if (userPicked.current || !dayList || dayList.length === 0) return
+    setDate(defaultDateForEvent(dayList, todayIso()))
+  }, [dayList])
+
+  const onDateChange = useCallback((next: string) => {
+    userPicked.current = true
+    setDate(next)
+  }, [])
+
+  // The day's plan — rallies/sets/tasks/conflicts for the picked date.
+  const [dayState, setDayState] = useState<DayLoadState>({ status: 'loading' })
+  const run = useAsyncTask()
+  const loadDay = useCallback(() => {
+    setDayState({ status: 'loading' })
+    void run(async (ctx) => {
+      try {
+        const day = await getGroupDay(groupId, date)
+        if (ctx.stale()) return
+        setDayState({ status: 'ready', day })
+      } catch (err) {
+        if (ctx.stale()) return
+        if (err instanceof ApiError && err.status === 404) {
+          setDayState({ status: 'error', code: 'not_found', message: 'Group not found.' })
+        } else {
+          setDayState({
+            status: 'error',
+            code: err instanceof ApiError ? err.code : 'unexpected_error',
+            message: err instanceof Error ? err.message : 'Unknown error.',
+          })
+        }
+      }
+    })
+  }, [groupId, date, run])
+
+  useEffect(() => {
+    loadDay()
+  }, [loadDay])
+
+  // Pull-to-refresh in the chrome revalidates the day view alongside the
+  // cached widgets, which subscribe to the same bus themselves.
+  useRefreshBus(loadDay)
+
+  const isToday = date === today
+
   return (
     <main className="page-pad">
       <div className="max-w-2xl mx-auto space-y-6">
@@ -79,18 +158,52 @@ function NowBody({ groupId }: { groupId: string }) {
           <h1 className="display text-2xl">What's happening</h1>
         </header>
 
-        {group.error && !group.data && (
+        {Boolean(group.error) && !group.data && (
           <p className="text-sm text-[color:var(--ink-dim)]">Couldn't load this group. Retrying…</p>
         )}
 
-        {group.data && (
+        {/* Held back until the event is known: with no eventId the days fetch
+            resolves to [] immediately, which would flash the picker's
+            no-days-published date input before the real days land. */}
+        {eventId && (
+          <DayPicker
+            days={days.data ?? []}
+            value={date}
+            onChange={onDateChange}
+            fallbackToday={today}
+          />
+        )}
+
+        {/* Live signals are only meaningful on today's view. */}
+        {group.data && isToday && (
           <>
             <LineupNowWidget eventId={group.data.event_id} />
             <UpcomingRalliesWidget groupId={groupId} />
             <ActiveSessionsWidget eventId={group.data.event_id} />
-            <WeatherSection fetcher={() => getEventWeather(group.data!.event_id)} />
-            <ChatUnreadBadge groupId={groupId} userId={group.data.viewer_role ? null : null} />
           </>
+        )}
+
+        {eventId && <WeatherPanel eventId={eventId} dayIso={date} />}
+
+        {dayState.status === 'loading' && (
+          <p className="text-sm text-[color:var(--ink-dim)]">Loading…</p>
+        )}
+
+        {dayState.status === 'error' && (
+          <div
+            className="p-4"
+            style={{
+              background: 'var(--hot-soft)',
+              color: 'var(--hot-text)',
+              borderRadius: 'var(--radius-lg)',
+            }}
+          >
+            <p className="text-sm text-[color:var(--ink)]">{dayState.message}</p>
+          </div>
+        )}
+
+        {dayState.status === 'ready' && (
+          <GroupDayAgenda day={dayState.day} isToday={isToday} />
         )}
       </div>
     </main>
@@ -123,7 +236,7 @@ function LineupNowWidget({ eventId }: { eventId: string }) {
   })
 
   const isLoading = !stages.data && !days.data && !slots.data
-  const errored = stages.error || days.error || slots.error
+  const errored = Boolean(stages.error) || Boolean(days.error) || Boolean(slots.error)
   const dataReady = stages.data && days.data && slots.data
   const now = useNow()
 
@@ -140,9 +253,7 @@ function LineupNowWidget({ eventId }: { eventId: string }) {
       })),
       days: days.data!.map((d) => ({ id: d.id, date: d.date })),
       stages: stages.data!.map((s) => ({ id: s.id, name: s.name, sortOrder: s.sort_order })),
-      artists: [], // names come from displayName fallback; lineup endpoint
-                   // doesn't currently include artist names. The selector
-                   // gracefully falls back to 'Unknown artist'.
+      artists: artistSummaries(slots.data!),
       now,
     })
   }
@@ -239,7 +350,7 @@ function UpcomingRalliesWidget({ groupId }: { groupId: string }) {
 
   return (
     <Widget title="Rallies (next 3h)">
-      {!rallies.data && rallies.error && (
+      {!rallies.data && Boolean(rallies.error) && (
         <p className="text-sm text-[color:var(--ink-dim)]">Rallies are unavailable right now.</p>
       )}
       {rallies.data && upcoming.length === 0 && (
@@ -250,7 +361,7 @@ function UpcomingRalliesWidget({ groupId }: { groupId: string }) {
           {upcoming.map((r) => (
             <li key={r.id} className="flex items-baseline justify-between gap-3 text-sm">
               <Link
-                to={`/groups/${encodeURIComponent(groupIdFromUrl())}/rallies`}
+                to={`/groups/${encodeURIComponent(groupId)}/rallies`}
                 className="text-[color:var(--ink)] hover:text-[color:var(--ink)]"
               >
                 {r.title}
@@ -264,18 +375,6 @@ function UpcomingRalliesWidget({ groupId }: { groupId: string }) {
       )}
     </Widget>
   )
-}
-
-// useParams isn't reachable here; we accept it via prop on the parent.
-// This helper keeps the link href readable.
-function groupIdFromUrl(): string {
-  // Read from window.location to avoid prop-drilling to leaf nodes.
-  // Inside the events-web SPA this is reliable; the URL always has
-  // /groups/<id>/now.
-  const match = (typeof window === 'undefined' ? '' : window.location.pathname).match(
-    /\/groups\/([^/]+)/,
-  )
-  return match ? match[1]! : ''
 }
 
 // --- Sessions-now --------------------------------------------------
@@ -313,7 +412,7 @@ function ActiveSessionsWidget({ eventId }: { eventId: string }) {
 
   return (
     <Widget title="Sessions now">
-      {!sessions.data && sessions.error && (
+      {!sessions.data && Boolean(sessions.error) && (
         <p className="text-sm text-[color:var(--ink-dim)]">Sessions are unavailable right now.</p>
       )}
       {sessions.data && active.length === 0 && (
@@ -335,53 +434,12 @@ function ActiveSessionsWidget({ eventId }: { eventId: string }) {
   )
 }
 
-// --- Chat unread badge ---------------------------------------------
-
-function ChatUnreadBadge({ groupId, userId }: { groupId: string; userId: string | null }) {
-  // We don't have a "last read" cursor on the group yet, so we render
-  // the last N messages as a peek instead. This is a stand-in until a
-  // dedicated read-marker API ships.
-  const peek = useCachedFetch<{ items: { id: string; user_id: string; body: string }[] }>({
-    key: `chatpeek:${groupId}`,
-    loadFromCache: async () => null,
-    saveToCache: async () => {},
-    revalidate: async () => {
-      const page = await listChatMessages(groupId, { limit: CHAT_PEEK_LIMIT })
-      return { items: page.items }
-    },
-  })
-
-  const count = peek.data?.items.length ?? 0
-  return (
-    <Widget title="Chat">
-      <div className="flex items-baseline justify-between gap-3">
-        <Link
-          to={`/groups/${encodeURIComponent(groupId)}/chat`}
-          className="text-sm text-[color:var(--ink)] hover:text-[color:var(--ink-dim)]"
-        >
-          Open group chat →
-        </Link>
-        {count > 0 && (
-          <span
-            className="text-[10px] font-medium"
-            style={{ color: 'var(--ink-mute)' }}
-          >
-            {count} recent
-          </span>
-        )}
-      </div>
-      {userId === null && null /* Suppress unused-var lint */}
-    </Widget>
-  )
-}
-
 // --- shared helpers -----------------------------------------------
 
 function Widget({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <h2 className="text-xs font-medium text-[color:var(--ink-mute)]">{title}</h2>
       {children}

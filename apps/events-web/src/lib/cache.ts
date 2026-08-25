@@ -3,16 +3,12 @@ import Dexie, { type Table } from 'dexie'
 // IndexedDB-backed offline cache for the attendee shell (slice 13).
 // We don't ship a full sync engine — just a stale-while-revalidate
 // store for the resources an attendee opens while moving through a
-// festival on a flaky network: group detail, lineup, rallies, sessions,
-// and the last day of chat. Each row holds the *raw* API response
-// + a fetchedAt timestamp; the cached-fetch wrapper handles TTL +
-// invalidation.
+// festival on a flaky network: group detail, lineup, rallies, and
+// sessions. Each row holds the *raw* API response + a fetchedAt
+// timestamp; the cached-fetch wrapper handles TTL + invalidation.
 //
 // Dexie defaults to ~50MB browser quota (per-origin LRU eviction); we
-// don't pin anything. Chat is the only resource with an explicit TTL
-// (~24h) because timeline scroll-back rarely re-reads stale rows.
-
-const CHAT_TTL_MS = 24 * 60 * 60 * 1000 // 24h
+// don't pin anything.
 
 export interface CachedRow<T> {
   // Single-column primary key (resource-specific id below).
@@ -28,7 +24,6 @@ export class EventsAttendeeCache extends Dexie {
   eventLineups!: Table<CachedRow<unknown>, string>
   groupRallies!: Table<CachedRow<unknown>, string>
   eventSessions!: Table<CachedRow<unknown>, string>
-  groupChat!: Table<CachedRow<unknown>, string>
 
   constructor() {
     super('EventsAttendeeCache')
@@ -41,6 +36,9 @@ export class EventsAttendeeCache extends Dexie {
       eventSessions: 'id, fetchedAt',
       groupChat: 'id, fetchedAt',
     })
+    // v2: chat was dropped (Social removal) — deleting the store needs
+    // a version bump; existing rows are discarded.
+    this.version(2).stores({ groupChat: null })
   }
 }
 
@@ -83,18 +81,6 @@ export async function readEventSessions<T>(eventId: string): Promise<T | null> {
 }
 export async function writeEventSessions<T>(eventId: string, value: T): Promise<void> {
   return writeRow(db().eventSessions, eventId, value)
-}
-
-// Chat carries the TTL: a row older than CHAT_TTL_MS is treated as
-// missing on read. The caller will fall back to a network fetch.
-export async function readGroupChat<T>(groupId: string): Promise<T | null> {
-  const row = await db().groupChat.get(groupId).catch(() => null)
-  if (!row) return null
-  if (Date.now() - row.fetchedAt > CHAT_TTL_MS) return null
-  return row.value as T
-}
-export async function writeGroupChat<T>(groupId: string, value: T): Promise<void> {
-  return writeRow(db().groupChat, groupId, value)
 }
 
 // --- generic helpers ---------------------------------------------

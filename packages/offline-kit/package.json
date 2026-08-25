@@ -1,0 +1,26 @@
+{
+  "name": "@rallypoint/offline-kit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Shared offline/local-first machinery for the Rallypoint web apps: per-user Dexie cache, outbox flusher with coalescing/backoff/tmp-id remap, cache subscription channel, and the render-from-cache React hook. Apps supply the domain op vocabulary via an OutboxCodec; the kit owns the sync mechanics.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dexie": "^4.0.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "^19.1.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

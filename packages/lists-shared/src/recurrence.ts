@@ -11,7 +11,14 @@
 // guards.
 
 import { z } from 'zod'
-import { assignedToField, itemNotesField, itemTitleField, taskPriorityField } from './validators.js'
+import { dayInstant } from '@rallypoint/shared'
+import {
+  assignedToField,
+  itemNotesField,
+  itemTitleField,
+  refField,
+  taskPriorityField,
+} from './validators.js'
 
 // --- Enums -----------------------------------------------------------
 
@@ -159,6 +166,9 @@ export const CreateSeriesSchema = z
     until: calendarDateField.nullable().optional(),
     count: countField,
     timeOfDay: timeOfDayField,
+    // Idempotency key (offline create-retry dedup) — mirrors
+    // CreateListItemSchema.ref. Omit for un-keyed, unconstrained creates.
+    ref: refField.nullable().optional(),
   })
   .superRefine(refineRule)
 export type CreateSeriesInput = z.infer<typeof CreateSeriesSchema>
@@ -360,12 +370,58 @@ export function materializeOccurrences(rule: RecurrenceRule, options: Materializ
 
 // Combine an occurrence's calendar date with the series' optional
 // time-of-day into the dueDate timestamp stamped on the generated item.
-// A null time anchors to start-of-day. NOTE: the result is built in UTC
-// (`…Z`); per-user timezone handling for "today"/Upcoming boundaries is
-// the planner-api BFF's concern (deferred — see slice 2). Returns an ISO
+// A null time anchors to start-of-day. NOTE: the result is a FLOATING local
+// wall-clock, not an absolute instant: it is built in UTC (`…Z`) with no
+// timezone, so the UTC components ARE the intended local time. Reading it back
+// in a non-UTC zone requires resolveFloatingDue (below) to re-anchor it to the
+// viewer's zone — do not treat the raw stamp as a real instant. Returns an ISO
 // string the API casts to a timestamptz.
 export function occurrenceDueDate(occurrenceDate: string, timeOfDay: string | null): string {
   const time = timeOfDay ?? '00:00:00'
   const hms = time.length === 5 ? `${time}:00` : time
   return `${occurrenceDate}T${hms}.000Z`
+}
+
+// --- floating-due resolution (the read-side companion of occurrenceDueDate) --
+//
+// occurrenceDueDate stamps recurring occurrences as a FLOATING local wall-clock
+// (`${occurrenceDate}T${timeOfDay}Z`) — the UTC components ARE the intended
+// local time. A daily "Pills at 10:30" therefore means 10:30 in the viewer's
+// OWN zone (alarm-clock semantics), matching how a one-off task due is anchored
+// to local midnight client-side. Reading that UTC-stamped instant back in a
+// non-UTC zone is what shifted 10:30 → 3:30 (a −7h Pacific offset); the same
+// skew can push an early-morning occurrence onto the wrong calendar day.
+//
+// resolveFloatingDue re-anchors one floating due to a real instant in the
+// request `tz` so the day window AND the client's local rendering line up.
+// This lived in planner-api's recurrence-time.ts; it moved here so producer
+// (occurrenceDueDate) and resolver sit together (the contract is one thing).
+
+// Captures the date + wall-clock from a floating due (`YYYY-MM-DDThh:mm[:ss]…`).
+const FLOATING_DUE_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?)/
+
+// Reinterpret one floating due's wall-clock as local time in `tz`. A no-time
+// occurrence (stamped `T00:00:00Z`) resolves to local midnight in `tz` — the
+// same all-day anchor one-off date-only dues use. Returns the input unchanged
+// if it doesn't parse as a floating due (defensive).
+export function resolveFloatingDue(dueDate: string, tz: string): string {
+  const m = FLOATING_DUE_RE.exec(dueDate)
+  if (!m) return dueDate
+  return dayInstant(m[1]!, m[2]!, tz)
+}
+
+// Map a list of items, resolving every recurring item's floating due into `tz`.
+// Generic over the minimal shape (seriesId + dueDate) so lists-shared need not
+// depend on a DTO package: a one-off item (seriesId null) carries a genuine
+// absolute instant and passes through untouched, as does a null due. Pure;
+// returns a new array and copies only the items it rewrites.
+export function resolveRecurrenceDues<T extends { seriesId: string | null; dueDate: string | null }>(
+  items: T[],
+  tz: string,
+): T[] {
+  return items.map((t) =>
+    t.seriesId != null && t.dueDate != null
+      ? { ...t, dueDate: resolveFloatingDue(t.dueDate, tz) }
+      : t,
+  )
 }

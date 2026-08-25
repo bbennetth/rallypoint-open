@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button, Drawer, useToast } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   createComment,
@@ -45,24 +46,34 @@ export function ItemCommentsDrawer({
   const [draft, setDraft] = useState('')
   const [posting, setPosting] = useState(false)
 
-  async function load() {
-    setState({ status: LOADING })
-    try {
-      const page = await listComments(listId, itemId)
-      setState({ status: READY, comments: page.items })
-    } catch (err) {
-      setState({
-        status: ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load comments.',
-      })
-    }
-  }
+  // useAsyncTask (#675 R5): switching items while a comments fetch is
+  // in flight can supersede it before it resolves — stale() drops the
+  // stale commit so it can't land on top of the newer item's thread.
+  const run = useAsyncTask()
+  const load = useCallback(
+    () =>
+      run(async (ctx) => {
+        setState({ status: LOADING })
+        try {
+          const page = await listComments(listId, itemId)
+          if (ctx.stale()) return
+          setState({ status: READY, comments: page.items })
+        } catch (err) {
+          if (ctx.stale()) return
+          setState({
+            status: ERROR,
+            message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load comments.',
+          })
+        }
+      }),
+    [run, listId, itemId],
+  )
 
   useEffect(() => {
     if (!open) return
     setDraft('')
     void load()
-  }, [open, listId, itemId])
+  }, [open, listId, itemId, load])
 
   function reportError(err: unknown, fallback: string) {
     toast({ tone: 'error', body: err instanceof ApiError ? err.message : fallback })

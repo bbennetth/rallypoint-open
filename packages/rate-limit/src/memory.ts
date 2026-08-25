@@ -32,6 +32,15 @@ export class InMemoryRateLimitRepo implements RateLimitRepo {
     }
 
     const nextCount = current.count + 1
+    // Persist the increment BEFORE deciding, matching the real D1 repo
+    // (api-kit/src/repos/rate-limit.ts) which does an unconditional
+    // insert-or-increment and then decides. Persisting only on `allowed`
+    // (the old behavior) froze the stored count at the last allowed value,
+    // so repeated over-limit requests looked identical to the first block
+    // instead of accumulating — a divergence tests using this double
+    // couldn't see.
+    this.buckets.set(currentKey, { windowStartMs: currentWindow, count: nextCount })
+
     const blended = computeBlend({
       currentCount: nextCount,
       previousCount: previous.count,
@@ -48,7 +57,6 @@ export class InMemoryRateLimitRepo implements RateLimitRepo {
       }
     }
 
-    this.buckets.set(currentKey, { windowStartMs: currentWindow, count: nextCount })
     return { allowed: true, retryAfterSeconds: 0, blendedCount: blended }
   }
 

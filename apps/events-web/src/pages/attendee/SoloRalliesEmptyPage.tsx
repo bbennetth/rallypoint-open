@@ -3,7 +3,8 @@ import { Button, EmptyState } from '@rallypoint/ui'
 import { useSoloEventOutlet } from './_solo-event-outlet.js'
 
 // Phase 4 (#16). Rallies tab in the solo shell. Rallies live inside
-// groups; without a group there are none. CTA flows to group join.
+// groups; without a group there are none. CTAs flow to group join /
+// start-a-group.
 
 export function SoloRalliesEmptyPage() {
   const { event } = useSoloEventOutlet()
@@ -19,9 +20,17 @@ export function SoloRalliesEmptyPage() {
             </>
           }
           action={
-            <Link to="/groups/join" style={{ textDecoration: 'none' }}>
-              <Button variant="brutal">Join or create a group</Button>
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link to="/groups/join" style={{ textDecoration: 'none' }}>
+                <Button variant="brutal">Join a group</Button>
+              </Link>
+              <Link
+                to={`/events/${encodeURIComponent(event.slug)}/groups/new`}
+                style={{ textDecoration: 'none' }}
+              >
+                <Button variant="ghost">Start a group</Button>
+              </Link>
+            </div>
           }
         />
       </div>

@@ -1,10 +1,15 @@
 import { InMemoryRateLimitRepo } from '@rallypoint/rate-limit'
+import { SYSTEM_USER_ID } from '@rallypoint/shared'
 
 import type {
   ActivityRecord,
-  ArtistLinks,
+  ArtistProfileFields,
   ArtistRecord,
   ArtistRepo,
+  ArtistMbReviewRecord,
+  ArtistMbReviewRepo,
+  ArtistMbReviewStatus,
+  NewArtistMbReview,
   BulkApplySessionsInput,
   BulkApplySessionsResult,
   CreateGroupInput,
@@ -14,6 +19,8 @@ import type {
   GroupInviteRepo,
   GroupMemberRecord,
   GroupMemberRepo,
+  GroupMemberLocationRecord,
+  GroupMemberLocationRepo,
   GroupRecord,
   GroupRepo,
   GroupRole,
@@ -27,6 +34,7 @@ import type {
   EventInviteRepo,
   EventMemberRepo,
   EventTicketRepo,
+  AttendeeCursor,
   AttendeeRecord,
   CreateTicketInput,
   PatchTicketInput,
@@ -64,6 +72,8 @@ import type {
   EventWeatherRepo,
   EventSetStarRepo,
   SetStarKey,
+  ArtistFavoriteKey,
+  EventArtistFavoriteRepo,
   EventPlannerPrefRepo,
   EventSnapshotRepo,
   CreateSnapshotInput,
@@ -79,6 +89,10 @@ import type {
   PatchSessionInput,
   EventPurgeLogRepo,
   PurgeLogRecord,
+  LineupIngestionRepo,
+  LineupIngestionRecord,
+  LineupIngestionStatus,
+  CreateLineupIngestionInput,
   Repos,
   ScopeType,
   SessionApprovalStatus,
@@ -87,7 +101,7 @@ import type {
   UpsertEventWeatherInput,
 } from './types.js'
 
-import { UniqueConstraintError } from './errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 
 // In-memory repo impls for unit tests and local stubbing. They
 // mirror the Postgres impls' observable behaviour (soft-delete
@@ -95,8 +109,6 @@ import { UniqueConstraintError } from './errors.js'
 // but hold everything in Maps. Integration tests run the d1 impls
 // under @cloudflare/vitest-pool-workers (Miniflare D1); these are for
 // fast logic-level tests.
-
-export { UniqueConstraintError } from './errors.js'
 
 function num(n: number | null | undefined): string | null {
   return n === null || n === undefined ? null : String(n)
@@ -139,6 +151,14 @@ export class MemoryEventRepo implements EventRepo {
         throw new UniqueConstraintError('events_tenant_slug_idx')
       }
     }
+    // Mirror the D1 partial-unique on (owner_user_id, ref).
+    if (input.ref != null) {
+      for (const e of this.byId.values()) {
+        if (e.ownerUserId === input.ownerUserId && e.ref === input.ref) {
+          throw new UniqueConstraintError('events_owner_ref_uq')
+        }
+      }
+    }
     const now = new Date()
     const rec: EventRecord = {
       id: input.id,
@@ -168,6 +188,7 @@ export class MemoryEventRepo implements EventRepo {
       ticketPlatform: input.ticketPlatform ?? null,
       ticketAccountEmail: input.ticketAccountEmail ?? null,
       allDay: input.allDay ?? null,
+      ref: input.ref ?? null,
     }
     this.byId.set(rec.id, rec)
     return { ...rec }
@@ -189,10 +210,67 @@ export class MemoryEventRepo implements EventRepo {
     const memberEventIds = new Set(
       (this.members?.allForUser(userId) ?? []).map((m) => m.eventId),
     )
+    // D1 twin: system-owned events the caller actively attends. Admins
+    // self-attending one never get an event_members row (actorRole
+    // short-circuits to 'owner'), so membership alone would hide it.
+    const attendedSystemEventIds = new Set(
+      opts.includeAttendedSystemEvents
+        ? (this.attendees?.currentEventIdsForUser(userId) ?? []).filter(
+            (id) => this.byId.get(id)?.ownerUserId === SYSTEM_USER_ID,
+          )
+        : [],
+    )
     let rows = [...this.byId.values()].filter(
-      (e) => e.ownerUserId === userId || memberEventIds.has(e.id),
+      (e) =>
+        e.ownerUserId === userId ||
+        memberEventIds.has(e.id) ||
+        attendedSystemEventIds.has(e.id),
     )
     if (!opts.includeDeleted) rows = rows.filter((e) => e.deletedAt === null)
+    rows.sort((a, b) => {
+      const at = a.createdAt.toISOString()
+      const bt = b.createdAt.toISOString()
+      if (at !== bt) return at < bt ? 1 : -1
+      return a.id < b.id ? 1 : -1
+    })
+    if (opts.cursor) {
+      const dec = decodeCursor(opts.cursor)
+      if (dec) rows = rows.filter((e) => afterBoundary(e, dec.iso, dec.id))
+    }
+    const page = rows.slice(0, opts.limit)
+    const nextCursor =
+      rows.length > opts.limit && page.length > 0 ? encodeCursor(page[page.length - 1]!) : null
+    return { items: page.map((e) => ({ ...e })), nextCursor }
+  }
+
+  async listByOwner(ownerUserId: string, opts: ListEventsOptions): Promise<ListEventsPage> {
+    let rows = [...this.byId.values()].filter((e) => e.ownerUserId === ownerUserId)
+    if (!opts.includeDeleted) rows = rows.filter((e) => e.deletedAt === null)
+    rows.sort((a, b) => {
+      const at = a.createdAt.toISOString()
+      const bt = b.createdAt.toISOString()
+      if (at !== bt) return at < bt ? 1 : -1
+      return a.id < b.id ? 1 : -1
+    })
+    if (opts.cursor) {
+      const dec = decodeCursor(opts.cursor)
+      if (dec) rows = rows.filter((e) => afterBoundary(e, dec.iso, dec.id))
+    }
+    const page = rows.slice(0, opts.limit)
+    const nextCursor =
+      rows.length > opts.limit && page.length > 0 ? encodeCursor(page[page.length - 1]!) : null
+    return { items: page.map((e) => ({ ...e })), nextCursor }
+  }
+
+  async listBrowsable(opts: ListEventsOptions): Promise<ListEventsPage> {
+    // Mirror of D1EventRepo.listBrowsable / routes/_access.ts
+    // isBrowsableEvent: non-deleted AND (system-owned OR public).
+    // includeDeleted is deliberately ignored.
+    let rows = [...this.byId.values()].filter(
+      (e) =>
+        e.deletedAt === null &&
+        (e.ownerUserId === SYSTEM_USER_ID || e.privacyMode === 'public'),
+    )
     rows.sort((a, b) => {
       const at = a.createdAt.toISOString()
       const bt = b.createdAt.toISOString()
@@ -293,6 +371,13 @@ export class MemoryEventRepo implements EventRepo {
     // ON DELETE CASCADE and that path is covered by the testcontainers
     // pruner test. Here we only drop the event row.
     return this.byId.delete(id)
+  }
+
+  async findByOwnerAndRef(ownerUserId: string, ref: string): Promise<EventRecord | null> {
+    for (const e of this.byId.values()) {
+      if (e.ownerUserId === ownerUserId && e.ref === ref) return { ...e }
+    }
+    return null
   }
 
   async listPersonalForUser(
@@ -396,6 +481,11 @@ export class MemoryEventRepo implements EventRepo {
         }
         throw err
       }
+    } else {
+      // E2 #8: re-admission updates the existing member row's role.
+      // Without this, a previously-editor user re-invited as viewer
+      // keeps editor access. Matches the D1 impl's batched UPDATE.
+      await this.members?.updateRole(input.eventId, input.userId, input.role)
     }
     await this.attendees?.upsert({
       id: input.attendeeId,
@@ -403,6 +493,42 @@ export class MemoryEventRepo implements EventRepo {
       userId: input.userId,
     })
     await this.invites?.markConsumed(input.inviteId, input.userId, new Date())
+    return { ok: true, readmitted: input.skipMemberAdd }
+  }
+
+  async joinAsViewer(input: {
+    memberId: string
+    attendeeId: string
+    eventId: string
+    userId: string
+    skipMemberAdd: boolean
+  }): Promise<
+    { ok: true; readmitted: boolean } | { ok: false; reason: 'already_active_member' }
+  > {
+    // Mirror of D1EventRepo.joinAsViewer — acceptInvite minus the
+    // invite consume; re-admission forces the role back to 'viewer'.
+    if (!input.skipMemberAdd) {
+      try {
+        await this.members?.add({
+          id: input.memberId,
+          eventId: input.eventId,
+          userId: input.userId,
+          role: 'viewer',
+        })
+      } catch (err) {
+        if (err instanceof UniqueConstraintError) {
+          return { ok: false, reason: 'already_active_member' }
+        }
+        throw err
+      }
+    } else {
+      await this.members?.updateRole(input.eventId, input.userId, 'viewer')
+    }
+    await this.attendees?.upsert({
+      id: input.attendeeId,
+      eventId: input.eventId,
+      userId: input.userId,
+    })
     return { ok: true, readmitted: input.skipMemberAdd }
   }
 }
@@ -623,15 +749,30 @@ export class MemoryEventAttendeeRepo implements EventAttendeeRepo {
 
   async listForEvent(
     eventId: string,
-    opts: { limit: number; cursor: Date | null },
-  ): Promise<{ items: AttendeeRecord[]; nextCursor: Date | null }> {
+    opts: { limit: number; cursor: AttendeeCursor | null },
+  ): Promise<{ items: AttendeeRecord[]; nextCursor: AttendeeCursor | null }> {
+    // (joined_at, id) ASC ordering + composite cursor filter — see
+    // event-attendees.ts D1 impl. Audit E3 #25.
     const filtered = this.rows
       .filter((r) => r.eventId === eventId && r.removedAt === null)
-      .filter((r) => (opts.cursor ? r.joinedAt > opts.cursor : true))
-      .sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())
+      .filter((r) => {
+        if (!opts.cursor) return true
+        const tA = r.joinedAt.getTime()
+        const tC = opts.cursor.joinedAt.getTime()
+        if (tA !== tC) return tA > tC
+        return r.id > opts.cursor.id
+      })
+      .sort((a, b) => {
+        const t = a.joinedAt.getTime() - b.joinedAt.getTime()
+        if (t !== 0) return t
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
     const items = filtered.slice(0, opts.limit).map((r) => ({ ...r }))
+    const last = items[items.length - 1]
     const nextCursor =
-      filtered.length > opts.limit ? items[opts.limit - 1]!.joinedAt : null
+      filtered.length > opts.limit && last
+        ? { joinedAt: last.joinedAt, id: last.id }
+        : null
     return { items, nextCursor }
   }
 
@@ -871,7 +1012,7 @@ export class MemoryEventDayRepo implements EventDayRepo {
 export class MemoryArtistRepo implements ArtistRepo {
   private rows: ArtistRecord[] = []
 
-  async create(input: { id: string; name: string } & ArtistLinks): Promise<ArtistRecord> {
+  async create(input: { id: string; name: string } & ArtistProfileFields): Promise<ArtistRecord> {
     if (this.rows.some((a) => a.name.toLowerCase() === input.name.toLowerCase())) {
       throw new UniqueConstraintError('artists_lower_name_idx')
     }
@@ -883,6 +1024,8 @@ export class MemoryArtistRepo implements ArtistRepo {
       appleMusic: input.appleMusic ?? null,
       youtubeMusic: input.youtubeMusic ?? null,
       instagram: input.instagram ?? null,
+      genre: input.genre ?? null,
+      mbid: input.mbid ?? null,
       updatedAt: new Date(),
     }
     this.rows.push(rec)
@@ -910,7 +1053,7 @@ export class MemoryArtistRepo implements ArtistRepo {
 
   async update(
     id: string,
-    fields: { name?: string } & ArtistLinks,
+    fields: { name?: string } & ArtistProfileFields,
   ): Promise<ArtistRecord | null> {
     const a = this.rows.find((r) => r.id === id)
     if (!a) return null
@@ -925,8 +1068,108 @@ export class MemoryArtistRepo implements ArtistRepo {
     if (fields.appleMusic !== undefined) a.appleMusic = fields.appleMusic
     if (fields.youtubeMusic !== undefined) a.youtubeMusic = fields.youtubeMusic
     if (fields.instagram !== undefined) a.instagram = fields.instagram
+    if (fields.genre !== undefined) a.genre = fields.genre ?? null
+    if (fields.mbid !== undefined) a.mbid = fields.mbid ?? null
     a.updatedAt = new Date()
     return { ...a }
+  }
+
+  async listPage(opts: {
+    q?: string | undefined
+    cursor?: { name: string; id: string } | null | undefined
+    limit: number
+  }): Promise<{ items: ArtistRecord[]; nextCursor: { name: string; id: string } | null }> {
+    const q = opts.q?.trim().toLowerCase()
+    const key = (a: { name: string; id: string }) => [a.name.toLowerCase(), a.id] as const
+    const after = opts.cursor ? key(opts.cursor) : null
+    const items = this.rows
+      .filter((a) => !q || a.name.toLowerCase().includes(q))
+      .filter((a) => {
+        if (!after) return true
+        const [n, i] = key(a)
+        return n > after[0] || (n === after[0] && i > after[1])
+      })
+      .sort((a, b) => {
+        const [an, ai] = key(a)
+        const [bn, bi] = key(b)
+        return an < bn ? -1 : an > bn ? 1 : ai < bi ? -1 : 1
+      })
+      .slice(0, opts.limit)
+      .map((a) => ({ ...a }))
+    const last = items[items.length - 1]
+    return {
+      items,
+      nextCursor: items.length === opts.limit && last ? { name: last.name, id: last.id } : null,
+    }
+  }
+
+  async listEnrichmentCandidates(opts: {
+    afterId?: string | null | undefined
+    limit: number
+  }): Promise<ArtistRecord[]> {
+    const qualifies = (a: ArtistRecord): boolean =>
+      a.genre === null ||
+      a.soundcloud === null ||
+      a.spotify === null ||
+      a.appleMusic === null ||
+      a.youtubeMusic === null ||
+      a.instagram === null
+    return this.rows
+      .filter((a) => qualifies(a) && (!opts.afterId || a.id > opts.afterId))
+      .sort((a, b) => (a.id < b.id ? -1 : 1))
+      .slice(0, opts.limit)
+      .map((a) => ({ ...a }))
+  }
+}
+
+export class MemoryArtistMbReviewRepo implements ArtistMbReviewRepo {
+  private rows: ArtistMbReviewRecord[] = []
+
+  async create(input: NewArtistMbReview): Promise<ArtistMbReviewRecord> {
+    // Mirror the D1 partial unique index on (artist_id) WHERE status='pending'.
+    if (this.rows.some((r) => r.artistId === input.artistId && r.status === 'pending')) {
+      throw new UniqueConstraintError('artist_mb_reviews_pending_artist_uq')
+    }
+    const rec: ArtistMbReviewRecord = {
+      id: input.id,
+      artistId: input.artistId,
+      mbid: input.mbid,
+      matchKind: input.matchKind,
+      proposedFields: { ...input.proposedFields },
+      status: 'pending',
+      createdAt: new Date(),
+      reviewedAt: null,
+    }
+    this.rows.push(rec)
+    return { ...rec, proposedFields: { ...rec.proposedFields } }
+  }
+
+  async getById(id: string): Promise<ArtistMbReviewRecord | null> {
+    const r = this.rows.find((x) => x.id === id)
+    return r ? { ...r, proposedFields: { ...r.proposedFields } } : null
+  }
+
+  async getPendingByArtist(artistId: string): Promise<ArtistMbReviewRecord | null> {
+    const r = this.rows.find((x) => x.artistId === artistId && x.status === 'pending')
+    return r ? { ...r, proposedFields: { ...r.proposedFields } } : null
+  }
+
+  async listByStatus(status?: ArtistMbReviewStatus): Promise<ArtistMbReviewRecord[]> {
+    return this.rows
+      .filter((r) => !status || r.status === status)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+      .map((r) => ({ ...r, proposedFields: { ...r.proposedFields } }))
+  }
+
+  async setReviewed(
+    id: string,
+    status: 'applied' | 'dismissed',
+  ): Promise<ArtistMbReviewRecord | null> {
+    const r = this.rows.find((x) => x.id === id)
+    if (!r || r.status !== 'pending') return null
+    r.status = status
+    r.reviewedAt = new Date()
+    return { ...r, proposedFields: { ...r.proposedFields } }
   }
 }
 
@@ -936,7 +1179,7 @@ export class MemoryEventArtistRepo implements EventArtistRepo {
   // event_set_stars → event_artists onDelete('cascade') FK (#201).
   eventSetStars: MemoryEventSetStarRepo | null = null
 
-  private indexOf(eventId: string, artistId: string, dayId: string): number {
+  private indexOf(eventId: string, artistId: string, dayId: string | null): number {
     return this.rows.findIndex(
       (r) => r.eventId === eventId && r.artistId === artistId && r.dayId === dayId,
     )
@@ -959,7 +1202,7 @@ export class MemoryEventArtistRepo implements EventArtistRepo {
     eventId: string,
     input: {
       upserts: EventArtistRecord[]
-      deletes: { artistId: string; dayId: string }[]
+      deletes: { artistId: string; dayId: string | null }[]
     },
   ): Promise<{ upserted: EventArtistRecord[]; deleted: number }> {
     const snapshot = this.rows.slice()
@@ -980,7 +1223,7 @@ export class MemoryEventArtistRepo implements EventArtistRepo {
   async find(
     eventId: string,
     artistId: string,
-    dayId: string,
+    dayId: string | null,
   ): Promise<EventArtistRecord | null> {
     const i = this.indexOf(eventId, artistId, dayId)
     return i >= 0 ? { ...this.rows[i]! } : null
@@ -990,30 +1233,33 @@ export class MemoryEventArtistRepo implements EventArtistRepo {
     return this.rows
       .filter((r) => r.eventId === eventId)
       .sort(
+        // Mirror D1's ORDER BY day_id ASC: SQLite sorts NULLs first, so
+        // unscheduled (TBA) rows lead.
         (a, b) =>
-          (a.dayId < b.dayId ? -1 : a.dayId > b.dayId ? 1 : 0) ||
+          ((a.dayId ?? '') < (b.dayId ?? '') ? -1 : (a.dayId ?? '') > (b.dayId ?? '') ? 1 : 0) ||
           (a.startTime ?? '').localeCompare(b.startTime ?? ''),
       )
       .map((r) => ({ ...r }))
   }
 
-  async delete(eventId: string, artistId: string, dayId: string): Promise<boolean> {
+  async delete(eventId: string, artistId: string, dayId: string | null): Promise<boolean> {
     const i = this.indexOf(eventId, artistId, dayId)
     if (i < 0) return false
     this.rows.splice(i, 1)
-    // Cascade: mirror the DB's event_set_stars → event_artists onDelete('cascade') (#201).
-    this.eventSetStars?.deleteForSlot(eventId, artistId, dayId)
+    // Cascade: mirror the DB's event_set_stars → event_artists onDelete('cascade')
+    // (#201). Stars only reference scheduled slots, so a null day matches nothing.
+    if (dayId !== null) this.eventSetStars?.deleteForSlot(eventId, artistId, dayId)
     return true
   }
 
   async replaceAll(eventId: string, rows: EventArtistRecord[]): Promise<EventArtistRecord[]> {
     const snapshot = this.rows.slice()
     try {
-      const keep = new Set(rows.map((r) => `${r.artistId} ${r.dayId}`))
+      const keep = new Set(rows.map((r) => `${r.artistId} ${r.dayId ?? ''}`))
       for (const r of rows) await this.upsert(r)
       const current = this.rows.filter((r) => r.eventId === eventId)
       for (const c of current) {
-        if (keep.has(`${c.artistId} ${c.dayId}`)) continue
+        if (keep.has(`${c.artistId} ${c.dayId ?? ''}`)) continue
         await this.delete(eventId, c.artistId, c.dayId)
       }
       return this.listForEvent(eventId)
@@ -1460,6 +1706,8 @@ export class MemoryGroupRepo implements GroupRepo {
   // write event_attendees inside the same logical "transaction" (which
   // in memory is just a sequence of synchronous mutations).
   attendees?: MemoryEventAttendeeRepo
+  // Back-reference so group delete cascades crew map pins (mirrors FK).
+  memberLocations?: MemoryGroupMemberLocationRepo
 
   constructor(
     private readonly members?: MemoryGroupMemberRepo,
@@ -1524,6 +1772,23 @@ export class MemoryGroupRepo implements GroupRepo {
     return new Map([...best.entries()].map(([k, v]) => [k, v.groupId]))
   }
 
+  async listUserGroupsForEvent(
+    userId: string,
+    eventId: string,
+  ): Promise<{ group: GroupRecord; role: GroupRole }[]> {
+    // Every group the user belongs to in this event, join order first —
+    // matching the D1 impl's ORDER BY group_members.joined_at ASC.
+    const hits: { group: GroupRecord; role: GroupRole; joinedAt: Date }[] = []
+    for (const g of this.byId.values()) {
+      if (g.eventId !== eventId) continue
+      const m = await this.members?.findByGroupAndUser(g.id, userId)
+      if (!m) continue
+      hits.push({ group: { ...g }, role: m.role, joinedAt: m.joinedAt })
+    }
+    hits.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())
+    return hits.map(({ group, role }) => ({ group, role }))
+  }
+
   async findByShortCode(shortCode: string): Promise<GroupRecord | null> {
     for (const c of this.byId.values()) {
       if (c.shortCode === shortCode) return { ...c }
@@ -1575,6 +1840,7 @@ export class MemoryGroupRepo implements GroupRepo {
     // themselves cascade rally_attendees) + chat_messages disappear.
     if (existed) {
       this.members?.removeByGroup(id)
+      this.memberLocations?.removeByGroup(id)
       this.invites?.removeByGroup(id)
       if (this.rallies) {
         for (const rallyId of this.rallies.groupRallyIds(id)) await this.rallies.delete(rallyId)
@@ -1672,6 +1938,10 @@ export class MemoryGroupRepo implements GroupRepo {
 export class MemoryGroupMemberRepo implements GroupMemberRepo {
   private rows: GroupMemberRecord[] = []
 
+  // Back-reference (set in buildMemoryRepos) so isMemberOfAnyGroupInEvent
+  // can resolve group → event like the D1 impl's JOIN does.
+  groups?: MemoryGroupRepo
+
   async add(input: {
     id: string
     groupId: string
@@ -1698,6 +1968,15 @@ export class MemoryGroupMemberRepo implements GroupMemberRepo {
       .map((r) => ({ ...r }))
   }
 
+  async isMemberOfAnyGroupInEvent(eventId: string, userId: string): Promise<boolean> {
+    for (const r of this.rows) {
+      if (r.userId !== userId) continue
+      const g = await this.groups?.findById(r.groupId)
+      if (g && g.eventId === eventId) return true
+    }
+    return false
+  }
+
   async countForGroup(groupId: string): Promise<number> {
     return this.rows.filter((r) => r.groupId === groupId).length
   }
@@ -1711,6 +1990,51 @@ export class MemoryGroupMemberRepo implements GroupMemberRepo {
     const before = this.rows.length
     this.rows = this.rows.filter((r) => !(r.groupId === groupId && r.userId === userId))
     return this.rows.length < before
+  }
+
+  // Helper for MemoryGroupRepo's CASCADE mirror (not in the interface).
+  removeByGroup(groupId: string): void {
+    this.rows = this.rows.filter((r) => r.groupId !== groupId)
+  }
+}
+
+export class MemoryGroupMemberLocationRepo implements GroupMemberLocationRepo {
+  private rows: GroupMemberLocationRecord[] = []
+
+  async upsertForMember(input: {
+    id: string
+    groupId: string
+    userId: string
+    layer: string
+    xPct: number
+    yPct: number
+  }): Promise<GroupMemberLocationRecord> {
+    const existing = this.rows.find(
+      (r) => r.groupId === input.groupId && r.userId === input.userId,
+    )
+    if (existing) {
+      existing.layer = input.layer
+      existing.xPct = input.xPct
+      existing.yPct = input.yPct
+      existing.updatedAt = new Date()
+      return { ...existing }
+    }
+    const rec: GroupMemberLocationRecord = { ...input, updatedAt: new Date() }
+    this.rows.push(rec)
+    return { ...rec }
+  }
+
+  async deleteForMember(groupId: string, userId: string): Promise<boolean> {
+    const before = this.rows.length
+    this.rows = this.rows.filter((r) => !(r.groupId === groupId && r.userId === userId))
+    return this.rows.length < before
+  }
+
+  async listForGroup(groupId: string): Promise<GroupMemberLocationRecord[]> {
+    return this.rows
+      .filter((r) => r.groupId === groupId)
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .map((r) => ({ ...r }))
   }
 
   // Helper for MemoryGroupRepo's CASCADE mirror (not in the interface).
@@ -1788,6 +2112,9 @@ export class MemoryRallyRepo implements RallyRepo {
       locationLabel: input.locationLabel ?? null,
       lat: input.lat ?? null,
       lng: input.lng ?? null,
+      pinLayer: input.pinLayer ?? null,
+      pinXPct: input.pinXPct ?? null,
+      pinYPct: input.pinYPct ?? null,
       status: input.status ?? 'proposed',
       createdBy: input.createdBy,
       createdAt: now,
@@ -1820,6 +2147,9 @@ export class MemoryRallyRepo implements RallyRepo {
     if (fields.locationLabel !== undefined) r.locationLabel = fields.locationLabel
     if (fields.lat !== undefined) r.lat = fields.lat
     if (fields.lng !== undefined) r.lng = fields.lng
+    if (fields.pinLayer !== undefined) r.pinLayer = fields.pinLayer
+    if (fields.pinXPct !== undefined) r.pinXPct = fields.pinXPct
+    if (fields.pinYPct !== undefined) r.pinYPct = fields.pinYPct
     if (fields.status !== undefined) r.status = fields.status
     r.updatedAt = new Date()
     return { ...r }
@@ -1928,11 +2258,14 @@ export class MemoryChatMessageRepo implements ChatMessageRepo {
     const sorted = [...this.byId.values()]
       .filter((m) => m.groupId === groupId)
       .sort((a, b) => this.order.get(b.id)! - this.order.get(a.id)!) // newest first
-    // Only honour a cursor that belongs to this group (the pg impl scopes the
+    // Only honour a cursor that belongs to this group (the D1 impl scopes the
     // cursor lookup by group_id; a foreign id must not bound this group's page).
-    const cursorRow = opts.before ? this.byId.get(opts.before) : undefined
+    // Both v1 and legacy cursors carry the boundary message id; this in-memory
+    // approximation ranks by insertion order, so the id is all it needs.
+    const cursorId = opts.cursor?.id
+    const cursorRow = cursorId ? this.byId.get(cursorId) : undefined
     const cursorRank =
-      cursorRow && cursorRow.groupId === groupId ? this.order.get(opts.before!) : undefined
+      cursorRow && cursorRow.groupId === groupId ? this.order.get(cursorId!) : undefined
     const page = (cursorRank === undefined
       ? sorted
       : sorted.filter((m) => this.order.get(m.id)! < cursorRank)
@@ -2037,6 +2370,50 @@ export class MemoryEventSetStarRepo implements EventSetStarRepo {
         this.rows.delete(k)
       }
     }
+  }
+}
+
+export class MemoryEventArtistFavoriteRepo implements EventArtistFavoriteRepo {
+  // Key: `${userId}:${eventId}:${artistId}`
+  private rows = new Map<string, ArtistFavoriteKey & { userId: string }>()
+
+  private key(userId: string, k: ArtistFavoriteKey): string {
+    return `${userId}:${k.eventId}:${k.artistId}`
+  }
+
+  async favorite(userId: string, key: ArtistFavoriteKey): Promise<boolean> {
+    const k = this.key(userId, key)
+    if (this.rows.has(k)) return false
+    this.rows.set(k, { userId, ...key })
+    return true
+  }
+
+  async unfavorite(userId: string, key: ArtistFavoriteKey): Promise<boolean> {
+    return this.rows.delete(this.key(userId, key))
+  }
+
+  async listForUserEvent(userId: string, eventId: string): Promise<ArtistFavoriteKey[]> {
+    const results: ArtistFavoriteKey[] = []
+    for (const [, r] of this.rows) {
+      if (r.userId === userId && r.eventId === eventId) {
+        results.push({ eventId: r.eventId, artistId: r.artistId })
+      }
+    }
+    return results
+  }
+
+  async listForUsersEvent(
+    userIds: string[],
+    eventId: string,
+  ): Promise<{ userId: string; artistId: string }[]> {
+    const wanted = new Set(userIds)
+    const results: { userId: string; artistId: string }[] = []
+    for (const [, r] of this.rows) {
+      if (r.eventId === eventId && wanted.has(r.userId)) {
+        results.push({ userId: r.userId, artistId: r.artistId })
+      }
+    }
+    return results
   }
 }
 
@@ -2153,6 +2530,84 @@ export class MemoryEventPlannerPrefRepo implements EventPlannerPrefRepo {
   }
 }
 
+export class MemoryLineupIngestionRepo implements LineupIngestionRepo {
+  private byId = new Map<string, LineupIngestionRecord>()
+
+  async create(input: CreateLineupIngestionInput): Promise<LineupIngestionRecord> {
+    const status = input.status ?? 'pending'
+    // Mirror the one-pending-per-event partial unique index.
+    if (status === 'pending') {
+      for (const r of this.byId.values()) {
+        if (r.eventId === input.eventId && r.status === 'pending') {
+          throw new UniqueConstraintError('lineup_ingestions.event_id')
+        }
+      }
+    }
+    const rec: LineupIngestionRecord = {
+      id: input.id,
+      eventId: input.eventId,
+      sourceKind: input.sourceKind,
+      sourceUrl: input.sourceUrl ?? null,
+      sourceExcerpt: input.sourceExcerpt,
+      model: input.model,
+      // Round-trip through JSON like the D1 text columns do, so a fake
+      // can't preserve non-JSON-safe values the real path would lose.
+      extracted: JSON.parse(JSON.stringify(input.extracted)),
+      proposal: JSON.parse(JSON.stringify(input.proposal)),
+      status,
+      error: input.error ?? null,
+      aiResponseId: input.aiResponseId ?? null,
+      createdBy: input.createdBy,
+      reviewedBy: null,
+      createdAt: new Date(),
+      reviewedAt: null,
+    }
+    this.byId.set(rec.id, rec)
+    return { ...rec }
+  }
+
+  async findById(id: string): Promise<LineupIngestionRecord | null> {
+    const r = this.byId.get(id)
+    return r ? { ...r } : null
+  }
+
+  async listForEvent(
+    eventId: string,
+    opts: { status?: LineupIngestionStatus | undefined } = {},
+  ): Promise<LineupIngestionRecord[]> {
+    return [...this.byId.values()]
+      .filter((r) => r.eventId === eventId && (!opts.status || r.status === opts.status))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+      .map((r) => ({ ...r }))
+  }
+
+  async markSuperseded(eventId: string, reviewedBy: string): Promise<number> {
+    let n = 0
+    for (const r of this.byId.values()) {
+      if (r.eventId === eventId && r.status === 'pending') {
+        r.status = 'superseded'
+        r.reviewedBy = reviewedBy
+        r.reviewedAt = new Date()
+        n++
+      }
+    }
+    return n
+  }
+
+  async decide(
+    id: string,
+    status: 'approved' | 'rejected',
+    reviewedBy: string,
+  ): Promise<LineupIngestionRecord | null> {
+    const r = this.byId.get(id)
+    if (!r || r.status !== 'pending') return null
+    r.status = status
+    r.reviewedBy = reviewedBy
+    r.reviewedAt = new Date()
+    return { ...r }
+  }
+}
+
 export function buildMemoryRepos(): Repos {
   const members = new MemoryEventMemberRepo()
   const maps = new MemoryEventMapRepo()
@@ -2162,8 +2617,13 @@ export function buildMemoryRepos(): Repos {
   maps.pois = pois
   maps.zones = zones
   const groupMembers = new MemoryGroupMemberRepo()
+  const groupMemberLocations = new MemoryGroupMemberLocationRepo()
   const groupInvites = new MemoryGroupInviteRepo()
   const groups = new MemoryGroupRepo(groupMembers, groupInvites)
+  // Back-reference so isMemberOfAnyGroupInEvent can resolve group → event.
+  groupMembers.groups = groups
+  // Back-reference so group delete cascades crew map pins.
+  groups.memberLocations = groupMemberLocations
   const rallyAttendees = new MemoryRallyAttendeeRepo()
   const rallies = new MemoryRallyRepo(rallyAttendees)
   // Back-reference so attendee cleanup can resolve the group's rallies.
@@ -2197,6 +2657,7 @@ export function buildMemoryRepos(): Repos {
     stages: new MemoryEventStageRepo(),
     days: new MemoryEventDayRepo(),
     artists: new MemoryArtistRepo(),
+    artistMbReviews: new MemoryArtistMbReviewRepo(),
     eventArtists,
     eventSessions: new MemoryEventSessionRepo(),
     sessions: new MemoryEventsSessionRepo(),
@@ -2205,15 +2666,18 @@ export function buildMemoryRepos(): Repos {
     noGoZones: zones,
     groups,
     groupMembers,
+    groupMemberLocations,
     groupInvites,
     rallies,
     rallyAttendees,
     chatMessages,
     eventWeather: new MemoryEventWeatherRepo(),
     eventSetStars,
+    eventArtistFavorites: new MemoryEventArtistFavoriteRepo(),
     eventSnapshots: new MemoryEventSnapshotRepo(),
     personalTickets: new MemoryPersonalTicketRepo(),
     eventPlannerPrefs: new MemoryEventPlannerPrefRepo(),
+    lineupIngestions: new MemoryLineupIngestionRepo(),
     rateLimit: new InMemoryRateLimitRepo(),
   }
 }

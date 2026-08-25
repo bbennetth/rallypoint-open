@@ -31,6 +31,3 @@ export const auditLog = sqliteTable(
     createdIdx: index('audit_log_created_idx').on(t.createdAt),
   }),
 )
-
-export type DbAuditEvent = typeof auditLog.$inferSelect
-export type DbAuditEventInsert = typeof auditLog.$inferInsert

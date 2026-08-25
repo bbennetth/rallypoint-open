@@ -6,10 +6,13 @@
 # CLOUDFLARE_ACCOUNT_ID); D1 databases and R2 buckets are auto-provisioned by
 # wrangler >=4.45 / the bootstrap step. Real secrets via
 # `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
-#   EVENTS_API_KEY
 #   EVENTS_SESSION_KEY_V1
 #   REALTIME_TOKEN_HMAC_KEY
 #   OPEN_METEO_COMMERCIAL_API_KEY  (only if using commercial Open-Meteo tier)
+#   ADMIN_USER_IDS  (system-event admin allowlist — MUST be pushed with the
+#                    same value as admin-api's ADMIN_USER_IDS secret; drift
+#                    means an admin can manage a system event via admin-web
+#                    but 404 on it in events-web)
 # Map image + ticket object storage is a native R2 binding (OBJECT_STORE),
 # not keys (#409). The old EVENTS_OBJECT_STORE_* vars are retired.
 
@@ -75,9 +78,44 @@ migrations_dir = "../../packages/events-db/migrations"
 binding = "OBJECT_STORE"
 bucket_name = "rallypoint-events-dev"
 
+# Workers AI binding for the admin lineup-ingestion extraction
+# (services/rpc-core/lineup-ingest-core.ts). Local `wrangler dev` calls
+# Workers AI directly (no AI_GATEWAY_ID var); qa/prod route through the
+# `rallypoint-ai` AI Gateway (var set per env below).
+[ai]
+binding = "AI"
+
+# Top-level service bindings — required for cross-process RPC under wrangler's
+# local dev registry (PR 2 of feat/rpc-bindings). When a sibling Worker is up
+# under the same dev-registry, calls dispatch RPC method-to-method. Without a
+# top-level binding, local dev had `env.RPID` undefined and the consumer fell
+# back to fetch(URL + Bearer). After PR 2 the consumer expects the binding.
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+[[services]]
+binding = "LISTS"
+service = "rallypoint-lists"
+entrypoint = "ListsRPC"
+
+[[services]]
+binding = "MONEY"
+service = "rallypoint-money"
+entrypoint = "MoneyRPC"
+
+[[services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai"
+entrypoint = "AiRPC"
+
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
 # ---- QA: events.rallypt.dev -----------------------------------------
 [env.qa]
-vars = { NODE_ENV = "production", EVENTS_UI_ORIGIN = "https://events.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", LISTS_API_URL = "https://lists.rallypt.dev", MONEY_API_URL = "https://money.rallypt.dev", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", AI_GATEWAY_ID = "rallypoint-ai", EVENTS_UI_ORIGIN = "https://events.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", LISTS_API_URL = "https://lists.rallypt.dev", MONEY_API_URL = "https://money.rallypt.dev", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
 [[env.qa.r2_buckets]]
 binding = "OBJECT_STORE"
@@ -94,23 +132,32 @@ migrations_dir = "../../packages/events-db/migrations"
 name = "HUB"
 class_name = "RealtimeHub"
 
-# Service bindings: same-account cross-Worker calls to id/lists/money
-# dispatch in-process via these bindings (the CF edge drops same-account
-# loopback fetches to public hostnames). Path-matched against the bound
-# Worker, so the existing ${*_API_URL}/api/v1/... URLs work unchanged. No
-# top-level [[services]] block — local `wrangler dev` falls back to the
-# public-fetch path so single-app dev keeps working.
+# Service bindings: same-account cross-Worker RPC calls to
+# IdRPC/ListsRPC/MoneyRPC via the typed `entrypoint` fields.
+# Top-level [[services]] blocks (above) make wrangler's local dev
+# registry connect cross-process during `npm run dev:stack`.
 [[env.qa.services]]
 binding = "RPID"
 service = "rallypoint-id-qa"
+entrypoint = "IdRPC"
 
 [[env.qa.services]]
 binding = "LISTS"
 service = "rallypoint-lists-qa"
+entrypoint = "ListsRPC"
 
 [[env.qa.services]]
 binding = "MONEY"
 service = "rallypoint-money-qa"
+entrypoint = "MoneyRPC"
+
+[[env.qa.services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai-qa"
+entrypoint = "AiRPC"
+
+[env.qa.ai]
+binding = "AI"
 
 [env.qa.triggers]
 crons = ["0 * * * *"]
@@ -121,7 +168,7 @@ custom_domain = true
 
 # ---- Prod: events.rallypt.app ---------------------------------------
 [env.prod]
-vars = { NODE_ENV = "production", EVENTS_UI_ORIGIN = "https://events.rallypt.app", RPID_API_URL = "https://id.rallypt.app", LISTS_API_URL = "https://lists.rallypt.app", MONEY_API_URL = "https://money.rallypt.app", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", AI_GATEWAY_ID = "rallypoint-ai", EVENTS_UI_ORIGIN = "https://events.rallypt.app", RPID_API_URL = "https://id.rallypt.app", LISTS_API_URL = "https://lists.rallypt.app", MONEY_API_URL = "https://money.rallypt.app", OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast", OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
 [[env.prod.r2_buckets]]
 binding = "OBJECT_STORE"
@@ -141,14 +188,25 @@ class_name = "RealtimeHub"
 [[env.prod.services]]
 binding = "RPID"
 service = "rallypoint-id-prod"
+entrypoint = "IdRPC"
 
 [[env.prod.services]]
 binding = "LISTS"
 service = "rallypoint-lists-prod"
+entrypoint = "ListsRPC"
 
 [[env.prod.services]]
 binding = "MONEY"
 service = "rallypoint-money-prod"
+entrypoint = "MoneyRPC"
+
+[[env.prod.services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai-prod"
+entrypoint = "AiRPC"
+
+[env.prod.ai]
+binding = "AI"
 
 [env.prod.triggers]
 crons = ["0 * * * *"]

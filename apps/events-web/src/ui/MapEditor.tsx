@@ -7,7 +7,9 @@ import {
   validateMapDimensions,
   type PoiCategoryId,
 } from '@rallypoint/events-shared'
-import { ConfirmDialog, useToast } from '@rallypoint/ui'
+import { ConfirmDialog, SwipeActions, useToast } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
+import { LAYER_LABELS } from '../lib/map-view.js'
 import {
   ApiError,
   createPoi,
@@ -31,8 +33,8 @@ const inputCls = 'cyber-input'
 const btnPrimary = 'btn-brutal'
 const btnGhost = 'btn-ghost'
 const btnDelete = 'btn-hot'
-const alertCls = 'p-3 text-sm text-[color:var(--ink)]'
-const alertStyle = { border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }
+const alertCls = 'p-3 text-sm'
+const alertStyle = { background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }
 
 // Decode a File into an HTMLImageElement to read its pixel dimensions
 // (the server can't read dimensions from a HEAD — design §3.8).
@@ -82,36 +84,44 @@ export function MapEditor({
   const [category, setCategory] = useState<PoiCategoryId>(POI_CATEGORY_IDS[0])
   const [poiName, setPoiName] = useState('')
 
+  // Selected POI (edit panel: rename / recategorize / arrow nudge)
+  const [selectedPoiId, setSelectedPoiId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editCategory, setEditCategory] = useState<PoiCategoryId>(POI_CATEGORY_IDS[0])
+  const [savingPoi, setSavingPoi] = useState(false)
+
   // Zone draw tool
   const [drawing, setDrawing] = useState(false)
   const [draft, setDraft] = useState<ZoneVertex[]>([])
 
   // Delete-map confirmation dialog
   const [confirmDeleteMapId, setConfirmDeleteMapId] = useState<string | null>(null)
+  // Swipe/hover Delete on a POI/zone row stages it here; ConfirmDialog commits.
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: 'poi'; id: string; name: string } | { kind: 'zone'; id: string; name: string } | null
+  >(null)
   const [deletingMap, setDeletingMap] = useState(false)
 
   const imgRef = useRef<HTMLImageElement>(null)
 
+  const run = useAsyncTask()
   useEffect(() => {
-    let cancelled = false
-    Promise.all([listMaps(eventId), listPois(eventId), listZones(eventId)])
-      .then(([m, p, z]) => {
-        if (cancelled) return
+    void run(async (ctx) => {
+      try {
+        const [m, p, z] = await Promise.all([listMaps(eventId), listPois(eventId), listZones(eventId)])
+        if (ctx.stale()) return
         setMaps(m)
         setPois(p)
         setZones(z)
         // Keep the current selection only if it still exists (a collaborator
         // may have deleted the active map); otherwise fall back to the first.
         setActiveMapId((cur) => (cur && m.some((x) => x.id === cur) ? cur : m[0]?.id ?? null))
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
+      } catch (err) {
+        if (ctx.stale()) return
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load map data.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [eventId, reloadSignal])
+      }
+    })
+  }, [eventId, reloadSignal, run])
 
   const activeMap = maps.find((m) => m.id === activeMapId) ?? null
   const mapPois = pois.filter((p) => p.map_id === activeMapId)
@@ -242,10 +252,51 @@ export function MapEditor({
     }
   }
 
+  function selectPoi(poi: PoiDto): void {
+    if (selectedPoiId === poi.id) {
+      setSelectedPoiId(null)
+      return
+    }
+    setEditName(poi.name)
+    setEditCategory(poi.category_id as PoiCategoryId)
+    setSelectedPoiId(poi.id)
+  }
+
+  async function handleSavePoiEdit(poi: PoiDto) {
+    if (!editName.trim()) return
+    setSavingPoi(true)
+    try {
+      const updated = await patchPoi(eventId, poi.id, {
+        name: editName.trim(),
+        categoryId: editCategory,
+      })
+      setPois((prev) => prev.map((p) => (p.id === poi.id ? updated : p)))
+      toast({ tone: 'success', body: 'POI updated.' })
+    } catch (err) {
+      toast({ tone: 'error', body: err instanceof ApiError ? err.message : 'Failed to update POI.' })
+    } finally {
+      setSavingPoi(false)
+    }
+  }
+
+  // Arrow-button nudge: ±2% clamped to 2–98 (drag is poor on mobile).
+  async function handleNudgePoi(poi: PoiDto, dx: number, dy: number) {
+    const clamp = (n: number): number => Math.min(98, Math.max(2, n))
+    const xPct = clamp(poi.x_pct + dx)
+    const yPct = clamp(poi.y_pct + dy)
+    setPois((prev) => prev.map((p) => (p.id === poi.id ? { ...p, x_pct: xPct, y_pct: yPct } : p)))
+    try {
+      await patchPoi(eventId, poi.id, { xPct, yPct })
+    } catch {
+      void listPois(eventId).then(setPois)
+    }
+  }
+
   async function handleDeletePoi(poiId: string) {
     try {
       await deletePoi(eventId, poiId)
       setPois((prev) => prev.filter((p) => p.id !== poiId))
+      setSelectedPoiId((cur) => (cur === poiId ? null : cur))
     } catch (err) {
       toast({ tone: 'error', body: err instanceof ApiError ? err.message : 'Failed to delete POI.' })
     }
@@ -287,20 +338,34 @@ export function MapEditor({
     poly.map((v) => `${v.xPct},${v.yPct}`).join(' ')
 
   return (
-    <div className="p-4 space-y-4" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
-      {/* Layer tabs */}
+    <div className="p-4 space-y-4 pl-card">
+      {/* Layer tabs — all three layers; uploaded ones carry an · IMG
+          suffix, empty ones (editors only) pre-select the upload form. */}
       <div className="flex items-center gap-2 flex-wrap">
-        {maps.map((m) => (
-          <button
-            key={m.id}
-            type="button"
-            onClick={() => setActiveMapId(m.id)}
-            className={m.id === activeMapId ? 'chip-solid' : 'chip'}
-            style={m.id === activeMapId ? undefined : { color: 'var(--ink-dim)' }}
-          >
-            {m.layer}
-          </button>
-        ))}
+        {MAP_LAYERS.map((layer) => {
+          const m = maps.find((x) => x.layer === layer)
+          if (!m && !canEdit) return null
+          const isActive = m ? m.id === activeMapId : uploadLayer === layer && !activeMap
+          return (
+            <button
+              key={layer}
+              type="button"
+              onClick={() => {
+                if (m) {
+                  setActiveMapId(m.id)
+                } else {
+                  setUploadLayer(layer)
+                  setActiveMapId(null)
+                }
+              }}
+              className={isActive ? 'chip-solid' : 'chip'}
+              style={isActive ? undefined : { color: 'var(--ink-dim)' }}
+            >
+              {LAYER_LABELS[layer]}
+              {m ? ' · IMG' : ''}
+            </button>
+          )
+        })}
         {maps.length === 0 && <p className="text-xs text-[color:var(--ink-mute)]">No maps uploaded yet.</p>}
       </div>
 
@@ -435,7 +500,7 @@ export function MapEditor({
                 key={z.id}
                 points={polygonPoints(z.polygon)}
                 style={{
-                  fill: 'color-mix(in srgb, var(--hot) 25%, transparent)',
+                  fill: 'color-mix(in srgb, var(--hot) 22%, transparent)',
                   stroke: 'var(--hot)',
                 }}
                 strokeWidth={0.4}
@@ -447,6 +512,7 @@ export function MapEditor({
                 style={{
                   fill: 'color-mix(in srgb, var(--acid) 20%, transparent)',
                   stroke: 'var(--acid)',
+                  strokeDasharray: '2 1.2',
                 }}
                 strokeWidth={0.4}
               />
@@ -465,15 +531,20 @@ export function MapEditor({
               // dragging a POI doesn't also place a new one.
               onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)}
               onPointerUp={(e) => void handlePoiDrop(poi, e)}
-              onClick={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (canEdit) selectPoi(poi)
+              }}
               title={`${poi.name} (${poi.category_id})`}
               style={{
                 left: `${poi.x_pct}%`,
                 top: `${poi.y_pct}%`,
                 background: 'var(--acid)',
                 color: 'var(--bg)',
+                border: '2px solid var(--surface)',
+                boxShadow: 'var(--shadow-card)',
               }}
-              className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/30 px-2 py-0.5 text-[10px] font-medium shadow"
+              className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full px-2 py-0.5 text-[10px] font-medium"
             >
               {poi.name}
             </button>
@@ -485,29 +556,126 @@ export function MapEditor({
       {mapPois.length > 0 && (
         <div className="space-y-1">
           <h4 className="text-xs font-medium text-[color:var(--ink-mute)]">POIs</h4>
-          <ul className="space-y-1">
+          <ul className="space-y-2">
             {mapPois.map((poi) => (
-              <li key={poi.id} className="flex items-center gap-2 text-sm">
-                <span className="flex-1">
+              <SwipeActions
+                key={poi.id}
+                as="li"
+                contentClassName="ev-editrow text-sm"
+                actions={
+                  canEdit
+                    ? [
+                        {
+                          key: 'delete',
+                          label: `Delete POI ${poi.name}`,
+                          icon: <>✕</>,
+                          onAction: () => setPendingDelete({ kind: 'poi', id: poi.id, name: poi.name }),
+                        },
+                      ]
+                    : []
+                }
+              >
+                <button
+                  type="button"
+                  className="flex-1 text-left"
+                  style={{ all: 'unset', cursor: canEdit ? 'pointer' : 'default', flex: 1 }}
+                  onClick={() => canEdit && selectPoi(poi)}
+                >
                   {poi.name}{' '}
                   <span className="text-xs text-[color:var(--ink-mute)]">{poi.category_id}</span>
-                </span>
-                {canEdit && (
-                  <button
-                    type="button"
-                    onClick={() => void handleDeletePoi(poi.id)}
-                    className={btnDelete}
-                    style={{ width: 'auto' }}
-                    aria-label={`Delete POI ${poi.name}`}
-                  >
-                    ×
-                  </button>
-                )}
-              </li>
+                  {poi.id === selectedPoiId && (
+                    <span className="text-xs" style={{ color: 'var(--acid)' }}>
+                      {' '}
+                      · editing
+                    </span>
+                  )}
+                </button>
+              </SwipeActions>
             ))}
           </ul>
         </div>
       )}
+
+      {/* Selected-POI edit panel: name/category + arrow nudge (handoff §3). */}
+      {canEdit &&
+        (() => {
+          const sel = mapPois.find((p) => p.id === selectedPoiId)
+          if (!sel) return null
+          const nudge = (dx: number, dy: number, label: string) => (
+            <button
+              type="button"
+              className={btnGhost}
+              style={{ width: 34, padding: '4px 0', textAlign: 'center' }}
+              aria-label={label}
+              onClick={() => void handleNudgePoi(sel, dx, dy)}
+            >
+              {label}
+            </button>
+          )
+          return (
+            <div className="p-3 space-y-2" style={{ background: 'var(--surface-2)', borderRadius: 'var(--radius-lg)' }}>
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-medium text-[color:var(--ink-mute)]">Edit POI</h4>
+                <button
+                  type="button"
+                  className="text-xs"
+                  style={{ all: 'unset', cursor: 'pointer', color: 'var(--ink-mute)' }}
+                  onClick={() => setSelectedPoiId(null)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="flex items-end gap-2 flex-wrap">
+                <div className="space-y-1">
+                  <label htmlFor="poi-edit-name" className="block text-xs font-medium text-[color:var(--ink-mute)]">
+                    Name
+                  </label>
+                  <input
+                    id="poi-edit-name"
+                    className={inputCls}
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="poi-edit-cat" className="block text-xs font-medium text-[color:var(--ink-mute)]">
+                    Category
+                  </label>
+                  <select
+                    id="poi-edit-cat"
+                    className={inputCls}
+                    value={editCategory}
+                    onChange={(e) => setEditCategory(e.target.value as PoiCategoryId)}
+                  >
+                    {POI_CATEGORY_IDS.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className={btnPrimary}
+                  style={{ width: 'auto' }}
+                  disabled={savingPoi || !editName.trim()}
+                  onClick={() => void handleSavePoiEdit(sel)}
+                >
+                  {savingPoi ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[color:var(--ink-mute)]">
+                  Nudge ({Math.round(sel.x_pct)}%, {Math.round(sel.y_pct)}%)
+                </span>
+                {nudge(0, -2, '↑')}
+                {nudge(0, 2, '↓')}
+                {nudge(-2, 0, '←')}
+                {nudge(2, 0, '→')}
+              </div>
+            </div>
+          )
+        })()}
 
       {/* Zone list */}
       {mapZones.length > 0 && (
@@ -515,25 +683,30 @@ export function MapEditor({
           <h4 className="text-xs font-medium text-[color:var(--ink-mute)]">
             No-go zones
           </h4>
-          <ul className="space-y-1">
+          <ul className="space-y-2">
             {mapZones.map((z, i) => (
-              <li key={z.id} className="flex items-center gap-2 text-sm">
+              <SwipeActions
+                key={z.id}
+                as="li"
+                contentClassName="ev-editrow text-sm"
+                actions={
+                  canEdit
+                    ? [
+                        {
+                          key: 'delete',
+                          label: `Delete zone ${i + 1}`,
+                          icon: <>✕</>,
+                          onAction: () => setPendingDelete({ kind: 'zone', id: z.id, name: `Zone ${i + 1}` }),
+                        },
+                      ]
+                    : []
+                }
+              >
                 <span className="flex-1">
                   Zone {i + 1}{' '}
                   <span className="text-xs text-[color:var(--ink-mute)]">{z.polygon.length} points</span>
                 </span>
-                {canEdit && (
-                  <button
-                    type="button"
-                    onClick={() => void handleDeleteZone(z.id)}
-                    className={btnDelete}
-                    style={{ width: 'auto' }}
-                    aria-label={`Delete zone ${i + 1}`}
-                  >
-                    ×
-                  </button>
-                )}
-              </li>
+              </SwipeActions>
             ))}
           </ul>
         </div>
@@ -550,6 +723,21 @@ export function MapEditor({
           if (!deletingMap) setConfirmDeleteMapId(null)
         }}
         onConfirm={() => void confirmDeleteMap()}
+      />
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={pendingDelete?.kind === 'poi' ? 'Delete POI?' : 'Delete zone?'}
+        body={pendingDelete ? `Remove “${pendingDelete.name}” from this map.` : undefined}
+        confirmLabel="Delete"
+        confirmVariant="hot"
+        onConfirm={async () => {
+          if (!pendingDelete) return
+          const { kind, id } = pendingDelete
+          setPendingDelete(null)
+          if (kind === 'poi') await handleDeletePoi(id)
+          else await handleDeleteZone(id)
+        }}
+        onCancel={() => setPendingDelete(null)}
       />
     </div>
   )

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { Link } from 'react-router-dom'
 import { VISIBILITIES, type Visibility } from '@rallypoint/lists-shared'
 import {
@@ -59,37 +60,49 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
   // they don't surface in the scope listing above.
   const [sharedItems, setSharedItems] = useState<ListDto[]>([])
 
+  // Each loader gets its own generation gate: a scope switch or a superseding
+  // refetch must not let an older response commit over the newer one. They are
+  // independent concerns, so separate gates (a shared one would have one loader
+  // cancel another's in-flight request).
+  const runGroups = useAsyncTask()
+  const runLists = useAsyncTask()
+  const runShared = useAsyncTask()
+
   async function loadGroups() {
-    try {
-      const page = await listGroups()
-      let items = page.items
-      // A user shouldn't have to create a group before making a list, so
-      // auto-provision a writable "home" group when they have none. The
-      // Planner "My Tasks" group is read-only here (#531), so it doesn't
-      // count — a user with only that group still needs a Lists default.
-      // createGroup is conflict-tolerant on (created_by, name), so this is
-      // idempotent across tabs / reloads.
-      if (needsDefaultGroup(items)) {
-        try {
-          const created = await createGroup({ name: DEFAULT_GROUP_NAME })
-          items = [created, ...items]
-        } catch {
-          // Non-fatal: the manual "create group" form is still available.
+    await runGroups(async (ctx) => {
+      try {
+        const page = await listGroups()
+        let items = page.items
+        // A user shouldn't have to create a group before making a list, so
+        // auto-provision a writable "home" group when they have none. The
+        // Planner "My Tasks" group is read-only here (#531), so it doesn't
+        // count — a user with only that group still needs a Lists default.
+        // createGroup is conflict-tolerant on (created_by, name), so this is
+        // idempotent across tabs / reloads.
+        if (needsDefaultGroup(items)) {
+          try {
+            const created = await createGroup({ name: DEFAULT_GROUP_NAME })
+            items = [created, ...items]
+          } catch {
+            // Non-fatal: the manual "create group" form is still available.
+          }
         }
+        if (ctx.stale()) return
+        setGroups(items)
+        // Default-select the first writable group so the create form lands on
+        // a scope the user can actually write to, without forcing a pick from
+        // a single-option dropdown. Falls back to the first group only if
+        // provisioning failed and the user is left with just a read-only
+        // Planner group (the #531 read-only banner then covers that case).
+        const defaultId = selectDefaultGroupId(items) ?? items[0]?.id ?? null
+        if (defaultId !== null) {
+          setScopeId((prev) => prev ?? defaultId)
+        }
+      } catch {
+        if (ctx.stale()) return
+        setGroups([])
       }
-      setGroups(items)
-      // Default-select the first writable group so the create form lands on
-      // a scope the user can actually write to, without forcing a pick from
-      // a single-option dropdown. Falls back to the first group only if
-      // provisioning failed and the user is left with just a read-only
-      // Planner group (the #531 read-only banner then covers that case).
-      const defaultId = selectDefaultGroupId(items) ?? items[0]?.id ?? null
-      if (defaultId !== null) {
-        setScopeId((prev) => prev ?? defaultId)
-      }
-    } catch {
-      setGroups([])
-    }
+    })
   }
 
   // `silent` skips the loading flash so a realtime refetch doesn't blank
@@ -102,31 +115,40 @@ export function MyListsPage({ selfUserId }: MyListsPageProps) {
     if (!opts.silent) setState({ status: 'loading' })
     const db = getDb(selfUserId)
     const key = scopeKey(SCOPE_TYPE, scope)
-    try {
-      const page = await listLists({ scopeType: SCOPE_TYPE, scopeId: scope })
-      void writeScopeLists(db, key, page.items)
-      setState({ status: 'ready', items: page.items })
-    } catch (err) {
-      // Offline: serve the last-known list-of-lists for this scope rather than
-      // a hard error, so the user can still navigate into a cached list.
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        const cached = await readScopeLists(db, key)
-        if (cached) {
-          setState({ status: 'ready', items: cached })
-          return
+    await runLists(async (ctx) => {
+      try {
+        const page = await listLists({ scopeType: SCOPE_TYPE, scopeId: scope })
+        void writeScopeLists(db, key, page.items)
+        if (ctx.stale()) return
+        setState({ status: 'ready', items: page.items })
+      } catch (err) {
+        // Offline: serve the last-known list-of-lists for this scope rather than
+        // a hard error, so the user can still navigate into a cached list.
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          const cached = await readScopeLists(db, key)
+          if (cached) {
+            if (ctx.stale()) return
+            setState({ status: 'ready', items: cached })
+            return
+          }
         }
+        if (ctx.stale()) return
+        setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
       }
-      setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
-    }
+    })
   }
 
   async function loadShared() {
-    try {
-      const page = await listSharedWithMe()
-      setSharedItems(page.items)
-    } catch {
-      setSharedItems([])
-    }
+    await runShared(async (ctx) => {
+      try {
+        const page = await listSharedWithMe()
+        if (ctx.stale()) return
+        setSharedItems(page.items)
+      } catch {
+        if (ctx.stale()) return
+        setSharedItems([])
+      }
+    })
   }
 
   useEffect(() => {

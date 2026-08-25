@@ -16,10 +16,14 @@ test('create, edit, delete, and restore an event', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'New Event' })).toBeVisible()
   await page.locator('#name').fill(event.name)
   await page.locator('#timezone').fill('America/New_York')
-  await page.locator('#slug').fill(event.slug)
   await page.getByRole('button', { name: 'Create event' }).click()
 
-  await page.waitForURL(`**/events/${event.slug}`, { timeout: 15_000 })
+  // Slug is now server-generated (`<slugified-name>-<4 random chars>`),
+  // so we capture it from the post-submit URL rather than minting it
+  // client-side.
+  await page.waitForURL(/\/events\/[^/]+$/, { timeout: 15_000 })
+  const slug = new URL(page.url()).pathname.replace(/^.*\/events\//, '')
+  expect(slug).toMatch(/^[a-z0-9-]+$/)
   await expect(page.getByRole('heading', { name: event.name })).toBeVisible()
 
   // --- Shows up in My Events ---------------------------------------
@@ -27,7 +31,7 @@ test('create, edit, delete, and restore an event', async ({ page }) => {
   await expect(page.getByRole('link', { name: event.name })).toBeVisible()
 
   // --- Edit --------------------------------------------------------
-  await page.goto(`/events/${event.slug}`)
+  await page.goto(`/events/${slug}`)
   await page.getByRole('button', { name: 'Edit' }).click()
   await page.locator('#edit-name').fill(renamed)
   await page.getByRole('button', { name: 'Save' }).click()
@@ -46,7 +50,7 @@ test('create, edit, delete, and restore an event', async ({ page }) => {
   await expect(deletedRow.getByText('deleted', { exact: true })).toBeVisible()
 
   // --- Restore (from the detail page danger zone) ------------------
-  await page.goto(`/events/${event.slug}`)
+  await page.goto(`/events/${slug}`)
   await expect(page.getByText('deleted', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Restore event' }).click()
 

@@ -21,6 +21,9 @@ describe('D1 integration — ledger invites', () => {
   let envVars: Env
   let app: Hono<HonoApp>
 
+  // email map: userId → email, populated per-test for email-restricted invite tests.
+  const emailByUserId = new Map<string, string>()
+
   const services: Services = {
     idClient: {
       verifyRpidBearer: async (bearer: string) => ({ ok: true as const, userId: bearer }),
@@ -28,6 +31,21 @@ describe('D1 integration — ledger invites', () => {
     },
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
+    },
+    profiles: {
+      lookup: async (userId: string) => {
+        const email = emailByUserId.get(userId)
+        if (!email) return null
+        return {
+          user_id: userId as `user_${string}`,
+          email,
+          email_verified: true,
+          display_name: null,
+          first_name: null,
+          last_name: null,
+          picture_url: null,
+        }
+      },
     },
     settings: {
       get: async () => ({}),
@@ -68,6 +86,9 @@ describe('D1 integration — ledger invites', () => {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. All req() calls here are UI writes; supply the configured origin.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 
@@ -107,9 +128,11 @@ describe('D1 integration — ledger invites', () => {
     expect(minted.code).toMatch(/^rpm_inv_/)
     expect(new Date(minted.expires_at).getTime()).toBeGreaterThan(Date.now())
 
-    // Peer joins.
+    // Peer joins — the invite was minted for peer@example.com, so the
+    // acceptor's resolved email must match (email-restricted invite).
     const peer = `user_${Date.now()}_inv_peer`
     const peerBearer = await loginAs(peer)
+    emailByUserId.set(peer, 'peer@example.com')
     const joinRes = await req(peerBearer, 'POST', '/api/v1/ui/ledgers/join', { code: minted.code })
     expect(joinRes.status).toBe(200)
     const joined = (await joinRes.json()) as { ledger_id: string; role: string; already_member: boolean }
@@ -130,6 +153,40 @@ describe('D1 integration — ledger invites', () => {
     expect(replay.status).toBe(409)
     const replayErr = (await replay.json()) as { error: { code: string } }
     expect(replayErr.error.code).toBe('ledger_invite_already_consumed')
+  })
+
+  // --- P3 fix: markConsumed race guard (consumed_at IS NULL) ---------
+
+  it('markConsumed is idempotent: second call is a no-op (race guard)', async () => {
+    // Simulates the concurrent double-join race: two requests both race
+    // through findByLedgerAndUser → add. The second hits the unique
+    // constraint and falls into the idempotent branch, which calls
+    // markConsumed again. Without the `consumed_at IS NULL` WHERE guard
+    // the second call would overwrite the first consumer's stamp.
+    const owner = `user_${Date.now()}_race_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await createLedger(ownerBearer, owner)
+
+    const minted = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/invites`, {})
+    ).json()) as { id: string; code: string }
+
+    const codeHash = hashToken(minted.code)
+    const t1 = new Date(Date.now())
+    const t2 = new Date(Date.now() + 100)
+    const firstConsumer = `user_${Date.now()}_race_first`
+    const secondConsumer = `user_${Date.now()}_race_second`
+
+    // First markConsumed — sets consumed_at = t1, consumedByUserId = firstConsumer
+    await repos.ledgerInvites.markConsumed(minted.id, firstConsumer, t1)
+    // Second markConsumed (concurrent race leg) — should be a no-op
+    await repos.ledgerInvites.markConsumed(minted.id, secondConsumer, t2)
+
+    // Invite must still reflect the FIRST consumer
+    const after = await repos.ledgerInvites.findByCodeHash(codeHash)
+    expect(after).not.toBeNull()
+    expect(after!.consumedByUserId).toBe(firstConsumer)
+    expect(after!.consumedAt?.getTime()).toBe(t1.getTime())
   })
 
   it('rejects an unknown invite code as ledger_invite_code_invalid', async () => {
@@ -235,6 +292,87 @@ describe('D1 integration — ledger invites', () => {
     const selfKick = await req(ownerBearer, 'DELETE', `/api/v1/ui/ledgers/${ledgerId}/members/${owner}`)
     expect(selfKick.status).toBe(409)
     expect(((await selfKick.json()) as { error: { code: string } }).error.code).toBe('cannot_remove_owner')
+  })
+
+  // --- P2 fix: email-restricted invite must reject a different acceptor ---
+
+  it('email-restricted invite: wrong-email acceptor is rejected with 403', async () => {
+    const owner = `user_${Date.now()}_email_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await createLedger(ownerBearer, owner)
+
+    // Mint an invite restricted to alice@example.com
+    const mintRes = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/invites`, {
+      invitedEmail: 'alice@example.com',
+    })
+    expect(mintRes.status).toBe(201)
+    const minted = (await mintRes.json()) as { code: string }
+
+    // Bob tries to accept — his email is bob@example.com, not alice@
+    const bob = `user_${Date.now()}_email_bob`
+    emailByUserId.set(bob, 'bob@example.com')
+    const bobBearer = await loginAs(bob)
+    const joinRes = await req(bobBearer, 'POST', '/api/v1/ui/ledgers/join', { code: minted.code })
+    expect(joinRes.status).toBe(403)
+  })
+
+  it('email-restricted invite: correct-email acceptor is admitted', async () => {
+    const owner = `user_${Date.now()}_email2_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await createLedger(ownerBearer, owner)
+
+    const mintRes = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/invites`, {
+      invitedEmail: 'Alice@Example.COM', // uppercase variant to exercise case-insensitivity
+    })
+    expect(mintRes.status).toBe(201)
+    const minted = (await mintRes.json()) as { code: string }
+
+    // Alice accepts with her correct email (lowercase)
+    const alice = `user_${Date.now()}_email2_alice`
+    emailByUserId.set(alice, 'alice@example.com')
+    const aliceBearer = await loginAs(alice)
+    const joinRes = await req(aliceBearer, 'POST', '/api/v1/ui/ledgers/join', { code: minted.code })
+    expect(joinRes.status).toBe(200)
+    const joined = (await joinRes.json()) as { ledger_id: string; already_member: boolean }
+    expect(joined.ledger_id).toBe(ledgerId)
+    expect(joined.already_member).toBe(false)
+  })
+
+  it('email-restricted invite: profiles returns null → rejected (cannot verify, fail-closed)', async () => {
+    const owner = `user_${Date.now()}_email3_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await createLedger(ownerBearer, owner)
+
+    const mintRes = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/invites`, {
+      invitedEmail: 'someone@example.com',
+    })
+    expect(mintRes.status).toBe(201)
+    const minted = (await mintRes.json()) as { code: string }
+
+    // User with no email in our stub (profiles.lookup returns null)
+    const ghost = `user_${Date.now()}_email3_ghost`
+    // do NOT set emailByUserId[ghost] — lookup returns null
+    const ghostBearer = await loginAs(ghost)
+    const joinRes = await req(ghostBearer, 'POST', '/api/v1/ui/ledgers/join', { code: minted.code })
+    expect(joinRes.status).toBe(403)
+  })
+
+  it('open (no email) invite is accepted regardless of acceptor email', async () => {
+    const owner = `user_${Date.now()}_open_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await createLedger(ownerBearer, owner)
+
+    // Mint an open invite (no invitedEmail)
+    const mintRes = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/invites`, {})
+    expect(mintRes.status).toBe(201)
+    const minted = (await mintRes.json()) as { code: string }
+
+    // Anyone can accept an open invite regardless of email
+    const anyone = `user_${Date.now()}_open_anyone`
+    emailByUserId.set(anyone, 'random@example.com')
+    const anyoneBearer = await loginAs(anyone)
+    const joinRes = await req(anyoneBearer, 'POST', '/api/v1/ui/ledgers/join', { code: minted.code })
+    expect(joinRes.status).toBe(200)
   })
 
   it('transfers ownership; old owner becomes a member, new owner becomes canonical', async () => {

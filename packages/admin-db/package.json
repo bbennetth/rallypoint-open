@@ -1,0 +1,27 @@
+{
+  "name": "@rallypoint/admin-db",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/schema/index.js",
+  "types": "dist/schema/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

@@ -11,6 +11,7 @@ import {
   type TableColumn,
   type TableRow,
 } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   bulkCreateInvites,
@@ -62,26 +63,31 @@ export function AttendeesPage() {
     event.viewer_role === 'owner' || event.viewer_role === 'editor'
   const [removing, setRemoving] = useState(false)
 
+  const run = useAsyncTask()
   const load = useCallback(async () => {
     setLoading(true)
-    try {
-      const [page, pendingPage] = await Promise.all([
-        listEventAttendees(event.id),
-        isEditor
-          ? listEventInvites(event.id)
-          : Promise.resolve({ items: [] as PendingInviteDto[] }),
-      ])
-      setAttendees(page.items)
-      setPending(pendingPage.items)
-      setLoadError(null)
-    } catch (err) {
-      setLoadError(
-        err instanceof ApiError ? err.message : 'Failed to load attendees.',
-      )
-    } finally {
-      setLoading(false)
-    }
-  }, [event.id, isEditor])
+    await run(async (ctx) => {
+      try {
+        const [page, pendingPage] = await Promise.all([
+          listEventAttendees(event.id),
+          isEditor
+            ? listEventInvites(event.id)
+            : Promise.resolve({ items: [] as PendingInviteDto[] }),
+        ])
+        if (ctx.stale()) return
+        setAttendees(page.items)
+        setPending(pendingPage.items)
+        setLoadError(null)
+      } catch (err) {
+        if (ctx.stale()) return
+        setLoadError(
+          err instanceof ApiError ? err.message : 'Failed to load attendees.',
+        )
+      } finally {
+        if (!ctx.stale()) setLoading(false)
+      }
+    })
+  }, [event.id, isEditor, run])
 
   useEffect(() => {
     void load()
@@ -119,11 +125,12 @@ export function AttendeesPage() {
     try {
       await revokeEventInvite(event.id, invite.id)
       setPending((prev) => prev.filter((p) => p.id !== invite.id))
-      if (shareLink && shareLink.code) {
-        // If the user revokes the just-created share invite, drop the
-        // local copy too so the displayed URL doesn't 404 silently.
-        const codeMatchesId = pending.find((p) => p.id === invite.id)
-        if (codeMatchesId) setShareLink(null)
+      // If the user revokes the just-created share invite, drop the
+      // local copy too so the displayed URL doesn't 404 silently.
+      // Compare by id directly — don't read `pending` from the closure
+      // (stale after the setPending functional update above).
+      if (shareLink && invite.invited_email === null) {
+        setShareLink(null)
       }
       toast({ tone: 'success', body: 'Invite revoked.' })
     } catch (err) {
@@ -165,7 +172,9 @@ export function AttendeesPage() {
       sortable: true,
       align: 'right',
       // Accessor pulls the raw ISO string so it sorts chronologically.
-      accessor: (row) => (row.joinedRaw as string) ?? '',
+      // `joinedRaw` isn't a table column — it's a sort-only data key
+      // carried on the row alongside the formatted `joined` display value.
+      accessor: (row) => ((row as { joinedRaw?: string }).joinedRaw ?? ''),
       width: 140,
     },
     { key: 'actions', header: '', align: 'right', width: 96 },
@@ -252,11 +261,11 @@ export function AttendeesPage() {
           <div
             className="p-3"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
-            <p className="text-sm text-white/80">{loadError}</p>
+            <p className="text-sm" style={{ color: 'var(--hot-text)' }}>{loadError}</p>
           </div>
         )}
 
@@ -269,9 +278,8 @@ export function AttendeesPage() {
           />
         ) : (
           <div
+            className="pl-card"
             style={{
-              border: '1.5px solid var(--line)',
-              background: 'var(--surface)',
               padding: 4,
             }}
           >
@@ -398,8 +406,7 @@ function InviteControls({
 }) {
   return (
     <section
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="brutal" onClick={onOpenInviteDrawer}>
@@ -415,10 +422,11 @@ function InviteControls({
             display: 'inline-flex',
             alignItems: 'center',
             padding: '6px 12px',
-            border: '1.5px solid var(--line)',
+            background: 'var(--surface-2)',
             color: 'var(--ink-dim)',
             textDecoration: 'none',
             fontSize: 11,
+            borderRadius: 'var(--radius-round)',
           }}
         >
           Export CSV
@@ -428,8 +436,8 @@ function InviteControls({
         <div
           className="p-3 space-y-2"
           style={{
-            border: '1.5px solid var(--line)',
             background: 'var(--surface-2, color-mix(in srgb, var(--line) 30%, transparent))',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           <div
@@ -468,7 +476,7 @@ function PendingInvitesSection({
       >
         Pending invites ({pending.length})
       </h2>
-      <ul className="divide-y divide-white/10" style={{ border: '1.5px solid var(--line)' }}>
+      <ul className="pl-card overflow-hidden divide-y divide-[color:var(--hairline-soft)]">
         {pending.map((inv) => (
           <li
             key={inv.id}
@@ -543,8 +551,8 @@ function BulkInviteForm({
         </div>
       </FormBlock>
       <FormBlock label="Role">
-        <div role="radiogroup" style={{ display: 'inline-flex', border: '1.5px solid var(--line)' }}>
-          {(['viewer', 'editor'] as const).map((r, i) => {
+        <div role="radiogroup" className="seg">
+          {(['viewer', 'editor'] as const).map((r) => {
             const active = role === r
             return (
               <button
@@ -553,15 +561,7 @@ function BulkInviteForm({
                 role="radio"
                 aria-checked={active}
                 onClick={() => setRole(r)}
-                style={{
-                  all: 'unset',
-                  cursor: 'pointer',
-                  padding: '6px 14px',
-                  fontSize: 11,
-                  borderLeft: i === 0 ? 'none' : '1.5px solid var(--line)',
-                  background: active ? 'var(--acid)' : 'transparent',
-                  color: active ? 'var(--bg)' : 'var(--ink-dim)',
-                }}
+                className={active ? 'on' : undefined}
               >
                 {r}
               </button>
@@ -636,9 +636,9 @@ function RoleFilterChips({
     <div
       role="radiogroup"
       aria-label="Filter by role"
-      style={{ display: 'inline-flex', border: '1.5px solid var(--line)' }}
+      className="seg"
     >
-      {chips.map((chip, i) => {
+      {chips.map((chip) => {
         const active = value === chip.value
         return (
           <button
@@ -647,15 +647,7 @@ function RoleFilterChips({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(chip.value)}
-            style={{
-              all: 'unset',
-              cursor: 'pointer',
-              padding: '6px 12px',
-              fontSize: 11,
-              borderLeft: i === 0 ? 'none' : '1.5px solid var(--line)',
-              background: active ? 'var(--acid)' : 'transparent',
-              color: active ? 'var(--bg)' : 'var(--ink-dim)',
-            }}
+            className={active ? 'on' : undefined}
           >
             {chip.label}{' '}
             <span style={{ opacity: 0.7, marginLeft: 4, fontSize: 9 }}>

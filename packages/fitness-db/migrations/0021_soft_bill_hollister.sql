@@ -1,0 +1,2 @@
+ALTER TABLE `food_items` ADD `owner_user_id` text;--> statement-breakpoint
+CREATE UNIQUE INDEX `food_items_owner_custom_name_uq` ON `food_items` (`owner_user_id`,lower("name")) WHERE "food_items"."owner_user_id" is not null and "food_items"."source" = 'manual';

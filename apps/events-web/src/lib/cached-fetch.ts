@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { subscribeRefresh } from './refresh-bus.js'
 
 // Stale-while-revalidate hook that backs every attendee-shell data
@@ -48,70 +49,84 @@ export function useCachedFetch<T>(opts: UseCachedFetchOptions<T>): CachedFetchRe
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<unknown | null>(null)
   const [isStale, setIsStale] = useState(true)
+  // Generation-gated task runner (#675 R5) — replaces the hand-rolled
+  // `active` boolean. Guarantees at-most-one live generation commits,
+  // and closes the gate on unmount so nothing lands after teardown.
+  const run = useAsyncTask()
 
   // Manual refresh — runs revalidate() and writes through the cache.
   // Useful for SSE handlers and post-mutation pull.
   async function refresh(): Promise<void> {
-    try {
-      const fresh = await opts.revalidate()
-      setData(fresh)
-      setError(null)
-      setIsStale(false)
-      await opts.saveToCache(fresh).catch(() => {})
-    } catch (err) {
-      setError(err)
-      // Keep the previously-cached data visible; only flip stale if
-      // we never had any.
-      setIsStale(data === null)
-    }
+    await run(async (ctx) => {
+      try {
+        const fresh = await opts.revalidate()
+        if (ctx.stale()) return
+        setData(fresh)
+        setError(null)
+        setIsStale(false)
+        await opts.saveToCache(fresh).catch(() => {})
+      } catch (err) {
+        if (ctx.stale()) return
+        setError(err)
+        // Keep the previously-cached data visible; only flip stale if
+        // we never had any.
+        setIsStale(data === null)
+      }
+    })
   }
 
+  // Always-current ref so the refresh-bus subscription (keyed only on
+  // opts.key) can call the latest refresh without capturing a stale closure
+  // from the render when the subscription was established.
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
   useEffect(() => {
-    let active = true
     setData(null)
     setError(null)
     setIsStale(true)
 
-    // Step 1: synchronous-ish read from cache.
-    void opts.loadFromCache().then((cached) => {
-      if (!active || cached === null) return
-      setData(cached)
+    void run(async (ctx) => {
+      // Step 1: synchronous-ish read from cache.
+      const cacheLoad = opts.loadFromCache().then((cached) => {
+        if (ctx.stale() || cached === null) return
+        setData(cached)
+      })
+
+      // Step 2: network revalidate — races the cache read, same as before.
+      const revalidate = opts.revalidate().then(
+        (fresh) => {
+          if (ctx.stale()) return
+          setData(fresh)
+          setError(null)
+          setIsStale(false)
+          void opts.saveToCache(fresh).catch(() => {})
+        },
+        (err) => {
+          if (ctx.stale()) return
+          setError(err)
+          // Don't unset `data` — let the user keep using the cached
+          // copy if it loaded.
+        },
+      )
+
+      await Promise.allSettled([cacheLoad, revalidate])
     })
-
-    // Step 2: network revalidate.
-    void opts.revalidate().then(
-      (fresh) => {
-        if (!active) return
-        setData(fresh)
-        setError(null)
-        setIsStale(false)
-        void opts.saveToCache(fresh).catch(() => {})
-      },
-      (err) => {
-        if (!active) return
-        setError(err)
-        // Don't unset `data` — let the user keep using the cached
-        // copy if it loaded.
-      },
-    )
-
-    return () => {
-      active = false
-    }
     // Deliberately depend on the stable `key` + the optional refresh
     // token, NOT the function identities — callers usually inline
     // them so referential-equality changes every render.
-  }, [opts.key, opts.revalidationToken])
+  }, [run, opts.key, opts.revalidationToken])
 
   // Shell-driven pull-to-refresh fans out via `refresh-bus`. Every
   // cached-fetch subscriber kicks its own revalidate, write-through
   // the cache, and reconciles. No payload — the bus is just an
   // "everyone, refetch now" beacon. Re-binding on `opts.key` ensures
   // a navigation doesn't leak the previous page's closures into the
-  // subscription.
+  // subscription. Use refreshRef so the subscriber always calls the
+  // current refresh closure, not the one from the first render.
   useEffect(() => {
     return subscribeRefresh(() => {
-      void refresh()
+      void refreshRef.current()
     })
   }, [opts.key])
 

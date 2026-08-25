@@ -1,5 +1,6 @@
 import type { ListsClient } from '@rallypoint/lists-client'
 import type { EventsClient } from '@rallypoint/events-client'
+import type { FitnessClient } from '@rallypoint/fitness-client'
 import type { UserBatchEntry } from '@rallypoint/id-client'
 import type { SendPushResult, WebPushSubscription } from '@rallypoint/web-push'
 
@@ -22,7 +23,7 @@ export interface SsoExchangeResult {
 }
 
 export interface RpidSsoService {
-  // POST RPID /api/v1/sdk/sso/exchange with the PLANNER_API_KEY bearer.
+  // Calls `IdRPC.exchangeSsoCode(code, { client })`. Throws on RPC
   // Throws on transport error; returns a discriminated failure for the
   // documented 400/409 cases.
   exchange(
@@ -54,7 +55,7 @@ export interface IdClientService {
   ): Promise<{ ok: true; userId: string } | { ok: false; revoked: true }>
 
   // Ends the upstream RPID session for this bearer (single logout,
-  // #93) via RPID's POST /api/v1/sdk/signout. Best-effort: throws on a
+  // #93) via `IdRPC.signoutSession(bearer, { client })`. Best-effort: throws on a
   // transport error so the signout handler can log-and-continue.
   signoutRpidBearer(bearer: string): Promise<void>
 }
@@ -90,6 +91,10 @@ export interface Services {
   // authenticated /sdk/personal-events surface to manage a user's personal
   // events + ticket attachments; it owns no event storage of its own.
   eventsClient: EventsClient
+  // The Fitness client, backed by the FitnessRPC binding. planner-api
+  // folds the "today's training" read into My Day; it owns no fitness
+  // storage of its own.
+  fitnessClient: FitnessClient
   // Web Push delivery bound to the planner's VAPID keys (notifications cron).
   webPush: WebPushService
 }

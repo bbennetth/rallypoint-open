@@ -66,7 +66,7 @@ describe('createLogger', () => {
     expect(lines.map((l) => l.level)).toEqual(['info', 'error', 'fatal'])
   })
 
-  describe('redaction (matches the prior pino redact list)', () => {
+  describe('redaction (secret-bearing leaf keys at any depth)', () => {
     it('censors the fixed deep header paths', () => {
       const { logger, lines } = makeLogger()
       logger.info({
@@ -98,10 +98,59 @@ describe('createLogger', () => {
       })
     })
 
-    it('does NOT censor top-level password (depth-1 wildcard, like pino)', () => {
+    it('censors the token-bearing field names token itself does not cover', () => {
       const { logger, lines } = makeLogger()
-      logger.info({ password: 'top' })
-      expect((lines[0]!.record as { password: string }).password).toBe('top')
+      logger.info({
+        ctx: {
+          apiKey: 'ak',
+          accessToken: 'at',
+          refreshToken: 'rt',
+          csrfToken: 'ct',
+          privateKey: 'pk',
+          // Deliberately NOT redacted — bare `key` is too broad.
+          key: 'cache-key-42',
+          name: 'ok',
+        },
+      })
+      const r = lines[0]!.record as { ctx: Record<string, string> }
+      expect(r.ctx).toEqual({
+        apiKey: '[REDACTED]',
+        accessToken: '[REDACTED]',
+        refreshToken: '[REDACTED]',
+        csrfToken: '[REDACTED]',
+        privateKey: '[REDACTED]',
+        key: 'cache-key-42',
+        name: 'ok',
+      })
+    })
+
+    it('censors top-level secret-bearing keys', () => {
+      const { logger, lines } = makeLogger()
+      logger.info({ password: 'top', accessToken: 'at', code: 'c' })
+      const r = lines[0]!.record as Record<string, string>
+      expect(r.password).toBe('[REDACTED]')
+      expect(r.accessToken).toBe('[REDACTED]')
+      expect(r.code).toBe('[REDACTED]')
+    })
+
+    it('censors secret-bearing keys nested three or more levels deep', () => {
+      const { logger, lines } = makeLogger()
+      logger.info({ ctx: { user: { token: 't', password: 'p', name: 'ok' } } })
+      const r = lines[0]!.record as { ctx: { user: Record<string, string> } }
+      expect(r.ctx.user).toEqual({
+        token: '[REDACTED]',
+        password: '[REDACTED]',
+        name: 'ok',
+      })
+    })
+
+    it('does not redact benign keys that merely contain a secret-word', () => {
+      const { logger, lines } = makeLogger()
+      logger.info({ tokenCount: 5, passwordHint: 'x', statusCode: 200 })
+      const r = lines[0]!.record as Record<string, unknown>
+      expect(r.tokenCount).toBe(5)
+      expect(r.passwordHint).toBe('x')
+      expect(r.statusCode).toBe(200)
     })
 
     it('never mutates the caller object', () => {
@@ -121,12 +170,97 @@ describe('createLogger', () => {
     expect(typeof r.err.stack).toBe('string')
   })
 
+  it('renders a circular reference as [Circular] instead of crashing', () => {
+    const { logger, lines } = makeLogger()
+    const obj: Record<string, unknown> = { a: 1 }
+    obj.self = obj
+    expect(() => logger.info(obj, 'cycle')).not.toThrow()
+    expect(lines).toHaveLength(1)
+    const r = lines[0]!.record as { a: number; self: string }
+    expect(r.a).toBe(1)
+    expect(r.self).toBe('[Circular]')
+  })
+
+  it('does not flag a shared but acyclic reference as circular', () => {
+    const { logger, lines } = makeLogger()
+    const shared = { v: 7 }
+    logger.info({ a: shared, b: shared })
+    const r = lines[0]!.record as { a: { v: number }; b: { v: number } }
+    expect(r.a).toEqual({ v: 7 })
+    expect(r.b).toEqual({ v: 7 })
+  })
+
+  it('serializes BigInt values as decimal strings instead of throwing', () => {
+    const { logger, lines } = makeLogger()
+    expect(() => logger.info({ amount: 9007199254740993n }, 'bigint')).not.toThrow()
+    expect(lines).toHaveLength(1)
+    expect((lines[0]!.record as { amount: unknown }).amount).toBe('9007199254740993')
+  })
+
   it('child() merges bindings into every record', () => {
     const { logger, lines } = makeLogger()
     const child = logger.child({ requestId: 'rq-1' })
     child.info('hi')
     expect(lines[0]!.record.requestId).toBe('rq-1')
     expect(lines[0]!.record.service).toBe('rallypoint-test')
+  })
+
+  describe('child() bindings are redaction-respected (#16)', () => {
+    // Before the fix, child(bindings) stored the raw object and spread
+    // it directly into every record — bypassing REDACT_PATHS entirely.
+    // The per-call merge arg WAS redacted, so the inconsistency was
+    // invisible until someone audited it.
+    it('redacts a nested req.headers.authorization passed via child()', () => {
+      const { logger, lines } = makeLogger()
+      const child = logger.child({
+        req: { headers: { authorization: 'Bearer abc', cookie: 'session=xyz' } },
+      })
+      child.info('hello')
+      const r = lines[0]!.record as {
+        req: { headers: Record<string, string> }
+      }
+      expect(r.req.headers.authorization).toBe('[REDACTED]')
+      expect(r.req.headers.cookie).toBe('[REDACTED]')
+    })
+
+    it('redacts nested *.password/token/code/secret in child bindings', () => {
+      const { logger, lines } = makeLogger()
+      const child = logger.child({ user: { token: 't', password: 'p', name: 'ok' } })
+      child.info('hi')
+      const r = lines[0]!.record as { user: Record<string, string> }
+      expect(r.user).toEqual({ token: '[REDACTED]', password: '[REDACTED]', name: 'ok' })
+    })
+
+    it('redacts a top-level secret-bearing key in child bindings', () => {
+      // Leaf-key redaction applies at any depth, so a secret passed as a
+      // top-level child binding is censored just like a per-call field.
+      const { logger, lines } = makeLogger()
+      const child = logger.child({ password: 'top-level-secret' })
+      child.info('hi')
+      expect((lines[0]!.record as { password: string }).password).toBe('[REDACTED]')
+    })
+
+    it('accumulates redaction across stacked child() calls', () => {
+      const { logger, lines } = makeLogger()
+      const c1 = logger.child({ req: { headers: { authorization: 'A' } } })
+      const c2 = c1.child({ user: { token: 'B' } })
+      c2.info('hi')
+      const r = lines[0]!.record as {
+        req: { headers: Record<string, string> }
+        user: Record<string, string>
+      }
+      expect(r.req.headers.authorization).toBe('[REDACTED]')
+      expect(r.user.token).toBe('[REDACTED]')
+    })
+
+    it('does NOT mutate the caller-supplied bindings object', () => {
+      const { logger } = makeLogger()
+      const bindings = { req: { headers: { authorization: 'plaintext' } } }
+      const child = logger.child(bindings)
+      child.info('hi')
+      // The caller's object is still plaintext; only the cloned copy was redacted.
+      expect(bindings.req.headers.authorization).toBe('plaintext')
+    })
   })
 
   it('dev mode emits a single human line, not JSON', () => {

@@ -8,15 +8,23 @@
 // injects. Keeping them pure makes the responsive contract unit-testable
 // without rendering React.
 
+import { MOBILE_VIEWPORT_MAX } from './breakpoints.js'
+
 /** Max viewport width (px, inclusive) at which `mobileSheet` drawers
- * render as a bottom sheet instead of a right-side panel. Matches the
- * planner-web mobile breakpoint (tab-bar / FAB layout). */
-export const DRAWER_SHEET_BREAKPOINT = 1023
+ * render as a bottom sheet instead of a right-side panel. Aliases the
+ * shared mobile breakpoint so the drawer can't drift from the shell's
+ * own sidebar/tab-bar swap. */
+export const DRAWER_SHEET_BREAKPOINT = MOBILE_VIEWPORT_MAX
 
 /** Root (backdrop flex container) class list. Adds the sheet modifier
- * only when the consumer opted in. */
-export function drawerRootClass(mobileSheet: boolean): string {
-  return mobileSheet ? 'rp-drawer-root rp-drawer-root--sheet' : 'rp-drawer-root'
+ * only when the consumer opted in; `mobileFull` additionally stretches
+ * the sheet to the full viewport height (only meaningful together with
+ * `mobileSheet` — it's ignored for the desktop side panel). */
+export function drawerRootClass(mobileSheet: boolean, mobileFull = false): string {
+  if (!mobileSheet) return 'rp-drawer-root'
+  return mobileFull
+    ? 'rp-drawer-root rp-drawer-root--sheet rp-drawer-root--full'
+    : 'rp-drawer-root rp-drawer-root--sheet'
 }
 
 /** Stylesheet injected by the Drawer. Generated from the breakpoint
@@ -79,6 +87,12 @@ export function drawerCss(breakpoint: number = DRAWER_SHEET_BREAKPOINT): string 
       }
       .rp-drawer-root--sheet .rp-drawer-body {
         padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      }
+      .rp-drawer-root--full .rp-drawer-panel {
+        height: 100dvh;
+        max-height: 100dvh;
+        border-radius: 0;
+        border-top: none;
       }
     }
   `

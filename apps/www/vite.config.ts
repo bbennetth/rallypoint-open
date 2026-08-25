@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
 
 // Rallypoint apex marketing/home site (apps/www). A plain static SPA — no
 // PWA. It only links out to the app subdomains and the public
@@ -11,9 +10,10 @@ import tailwindcss from '@tailwindcss/vite'
 
 // Emit the kill-switch SW (sw-killswitch.js) at the asset root under the
 // URLs an old festival-planner service worker polls for updates (#493).
-// www has `publicDir:false`, so a plugin is the only way to land a static
-// file in dist. Both names cover the vite-plugin-pwa (`sw.js`) and
-// CRA-style (`service-worker.js`) registration conventions.
+// Kept as a plugin (rather than a file in ./static) so the emitted asset
+// always mirrors the committed sw-killswitch.js source. Both names cover
+// the vite-plugin-pwa (`sw.js`) and CRA-style (`service-worker.js`)
+// registration conventions.
 function killSwitchServiceWorker(): Plugin {
   return {
     name: 'www-killswitch-sw',
@@ -34,20 +34,23 @@ const analyticsAlias = process.env.VITE_POSTHOG_KEY
   : resolve(__dirname, '../../packages/web-kit/src/analytics-noop.ts')
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), killSwitchServiceWorker()],
+  plugins: [react(), killSwitchServiceWorker()],
   resolve: {
     alias: { 'virtual:analytics': analyticsAlias },
   },
-  // No static assets to copy, and the committed ./public holds only a
-  // `wrangler dev` placeholder index.html that would otherwise collide
-  // with the generated dist/index.html — so disable publicDir entirely.
-  publicDir: false,
+  // Static SEO assets (robots.txt, sitemap.xml, og.png, icons/) live in
+  // ./static and are copied verbatim into dist/. NOT ./public — the
+  // committed ./public holds only a `wrangler dev` placeholder index.html
+  // (which would collide with the generated dist/index.html) and is wiped
+  // by cf-deploy.yml's dist→public copy at deploy time.
+  publicDir: 'static',
   server: {
     port: 5180,
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Hidden maps — emitted but no sourceMappingURL footer. Audit E1 #10.
+    sourcemap: 'hidden',
   },
   test: {
     environment: 'jsdom',

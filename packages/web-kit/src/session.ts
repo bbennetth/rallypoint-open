@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SessionProfile } from '@rallypoint/shared'
 import { ApiError } from './csrf.js'
+import { analyticsPersonProps, identify } from './analytics.js'
 
 // Re-exported so browser consumers keep importing `SessionProfile` from
 // `@rallypoint/web-kit`; the canonical definition lives in
@@ -82,6 +83,22 @@ export interface Session {
 
 // Best-effort HTTP status off a thrown value: `ApiError.status`, or a
 // numeric `status` on any error-shaped object. `undefined` when absent.
+// User-facing error copy is restricted to a fixed set of local strings.
+// `err.message` can carry server-supplied text (an ApiError body, a
+// proxy's HTML error page) — rendering that verbatim in the auth gate
+// is a phishing-copy surface, so it never reaches the UI. The raw
+// error is still available to callers via the console for debugging.
+function safeErrorMessage(err: unknown): string {
+  if (err instanceof Error && err.message === 'Session check timed out.') {
+    return 'Session check timed out.'
+  }
+  const status = errorStatus(err)
+  if (typeof status === 'number') {
+    return `The sign-in service responded with an error (HTTP ${status}).`
+  }
+  return 'Could not reach the sign-in service.'
+}
+
 function errorStatus(err: unknown): number | undefined {
   if (err instanceof ApiError) return err.status
   if (err && typeof err === 'object' && 'status' in err) {
@@ -93,7 +110,21 @@ function errorStatus(err: unknown): number | undefined {
 
 // Backoff before the single automatic re-probe after a transient mount
 // failure. Short enough to recover quickly, long enough to let a blip pass.
+// The initial mount probe also *defers* its error commit until this re-probe
+// runs (see `deferErrorCommit` in `probe`): a one-off blip — e.g. a service
+// worker starving the probe for seconds during a deploy rollout — stays on
+// the neutral "Checking your session…" spinner and self-heals, instead of
+// flashing the "Couldn't reach the server" panel before the retry's shot.
 const REPROBE_BACKOFF_MS = 1500
+
+// Backstop timeout for a single session probe. A probe whose underlying
+// fetch never settles wedges the gate on 'loading' forever — the classic
+// frozen-PWA case, where iOS suspends the app mid-request and the dangling
+// promise is never resolved or rejected on resume. When the watchdog fires
+// we treat the probe as a transient failure so the recovery machinery
+// (backoff re-probe, focus/online re-probe) takes over instead of leaving
+// the user stuck on "Checking your session…" until they force-quit.
+const PROBE_TIMEOUT_MS = 10_000
 
 function generateNonce(): string {
   const bytes = new Uint8Array(16)
@@ -148,12 +179,22 @@ export function createSession(config: SessionConfig): Session {
   // so callers can choose to bounce to SSO vs. show a transient error.
   //
   // Recovery from a transient (non-401) probe failure: the initial mount
-  // probe gets a single automatic re-probe after a short backoff, and
-  // thereafter we re-probe on tab refocus (`visibilitychange`→visible)
-  // and on regained connectivity (`online`) — but ONLY while the last
-  // probe is in the error state, so an authenticated tab isn't re-probing
-  // RPID on every focus. A 401 (unauthenticated) is a settled state and
-  // is not re-probed; the app drives the SSO bounce from there.
+  // probe gets a single automatic re-probe after a short backoff. That first
+  // failure is committed *silently* — the gate stays on 'loading', not
+  // 'error' — so a one-off blip (e.g. a service worker starving the probe
+  // during a deploy) never flashes the error panel; only if the backoff
+  // re-probe ALSO fails does 'error' commit (see `deferErrorCommit`).
+  // Thereafter we re-probe on tab refocus (`visibilitychange`→visible)
+  // and on regained connectivity (`online`) — while the last probe is
+  // either still loading or in the error state, so an authenticated tab
+  // isn't re-probing RPID on every focus. Those re-probes do NOT defer:
+  // a failure after the app is up commits 'error' immediately. Including
+  // the `loading` case in the re-probe gate is what unwedges a PWA that
+  // iOS froze mid-probe: the in-flight fetch is left
+  // dangling on resume, so the focus event fires a fresh, superseding
+  // probe (and a per-probe watchdog backstops the case where no focus
+  // event arrives). A 401 (unauthenticated) is a settled state and is not
+  // re-probed; the app drives the SSO bounce from there.
   function useSession(): SessionState {
     const [state, setState] = useState<SessionState>({
       status: 'loading',
@@ -186,68 +227,139 @@ export function createSession(config: SessionConfig): Session {
             profile: null,
           })
         } else {
-          const message = err instanceof Error ? err.message : 'Unknown error.'
+          console.error('[web-kit/session] probe failed:', err)
           setState({
             status: 'error',
             userId: null,
-            error: message,
+            error: safeErrorMessage(err),
             settings: null,
             profile: null,
           })
         }
       }
 
-      // Single-flight: a `visibilitychange` and an `online` event can fire
-      // back-to-back; without this guard two probes race and a late failure
-      // could clobber an already-recovered state.
-      let probeInFlight = false
-      const probe = (onTransientError?: () => void): void => {
-        if (probeInFlight) return
-        probeInFlight = true
+      // Per-probe sequence token instead of a boolean single-flight guard.
+      // A frozen-PWA probe can be left dangling — its fetch never resolves
+      // or rejects — so a boolean guard would stay stuck `true` and block
+      // recovery forever. The sequence lets a newer probe supersede an
+      // older one: only the latest probe may commit state, and a stale
+      // probe that later resurrects is ignored (so it can't clobber an
+      // already-recovered session). This also subsumes the old single-
+      // flight role — a `visibilitychange` and an `online` firing back-to-
+      // back start two probes, but only the newer one's result lands.
+      let probeSeq = 0
+      let activeWatchdog: ReturnType<typeof setTimeout> | undefined
+      const probe = (opts?: {
+        onTransientError?: () => void
+        deferErrorCommit?: boolean
+      }): void => {
+        const onTransientError = opts?.onTransientError
+        // When set (the initial mount probe only), a transient failure does
+        // NOT commit 'error' — the gate stays on 'loading' and the single
+        // backoff re-probe runs first. Only if that re-probe also fails does
+        // the panel surface. Keeps a one-off deploy-rollout blip invisible
+        // while still recovering hands-free.
+        const deferErrorCommit = opts?.deferErrorCommit ?? false
+        const seq = ++probeSeq
+        let settled = false
+        const commit = (run: () => void): void => {
+          // Drop the result of a superseded/stale probe and of any
+          // post-unmount settle.
+          if (cancelled || seq !== probeSeq || settled) return
+          settled = true
+          if (activeWatchdog) clearTimeout(activeWatchdog)
+          run()
+        }
+
+        // Transient (non-401) failure path shared by the watchdog and the
+        // catch: commit 'error' unless this probe defers, and always fire the
+        // recovery hook so a deferred probe still schedules its backoff retry.
+        const failTransient = (err: unknown): void => {
+          if (!deferErrorCommit) apply(err)
+          onTransientError?.()
+        }
+
+        // Watchdog: a probe that never settles is treated as a transient
+        // failure so the gate self-heals instead of wedging on 'loading'.
+        // A new probe supersedes the previous one's watchdog.
+        if (activeWatchdog) clearTimeout(activeWatchdog)
+        activeWatchdog = setTimeout(() => {
+          commit(() => failTransient(new Error('Session check timed out.')))
+        }, PROBE_TIMEOUT_MS)
+
         config
           .getSession()
           .then((s) => {
-            if (cancelled) return
-            setState({
-              status: 'authenticated',
-              userId: s.user_id,
-              error: null,
-              settings: s.settings ?? null,
-              profile: s.profile ?? null,
+            commit(() => {
+              // A recovery (e.g. a focus/online re-probe that lands before
+              // the mount probe's backoff fires) cancels the pending backoff
+              // so we don't re-hit the session endpoint after we're already
+              // authenticated. Only on success — failure paths keep the
+              // backoff as the automatic recovery net.
+              if (retryTimer) clearTimeout(retryTimer)
+              // Link this browser's analytics events to the RPID user, the
+              // same way id-web's useSessionClient does on its own probe.
+              // Re-probes (focus/online) re-call identify with the same
+              // distinct_id, which posthog-js treats as a no-op.
+              identify(s.user_id, analyticsPersonProps(s.profile))
+              setState({
+                status: 'authenticated',
+                userId: s.user_id,
+                error: null,
+                settings: s.settings ?? null,
+                profile: s.profile ?? null,
+              })
             })
           })
           .catch((err: unknown) => {
-            if (cancelled) return
-            apply(err)
-            if (errorStatus(err) !== 401) onTransientError?.()
-          })
-          .finally(() => {
-            probeInFlight = false
+            commit(() => {
+              // A 401 is a settled 'unauthenticated' result: it commits
+              // immediately (never deferred) and is never retried — the app
+              // drives the SSO bounce from there.
+              if (errorStatus(err) === 401) apply(err)
+              else failTransient(err)
+            })
           })
       }
 
-      // Initial probe: a single backoff re-probe on a transient failure
-      // smooths over a momentary 5xx/network blip without a manual reload.
-      probe(() => {
-        retryTimer = setTimeout(() => {
-          if (!cancelled) probe()
-        }, REPROBE_BACKOFF_MS)
+      // Initial probe: defer the error commit and, on a transient failure,
+      // schedule a single backoff re-probe that smooths over a momentary
+      // 5xx/network blip without a manual reload. The re-probe does NOT defer
+      // — a second consecutive failure surfaces the error panel.
+      probe({
+        deferErrorCommit: true,
+        onTransientError: () => {
+          retryTimer = setTimeout(() => {
+            if (!cancelled) probe()
+          }, REPROBE_BACKOFF_MS)
+        },
       })
 
-      const reprobeIfErrored = (): void => {
-        if (!cancelled && statusRef.current === 'error') probe()
+      // Re-probe when the app returns to the foreground or regains
+      // connectivity AND the last probe hasn't settled into a good state.
+      // 'loading' is included alongside 'error': a PWA frozen mid-probe
+      // resumes here with a possibly-dead in-flight request, so a fresh
+      // probe (which supersedes the stale one via the sequence token)
+      // recovers it immediately rather than waiting out the watchdog.
+      // 'authenticated'/'unauthenticated' are settled states and are never
+      // re-probed — a healthy tab won't re-hit RPID on every focus, and a
+      // 401 keeps driving the SSO bounce.
+      const reprobeIfStuck = (): void => {
+        if (cancelled) return
+        if (statusRef.current === 'error' || statusRef.current === 'loading') probe()
       }
       const onVisibility = (): void => {
-        if (document.visibilityState === 'visible') reprobeIfErrored()
+        if (document.visibilityState === 'visible') reprobeIfStuck()
       }
       document.addEventListener('visibilitychange', onVisibility)
-      window.addEventListener('online', reprobeIfErrored)
+      window.addEventListener('online', reprobeIfStuck)
 
       return () => {
         cancelled = true
         if (retryTimer) clearTimeout(retryTimer)
+        if (activeWatchdog) clearTimeout(activeWatchdog)
         document.removeEventListener('visibilitychange', onVisibility)
-        window.removeEventListener('online', reprobeIfErrored)
+        window.removeEventListener('online', reprobeIfStuck)
       }
     }, [])
 

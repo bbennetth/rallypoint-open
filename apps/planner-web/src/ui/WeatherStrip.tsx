@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { ApiError, getMyDayWeather, getSettings, type WeatherForecast } from '../lib/api.js'
 import {
   classifyLocationQuery,
@@ -158,31 +159,39 @@ export function WeatherStrip() {
     return summarizeHourly(forecast, unit, { fromIso, max: 12 })
   }, [forecast, unit])
 
-  const fetchFor = useCallback(async (lat: number, lng: number, label: string | null) => {
-    setPhase('loading')
-    setError(null)
-    try {
-      const { tz, date } = localToday()
-      const res = await getMyDayWeather(lat, lng, tz, date)
-      const f = res.forecast
-      const hasData = f != null && (f.current != null || f.daily.length > 0)
-      setForecast(res.forecast)
-      setPlace(label)
-      if (hasData) {
-        // A fresh location starts collapsed; don't carry the previous
-        // place's expanded hourly panel over.
-        setExpanded(false)
-        setPhase('ready')
-        writeStoredLoc({ lat, lng, label })
-      } else {
-        setError('No weather available for that location.')
-        setPhase('manual')
-      }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Couldn’t load weather.')
-      setPhase('manual')
-    }
-  }, [])
+  const runFetch = useAsyncTask()
+  const fetchFor = useCallback(
+    async (lat: number, lng: number, label: string | null) => {
+      setPhase('loading')
+      setError(null)
+      await runFetch(async (ctx) => {
+        try {
+          const { tz, date } = localToday()
+          const res = await getMyDayWeather(lat, lng, tz, date)
+          if (ctx.stale()) return
+          const f = res.forecast
+          const hasData = f != null && (f.current != null || f.daily.length > 0)
+          setForecast(res.forecast)
+          setPlace(label)
+          if (hasData) {
+            // A fresh location starts collapsed; don't carry the previous
+            // place's expanded hourly panel over.
+            setExpanded(false)
+            setPhase('ready')
+            writeStoredLoc({ lat, lng, label })
+          } else {
+            setError('No weather available for that location.')
+            setPhase('manual')
+          }
+        } catch (err) {
+          if (ctx.stale()) return
+          setError(err instanceof ApiError ? err.message : 'Couldn’t load weather.')
+          setPhase('manual')
+        }
+      })
+    },
+    [runFetch],
+  )
 
   const locate = useCallback(() => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -210,17 +219,17 @@ export function WeatherStrip() {
 
   // Load the temperature-unit preference (default Fahrenheit). The strip
   // re-derives via summarizeWeather when this resolves.
+  const runSettingsLoad = useAsyncTask()
   useEffect(() => {
-    let cancelled = false
-    void getSettings('planner')
-      .then((s) => {
-        if (!cancelled) setUnit(weatherUnitFromSettings(s))
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    void runSettingsLoad(async (ctx) => {
+      try {
+        const s = await getSettings('planner')
+        if (!ctx.stale()) setUnit(weatherUnitFromSettings(s))
+      } catch {
+        // Best-effort — keeps the default unit.
+      }
+    })
+  }, [runSettingsLoad])
 
   function selectMetric(m: HourlyMetric) {
     setMetric(m)

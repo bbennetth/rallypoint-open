@@ -1,0 +1,55 @@
+<!doctype html>
+<!-- Source for static/og.png (the site-wide social share card).
+     Regenerate after edits with (from apps/www/):
+       "$CHROMIUM_EXECUTABLE_PATH" --headless --screenshot=static/og.png \
+         --window-size=1200,630 --hide-scrollbars scripts/og-image.html
+     Colors: dark chassis #0b1b2b + blue accent #0ea5e9 (packages/ui
+     tokens/colors.css); wordmark split per BRAND.wordmark in
+     packages/ui/src/brand.ts. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1200px;
+        height: 630px;
+        background: #0b1b2b;
+        font-family:
+          ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        overflow: hidden;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 0 96px;
+        box-sizing: border-box;
+        border-left: 12px solid #0ea5e9;
+      }
+      .wordmark {
+        font-size: 120px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        color: #ffffff;
+        margin: 0;
+      }
+      .wordmark span {
+        color: #0ea5e9;
+      }
+      .tagline {
+        font-size: 36px;
+        color: #9fb3c8;
+        margin: 28px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <p class="wordmark">rally<span>pt</span></p>
+      <p class="tagline">Plans, events, and training — one account.</p>
+    </div>
+  </body>
+</html>

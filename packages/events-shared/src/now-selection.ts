@@ -14,9 +14,10 @@ const DEFAULT_SESSION_BLOCK_MS = 2 * HOUR_MS // 2h
 export interface LineupSlot {
   // Identity. eventArtists are keyed by (event, artist, day); a
   // multi-stage artist on the same day collapses to one row, so
-  // stageId is on the slot itself.
+  // stageId is on the slot itself. dayId null = unscheduled/TBA slot
+  // (skipped by selectors — no day means no absolute time).
   artistId: string
-  dayId: string
+  dayId: string | null
   stageId: string | null
   // 'HH:MM' or 'HH:MM:SS'. null = unscheduled (skipped by selectors).
   startTime: string | null
@@ -75,7 +76,7 @@ export function selectCurrentLineup(input: {
 
   const resolved: ResolvedLineupSlot[] = []
   for (const slot of input.slots) {
-    const day = dayById.get(slot.dayId)
+    const day = slot.dayId != null ? dayById.get(slot.dayId) : undefined
     if (!day) continue
     if (!slot.startTime) continue
     const startsAt = combineDayTime(day.date, slot.startTime)

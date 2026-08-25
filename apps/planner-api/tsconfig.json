@@ -16,6 +16,24 @@
   ],
   "references": [
     {
+      "path": "../../apps/events-api"
+    },
+    {
+      "path": "../../apps/fitness-api"
+    },
+    {
+      "path": "../../apps/id-api"
+    },
+    {
+      "path": "../../apps/lists-api"
+    },
+    {
+      "path": "../../packages/ai"
+    },
+    {
+      "path": "../../packages/api-kit"
+    },
+    {
       "path": "../../packages/crypto"
     },
     {
@@ -28,6 +46,9 @@
       "path": "../../packages/lists-client"
     },
     {
+      "path": "../../packages/lists-rpc-client"
+    },
+    {
       "path": "../../packages/lists-shared"
     },
     {
@@ -35,6 +56,9 @@
     },
     {
       "path": "../../packages/events-shared"
+    },
+    {
+      "path": "../../packages/fitness-client"
     },
     {
       "path": "../../packages/logger"

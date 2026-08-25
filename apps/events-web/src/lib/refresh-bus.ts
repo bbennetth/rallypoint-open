@@ -33,8 +33,8 @@ export function subscribeRefresh(fn: Listener): () => void {
 }
 
 // React-friendly wrapper for pages that hold their data outside
-// `useCachedFetch` — e.g. MyDayPage / RalliesPage / GroupDetailPage /
-// ChatPage each manage their own `load()`. Without this, pull-to-
+// `useCachedFetch` — e.g. NowPage / RalliesPage / GroupDetailPage /
+// the Map tab each manage their own `load()`. Without this, pull-to-
 // refresh would only revalidate cached-fetch widgets (NowPage's
 // tiles) and silently do nothing on the other tabs.
 export function useRefreshBus(callback: () => void): void {

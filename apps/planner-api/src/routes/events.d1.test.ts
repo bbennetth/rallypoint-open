@@ -254,6 +254,7 @@ describe('D1 integration — Planner Personal Events BFF', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       ...extra,
     }
   }
@@ -294,6 +295,18 @@ describe('D1 integration — Planner Personal Events BFF', () => {
     const list = await app.request('http://localhost/api/v1/ui/events', { headers: headers(bearer) })
     const rows = (await list.json()) as PersonalEventDto[]
     expect(rows.map((e) => e.name)).toEqual(['Concert'])
+  })
+
+  it('forwards a client-supplied ref (offline outbox idempotency key) to the Events SDK', async () => {
+    const bearer = await loginAs('user_ref1')
+    const res = await app.request('http://localhost/api/v1/ui/events', {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ name: 'Concert', ref: 'tmp_event_abc123' }),
+    })
+    expect(res.status).toBe(201)
+    const call = fake.calls.find((c) => c.method === 'createPersonalEvent' && c.actor === 'user_ref1')
+    expect(call?.args[0]).toMatchObject({ ref: 'tmp_event_abc123' })
   })
 
   it("does not surface another user's events", async () => {

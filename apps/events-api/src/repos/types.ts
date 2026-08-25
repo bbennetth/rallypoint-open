@@ -55,6 +55,10 @@ export interface EventRecord {
   // Issue #545: first-class all-day flag. null = pre-migration row (use inference);
   // false = timed; true = all-day.
   allDay: boolean | null
+  // Offline-create idempotency key (mirrors money-api's expense/settlement
+  // `ref`). Unique per owner_user_id when non-null; null = un-keyed create
+  // (duplicates allowed, historical behavior).
+  ref: string | null
 }
 
 export interface CreateEventInput {
@@ -80,6 +84,8 @@ export interface CreateEventInput {
   ticketAccountEmail?: string | null | undefined
   // Issue #545: explicit all-day flag.
   allDay?: boolean | null | undefined
+  // Offline-create idempotency key. Omit for un-keyed creates.
+  ref?: string | null | undefined
 }
 
 // Patch fields. `undefined` = leave alone; `null` = clear (for
@@ -116,6 +122,12 @@ export interface ListEventsOptions {
   includeDeleted: boolean
   limit: number
   cursor?: string | null
+  // listForUser only. Widens visibility to system-owned events the
+  // caller currently attends (active event_attendees row). Routes set
+  // this for allowlisted admins, who resolve as 'owner' on system
+  // events via actorRole's short-circuit without ever getting an
+  // event_members row — so membership alone can't surface them.
+  includeAttendedSystemEvents?: boolean
 }
 
 export interface ListEventsPage {
@@ -132,7 +144,18 @@ export interface EventRepo {
   // so a deleted event still occupies its slug — this finds it.
   findBySlug(tenantId: string, slug: string): Promise<EventRecord | null>
   // Events the user owns ∪ collaborates on, newest first, cursor-paged.
+  // With opts.includeAttendedSystemEvents, also system-owned events the
+  // user actively attends (see the option's doc comment).
   listForUser(userId: string, opts: ListEventsOptions): Promise<ListEventsPage>
+  // Ownership-only listing (same pagination contract). Backs the admin
+  // system-events surface (owner = the SYSTEM_USER_ID sentinel).
+  listByOwner(ownerUserId: string, opts: ListEventsOptions): Promise<ListEventsPage>
+  // Browse/discovery listing (same pagination contract): non-deleted
+  // events that are system-owned OR privacy_mode='public', regardless
+  // of the caller's membership. SQL twin of routes/_access.ts's
+  // isBrowsableEvent — keep the two in sync. includeDeleted is ignored
+  // (deleted events are never browsable).
+  listBrowsable(opts: ListEventsOptions): Promise<ListEventsPage>
   patch(id: string, fields: PatchEventInput): Promise<EventRecord | null>
   softDelete(id: string, when: Date): Promise<void>
   restore(id: string): Promise<void>
@@ -164,6 +187,11 @@ export interface EventRepo {
     ownerUserId: string,
     opts: { from?: Date | null | undefined; to?: Date | null | undefined },
   ): Promise<EventRecord[]>
+  // Offline-create idempotency lookup (mirrors money's
+  // findByLedgerAndRef). Backs createPersonalEventCore's preflight +
+  // race-recovery dedup on (owner_user_id, ref). Returns the row
+  // regardless of soft-delete state, like findById.
+  findByOwnerAndRef(ownerUserId: string, ref: string): Promise<EventRecord | null>
   // Group (festival) events the user owns ∪ collaborates on (event_members)
   // ∪ currently attends (event_attendees with removed_at IS NULL), on the
   // 'rallypoint' tenant, non-deleted. Deduplicated so a user who is both an
@@ -194,6 +222,26 @@ export interface EventRepo {
     userId: string
     role: MemberRole
     inviteId: string
+    skipMemberAdd: boolean
+  }): Promise<
+    { ok: true; readmitted: boolean } | { ok: false; reason: 'already_active_member' }
+  >
+  // Atomic invite-free self-join for browsable events (#browse-tab).
+  // Same transactional shape as acceptInvite minus the invite consume:
+  // writes an event_members 'viewer' row (skipped on re-admission —
+  // the route pre-detects a surviving member row + soft-removed
+  // attendee row and passes `skipMemberAdd: true`) and upserts
+  // event_attendees (clearing removed_at). On the re-admission path
+  // the member row's role is forced back to 'viewer' — a soft-removed
+  // ex-editor re-entering through self-join must not silently regain
+  // editor rights (invite-accept re-grants roles; self-join doesn't).
+  // Concurrent double-join hits the event_members unique violation and
+  // surfaces as `already_active_member` so the route can 409 it.
+  joinAsViewer(input: {
+    memberId: string
+    attendeeId: string
+    eventId: string
+    userId: string
     skipMemberAdd: boolean
   }): Promise<
     { ok: true; readmitted: boolean } | { ok: false; reason: 'already_active_member' }
@@ -283,6 +331,15 @@ export interface EventTicketRepo {
   restore(id: string): Promise<TicketRecord | null>
 }
 
+// Opaque composite cursor for the attendee list. `id` resolves ties on
+// `joinedAt` so two attendees who joined in the same millisecond can't
+// be dropped or duplicated across page boundaries. See
+// apps/events-api/src/lib/attendee-cursor.ts for the wire encoding.
+export interface AttendeeCursor {
+  joinedAt: Date
+  id: string
+}
+
 export interface EventAttendeeRepo {
   // Upsert: if a row already exists for (event_id, user_id), this is a
   // no-op when removed_at is NULL, or "un-removes" + refreshes
@@ -293,11 +350,16 @@ export interface EventAttendeeRepo {
   // already removed. Caller checks owner-self protection at the route.
   softRemove(eventId: string, userId: string, when: Date): Promise<void>
   // List current attendees (removed_at IS NULL) for an event, paginated
-  // by joined_at ASC. cursor is the last seen joined_at instant.
+  // by (joined_at ASC, id ASC) so ties on joined_at don't drop or
+  // duplicate rows at page boundaries (audit E3 #25). The cursor is
+  // composite: {joinedAt, id} — the last-INCLUDED row from the prior
+  // page. Filter is (joined_at, id) > (cursor.joinedAt, cursor.id),
+  // which excludes the cursor row itself but includes any later-id
+  // siblings sharing that joined_at.
   listForEvent(
     eventId: string,
-    opts: { limit: number; cursor: Date | null },
-  ): Promise<{ items: AttendeeRecord[]; nextCursor: Date | null }>
+    opts: { limit: number; cursor: AttendeeCursor | null },
+  ): Promise<{ items: AttendeeRecord[]; nextCursor: AttendeeCursor | null }>
 }
 
 // --- invites -------------------------------------------------------
@@ -475,6 +537,15 @@ export interface ArtistLinks {
   instagram?: string | null | undefined
 }
 
+// Links + catalog-level genre — the writable profile columns of an
+// artist row. ArtistLinks stays the pure URL-columns shape the routes
+// serialize; genre rides alongside it on create/update.
+export type ArtistProfileFields = ArtistLinks & {
+  genre?: string | null | undefined
+  // Pinned MusicBrainz artist id (catalog sweep / lineup-ingest approve).
+  mbid?: string | null | undefined
+}
+
 export interface ArtistRecord {
   id: string
   name: string
@@ -483,18 +554,78 @@ export interface ArtistRecord {
   appleMusic: string | null
   youtubeMusic: string | null
   instagram: string | null
+  genre: string | null
+  mbid: string | null
   updatedAt: Date
 }
 
 export interface ArtistRepo {
-  create(input: { id: string; name: string } & ArtistLinks): Promise<ArtistRecord>
+  create(input: { id: string; name: string } & ArtistProfileFields): Promise<ArtistRecord>
   findById(id: string): Promise<ArtistRecord | null>
   // Case-insensitive lookup against the unique(lower(name)) index —
   // backs the route's find-or-create.
   findByName(name: string): Promise<ArtistRecord | null>
   // Prefix/substring search for the editor's artist picker.
   search(query: string, limit: number): Promise<ArtistRecord[]>
-  update(id: string, fields: { name?: string | undefined } & ArtistLinks): Promise<ArtistRecord | null>
+  update(
+    id: string,
+    fields: { name?: string | undefined } & ArtistProfileFields,
+  ): Promise<ArtistRecord | null>
+  // Alphabetical keyset page over the whole catalog for the admin table:
+  // ORDER BY lower(name), id with a (name, id) tuple cursor; optional
+  // case-insensitive substring filter.
+  listPage(opts: {
+    q?: string | undefined
+    cursor?: { name: string; id: string } | null | undefined
+    limit: number
+  }): Promise<{ items: ArtistRecord[]; nextCursor: { name: string; id: string } | null }>
+  // Keyset page (id > afterId, id order) of artists the MB catalog sweep
+  // should visit: any enrichable field null. Fully-enriched artists are
+  // excluded at the query level — a null-fill-only sweep can never
+  // propose anything for them, pinned mbid or not.
+  listEnrichmentCandidates(opts: {
+    afterId?: string | null | undefined
+    limit: number
+  }): Promise<ArtistRecord[]>
+}
+
+// --- artist_mb_reviews: MB enrichment proposal queue ----------------
+
+export type ArtistMbReviewStatus = 'pending' | 'applied' | 'dismissed'
+
+export interface ArtistMbReviewRecord {
+  id: string
+  artistId: string
+  mbid: string
+  matchKind: 'stored' | 'auto'
+  // Null-fill subset of the six enrichable fields (may be empty when the
+  // proposal only pins the mbid).
+  proposedFields: Partial<
+    Record<'genre' | 'soundcloud' | 'spotify' | 'appleMusic' | 'youtubeMusic' | 'instagram', string | undefined>
+  >
+  status: ArtistMbReviewStatus
+  createdAt: Date
+  reviewedAt: Date | null
+}
+
+export interface NewArtistMbReview {
+  id: string
+  artistId: string
+  mbid: string
+  matchKind: 'stored' | 'auto'
+  proposedFields: ArtistMbReviewRecord['proposedFields']
+}
+
+export interface ArtistMbReviewRepo {
+  // Throws UniqueConstraintError when a pending review already exists for
+  // the artist (partial unique index).
+  create(input: NewArtistMbReview): Promise<ArtistMbReviewRecord>
+  getById(id: string): Promise<ArtistMbReviewRecord | null>
+  getPendingByArtist(artistId: string): Promise<ArtistMbReviewRecord | null>
+  listByStatus(status?: ArtistMbReviewStatus): Promise<ArtistMbReviewRecord[]>
+  // Pending → applied/dismissed; null when the row is missing or already
+  // decided (the WHERE status='pending' guard makes the flip atomic).
+  setReviewed(id: string, status: 'applied' | 'dismissed'): Promise<ArtistMbReviewRecord | null>
 }
 
 // --- event_artists: lineup slots (design §5.2) ---------------------
@@ -505,7 +636,9 @@ export interface ArtistRepo {
 export interface EventArtistRecord {
   eventId: string
   artistId: string
-  dayId: string
+  // null = unscheduled/TBA booking (artist on the lineup, day unknown;
+  // at most one such row per artist per event — partial unique index).
+  dayId: string | null
   stageId: string | null
   tier: string | null
   genre: string | null
@@ -524,12 +657,12 @@ export interface EventArtistRepo {
     eventId: string,
     input: {
       upserts: EventArtistRecord[]
-      deletes: { artistId: string; dayId: string }[]
+      deletes: { artistId: string; dayId: string | null }[]
     },
   ): Promise<{ upserted: EventArtistRecord[]; deleted: number }>
-  find(eventId: string, artistId: string, dayId: string): Promise<EventArtistRecord | null>
+  find(eventId: string, artistId: string, dayId: string | null): Promise<EventArtistRecord | null>
   listForEvent(eventId: string): Promise<EventArtistRecord[]>
-  delete(eventId: string, artistId: string, dayId: string): Promise<boolean>
+  delete(eventId: string, artistId: string, dayId: string | null): Promise<boolean>
   // Non-destructive restore from a snapshot (#191 Phase 2): in one
   // transaction, upsert every `rows` entry, then delete only the current
   // rows whose (artistId, dayId) key is absent from `rows`. Surviving
@@ -724,7 +857,7 @@ export interface MapRecord {
 }
 
 export interface EventMapRepo {
-  // Throws UniqueConstraintError (constraintName = the real PG constraint) on
+  // Throws UniqueConstraintError (constraint = the real DB constraint) on
   // the (event_id, layer) clash → route maps 409 map_layer_taken.
   create(input: {
     id: string
@@ -873,7 +1006,7 @@ export interface PatchGroupInput {
 }
 
 export interface GroupRepo {
-  // Throws UniqueConstraintError (constraintName = the real PG constraint) on
+  // Throws UniqueConstraintError (constraint = the real DB constraint) on
   // a unique clash — e.g. groups_event_name_idx on (event_id, name) or
   // groups_join_code_hash_idx on join_code_hash → route maps 409 group_name_taken.
   create(input: CreateGroupInput): Promise<GroupRecord>
@@ -887,6 +1020,15 @@ export interface GroupRepo {
   // for each of the given events, the FIRST group (by join order)
   // the user is a member of. Map key = eventId, value = groupId.
   listUserGroupIdsByEvent(userId: string, eventIds: string[]): Promise<Map<string, string>>
+  // ALL of the user's groups in one event (not just the first-joined one
+  // listUserGroupIdsByEvent collapses to). Backs the attendee Group tab,
+  // which must show every group or a second group becomes unreachable.
+  // One membership join — the old shape (listForEvent + a per-group role
+  // probe) cost ~3 queries per group in the whole event.
+  listUserGroupsForEvent(
+    userId: string,
+    eventId: string,
+  ): Promise<{ group: GroupRecord; role: GroupRole }[]>
   // #440: lazy backfill for pre-#440 groups. Throws
   // UniqueConstraintError on a collision so the caller can retry.
   setShortCode(id: string, shortCode: string): Promise<GroupRecord | null>
@@ -907,7 +1049,7 @@ export interface GroupRepo {
   // Atomic create-with-owner (#171). Writes the group row, the owner
   // member row, and (when the creator isn't the event owner) the
   // attendee row in one transaction. Throws UniqueConstraintError
-  // (constraintName = real PG constraint) on name collision so the
+  // (constraint = real DB constraint) on name collision so the
   // route's existing catch block still maps 409 group_name_taken.
   // `attendeeId: null` skips the attendee write (event owner — owner
   // doesn't carry an event_attendees row by Phase 0 design).
@@ -950,11 +1092,46 @@ export interface GroupMemberRepo {
   add(input: { id: string; groupId: string; userId: string; role: GroupRole }): Promise<GroupMemberRecord>
   findByGroupAndUser(groupId: string, userId: string): Promise<GroupMemberRecord | null>
   listForGroup(groupId: string): Promise<GroupMemberRecord[]>
+  // True when the user belongs to at least one group under the event.
+  // Backs the widened event realtime-token gate: code-joined group
+  // members have no event_members row but still need the event channel
+  // for map/POI/zone invalidations.
+  isMemberOfAnyGroupInEvent(eventId: string, userId: string): Promise<boolean>
   // Display/count helper — used by serializeGroup and the group list
   // route to surface member counts. Cap enforcement dropped (#313).
   countForGroup(groupId: string): Promise<number>
   updateRole(groupId: string, userId: string, role: GroupRole): Promise<void>
   remove(groupId: string, userId: string): Promise<boolean>
+}
+
+// --- group member locations (crew map pins) ------------------------
+
+// A member's self-placed pin on the event's image map (not GPS): a
+// percentage position on one map layer. One row per (group, user);
+// existence = the member has a pin.
+export interface GroupMemberLocationRecord {
+  id: string
+  groupId: string
+  userId: string
+  layer: string
+  xPct: number
+  yPct: number
+  updatedAt: Date
+}
+
+export interface GroupMemberLocationRepo {
+  // Insert-or-replace the member's pin (unique per group+user).
+  upsertForMember(input: {
+    id: string
+    groupId: string
+    userId: string
+    layer: string
+    xPct: number
+    yPct: number
+  }): Promise<GroupMemberLocationRecord>
+  // Remove the member's pin. Returns true iff a row was deleted.
+  deleteForMember(groupId: string, userId: string): Promise<boolean>
+  listForGroup(groupId: string): Promise<GroupMemberLocationRecord[]>
 }
 
 // --- group invites --------------------------------------------------
@@ -1007,6 +1184,10 @@ export interface RallyRecord {
   // Postgres `numeric` round-trips as a string to preserve precision.
   lat: string | null
   lng: string | null
+  // Map pin (% position on an event map layer); all three set or all null.
+  pinLayer: string | null
+  pinXPct: number | null
+  pinYPct: number | null
   status: RallyStatus
   createdBy: string
   createdAt: Date
@@ -1025,6 +1206,9 @@ export interface CreateRallyInput {
   locationLabel?: string | null
   lat?: string | null
   lng?: string | null
+  pinLayer?: string | null
+  pinXPct?: number | null
+  pinYPct?: number | null
   status?: RallyStatus
   createdBy: string
 }
@@ -1041,6 +1225,9 @@ export interface PatchRallyInput {
   locationLabel?: string | null | undefined
   lat?: string | null | undefined
   lng?: string | null | undefined
+  pinLayer?: string | null | undefined
+  pinXPct?: number | null | undefined
+  pinYPct?: number | null | undefined
   status?: RallyStatus | undefined
 }
 
@@ -1097,18 +1284,26 @@ export interface CreateChatMessageInput {
   body: string
 }
 
+// Reverse-chron page boundary for chat (load-older). A full cursor carries
+// `at` (the boundary message's created_at) so the repo can keyset directly;
+// `at: null` is the legacy id-only form (a bare `before` message id) — the
+// repo looks the row up to recover its created_at.
+export interface ChatCursor {
+  at: Date | null
+  id: string
+}
+
 export interface ListChatOptions {
-  // Reverse-chron page boundary: return messages strictly OLDER than the
-  // message with this id (load-older cursor). Absent → newest page.
-  before?: string | undefined
+  // Return messages strictly OLDER than this cursor. Absent → newest page.
+  cursor?: ChatCursor | null
   limit: number
 }
 
 export interface ChatMessageRepo {
   create(input: CreateChatMessageInput): Promise<ChatMessageRecord>
   findById(id: string): Promise<ChatMessageRecord | null>
-  // Newest first. `before` pages backwards from a known message id; rows
-  // older than that message's created_at are returned (ties broken by id).
+  // Newest first. The cursor pages backwards: rows older than the boundary
+  // (created_at, id) are returned (ties broken by id).
   listForGroup(groupId: string, opts: ListChatOptions): Promise<ChatMessageRecord[]>
 }
 
@@ -1133,6 +1328,32 @@ export interface EventSetStarRepo {
   listForUserEvent(userId: string, eventId: string): Promise<SetStarKey[]>
   // Check whether a specific set is starred by the user.
   isStarred(userId: string, key: SetStarKey): Promise<boolean>
+}
+
+// --- event artist favorites ---------------------------------------
+
+// A favorite key identifies the (eventId, artistId) pair a user
+// favorited. Day-agnostic (unlike SetStarKey): favorites work while
+// the lineup is still TBA and survive slot rescheduling.
+export interface ArtistFavoriteKey {
+  eventId: string
+  artistId: string
+}
+
+export interface EventArtistFavoriteRepo {
+  // Idempotent favorite: INSERT … ON CONFLICT DO NOTHING. Returns true
+  // if a new row was written, false if it already existed.
+  favorite(userId: string, key: ArtistFavoriteKey): Promise<boolean>
+  // Unfavorite: DELETE WHERE (userId, eventId, artistId). Returns true
+  // iff a row was removed.
+  unfavorite(userId: string, key: ArtistFavoriteKey): Promise<boolean>
+  // List all artist keys favorited by the user for a given event.
+  listForUserEvent(userId: string, eventId: string): Promise<ArtistFavoriteKey[]>
+  // List favorites across a set of users for one event (group overlay).
+  listForUsersEvent(
+    userIds: string[],
+    eventId: string,
+  ): Promise<{ userId: string; artistId: string }[]>
 }
 
 // --- event_weather (slice 12) -------------------------------------
@@ -1265,6 +1486,80 @@ export interface EventPlannerPrefRepo {
   flaggedEventIdsForActor(userId: string): Promise<string[]>
 }
 
+// --- AI lineup ingestions (system-owned festivals) ------------------
+
+// lineup_ingestions rows — one AI lineup-extraction run against a
+// system-owned event, awaiting Approve/Reject (admin-api surface).
+// id is `lin_<ulid>`. `extracted`/`proposal` are stored as JSON text in
+// D1 and surfaced parsed here.
+export type LineupIngestionStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'superseded'
+  | 'failed'
+
+export type LineupIngestionSourceKind = 'url' | 'pasted'
+
+export interface LineupIngestionRecord {
+  id: string
+  eventId: string
+  sourceKind: LineupIngestionSourceKind
+  sourceUrl: string | null
+  sourceExcerpt: string
+  model: string
+  // Raw model JSON (post-schema-validation) — audit/debugging.
+  extracted: unknown
+  // planLineupChanges output + extraction warnings; shape owned by the
+  // ingest core (services/rpc-core/lineup-ingest-core.ts).
+  proposal: unknown
+  status: LineupIngestionStatus
+  error: string | null
+  aiResponseId: string | null
+  createdBy: string
+  reviewedBy: string | null
+  createdAt: Date
+  reviewedAt: Date | null
+}
+
+export interface CreateLineupIngestionInput {
+  id: string
+  eventId: string
+  sourceKind: LineupIngestionSourceKind
+  sourceUrl?: string | null | undefined
+  sourceExcerpt: string
+  model: string
+  extracted: unknown
+  proposal: unknown
+  // Defaults to 'pending'; fetch/AI failures insert terminal 'failed'
+  // rows (with `error`) for audit.
+  status?: 'pending' | 'failed' | undefined
+  error?: string | null | undefined
+  aiResponseId?: string | null | undefined
+  createdBy: string
+}
+
+export interface LineupIngestionRepo {
+  create(input: CreateLineupIngestionInput): Promise<LineupIngestionRecord>
+  findById(id: string): Promise<LineupIngestionRecord | null>
+  // Newest-first; optional status filter.
+  listForEvent(
+    eventId: string,
+    opts?: { status?: LineupIngestionStatus | undefined },
+  ): Promise<LineupIngestionRecord[]>
+  // Close the event's open pending row (if any) as superseded — called
+  // before inserting a fresh pending row so the partial unique index
+  // never trips. Returns the count transitioned.
+  markSuperseded(eventId: string, reviewedBy: string): Promise<number>
+  // pending → approved|rejected. Returns null when the row is missing
+  // or no longer pending (decision already made / superseded).
+  decide(
+    id: string,
+    status: 'approved' | 'rejected',
+    reviewedBy: string,
+  ): Promise<LineupIngestionRecord | null>
+}
+
 // --- rate limiting (sliding-window per-IP and per-user) -------------
 
 // Imported from @rallypoint/rate-limit at the implementation layer;
@@ -1287,6 +1582,7 @@ export interface Repos {
   stages: EventStageRepo
   days: EventDayRepo
   artists: ArtistRepo
+  artistMbReviews: ArtistMbReviewRepo
   eventArtists: EventArtistRepo
   eventSessions: EventSessionRepo
   sessions: EventsSessionRepo
@@ -1295,14 +1591,17 @@ export interface Repos {
   noGoZones: EventNoGoZoneRepo
   groups: GroupRepo
   groupMembers: GroupMemberRepo
+  groupMemberLocations: GroupMemberLocationRepo
   groupInvites: GroupInviteRepo
   rallies: RallyRepo
   rallyAttendees: RallyAttendeeRepo
   chatMessages: ChatMessageRepo
   eventWeather: EventWeatherRepo
   eventSetStars: EventSetStarRepo
+  eventArtistFavorites: EventArtistFavoriteRepo
   eventSnapshots: EventSnapshotRepo
   personalTickets: PersonalTicketRepo
   eventPlannerPrefs: EventPlannerPrefRepo
+  lineupIngestions: LineupIngestionRepo
   rateLimit: RateLimitRepo
 }

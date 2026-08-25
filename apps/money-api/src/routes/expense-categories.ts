@@ -6,7 +6,7 @@ import {
 } from '@rallypoint/money-shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type { ExpenseCategoryRecord } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { envelope, ledgerChannel } from '../realtime/channels.js'

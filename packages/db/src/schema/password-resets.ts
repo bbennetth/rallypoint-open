@@ -26,5 +26,3 @@ export const passwordResets = sqliteTable(
     expiresIdx: index('password_resets_expires_idx').on(t.expiresAt),
   }),
 )
-
-export type DbPasswordReset = typeof passwordResets.$inferSelect

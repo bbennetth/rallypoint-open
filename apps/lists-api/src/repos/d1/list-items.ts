@@ -1,6 +1,7 @@
-import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm'
+import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { listItems } from '@rallypoint/lists-db'
+import { chunkForBoundParams } from '@rallypoint/api-kit'
 import {
   BUILTIN_FIELDS,
   statusMirrorsCompleted,
@@ -17,6 +18,7 @@ import type {
   UpdateListItemInput,
 } from '../types.js'
 import type { Db } from './db.js'
+import { mapUniqueViolation } from './_errors.js'
 
 type Stmt = BatchItem<'sqlite'>
 
@@ -220,13 +222,23 @@ function buildUpdateSet(fields: UpdateListItemInput): Record<string, unknown> {
   if (fields.dueDate !== undefined) set.dueDate = fields.dueDate
   if (fields.customFields !== undefined) set.customFields = fields.customFields
   if (fields.createdBy !== undefined) set.createdBy = fields.createdBy
+  // Set `completed` from the explicit field first, then let `status`
+  // override (it's the source of truth — the "lets status win" test in
+  // list-items.d1.test.ts locks in this priority order).
   if (fields.completed !== undefined) {
     set.completed = fields.completed
     set.completedAt = fields.completed ? new Date() : null
   }
   if (fields.status !== undefined) {
     set.status = fields.status
-    if (fields.status !== null) {
+    if (fields.status === null) {
+      // E2 #12: clearing the status also clears the completed mirror.
+      // Previously the inner `if (fields.status !== null)` skipped the
+      // mirror update entirely, leaving completed=true with a stale
+      // completedAt on a task whose status was just cleared.
+      set.completed = false
+      set.completedAt = null
+    } else {
       const { completed } = statusMirrorsCompleted(fields.status)
       set.completed = completed
       set.completedAt = completed ? new Date() : null
@@ -289,6 +301,7 @@ function rowToItem(row: typeof listItems.$inferSelect): ListItemRecord {
     customFields: (row.customFields ?? {}) as Record<string, unknown>,
     position: row.position,
     seriesId: row.seriesId,
+    ref: row.ref ?? null,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -304,32 +317,53 @@ export class D1ListItemRepo implements ListItemRepo {
     const status = input.status ?? null
     const completedFromStatus = status !== null ? statusMirrorsCompleted(status).completed : false
 
-    const [row] = await this.db
-      .insert(listItems)
-      .values({
-        id: input.id,
-        tenantId: input.tenantId,
-        listId: input.listId,
-        title: input.title,
-        notes: input.notes ?? null,
-        assignedTo: input.assignedTo ?? null,
-        status,
-        statusId: input.statusId ?? null,
-        parentId: input.parentId ?? null,
-        priority: input.priority ?? null,
-        dueDate: input.dueDate ?? null,
-        completed: completedFromStatus,
-        completedAt: completedFromStatus ? new Date() : null,
-        customFields: input.customFields ?? {},
-        position,
-        createdBy: input.createdBy,
-      })
-      .returning()
-    return rowToItem(row!)
+    try {
+      const [row] = await this.db
+        .insert(listItems)
+        .values({
+          id: input.id,
+          tenantId: input.tenantId,
+          listId: input.listId,
+          title: input.title,
+          notes: input.notes ?? null,
+          assignedTo: input.assignedTo ?? null,
+          status,
+          statusId: input.statusId ?? null,
+          parentId: input.parentId ?? null,
+          priority: input.priority ?? null,
+          dueDate: input.dueDate ?? null,
+          completed: completedFromStatus,
+          completedAt: completedFromStatus ? new Date() : null,
+          customFields: input.customFields ?? {},
+          position,
+          ref: input.ref ?? null,
+          createdBy: input.createdBy,
+        })
+        .returning()
+      return rowToItem(row!)
+    } catch (err) {
+      // Surface the actual violated constraint (list_items has exactly one
+      // unique index today, but don't hardcode it — the caller re-finds by
+      // ref and rethrows if the row isn't there, which correctly passes
+      // through any other future unique violation).
+      throw mapUniqueViolation(err)
+    }
   }
 
   async findById(id: string): Promise<ListItemRecord | null> {
     const rows = await this.db.select().from(listItems).where(eq(listItems.id, id)).limit(1)
+    return rows[0] ? rowToItem(rows[0]) : null
+  }
+
+  // Idempotent-create lookup (offline create-retry dedup). Spans
+  // soft-deleted rows — the partial-unique index does too, so a
+  // tombstoned item's ref is never silently reusable.
+  async findByListAndRef(listId: string, ref: string): Promise<ListItemRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(listItems)
+      .where(and(eq(listItems.listId, listId), eq(listItems.ref, ref)))
+      .limit(1)
     return rows[0] ? rowToItem(rows[0]) : null
   }
 
@@ -369,6 +403,45 @@ export class D1ListItemRepo implements ListItemRepo {
     return rows.map(rowToItem)
   }
 
+  async listPageForList(
+    listId: string,
+    opts: {
+      limit: number
+      cursor: { position: number; createdAt: Date; id: string } | null
+    },
+  ): Promise<ListItemRecord[]> {
+    // Keyset page in the DEFAULT (position, createdAt, id) order only — the
+    // same total order listForList uses as its stable tiebreak. Custom
+    // filters/sort are intentionally out of scope for paged reads (the cursor
+    // would have to encode the sort key). Excludes soft-deleted rows.
+    const conds: SQL[] = [eq(listItems.listId, listId), isNull(listItems.deletedAt)]
+    if (opts.cursor) {
+      const { position, createdAt, id } = opts.cursor
+      conds.push(
+        or(
+          gt(listItems.position, position),
+          and(eq(listItems.position, position), gt(listItems.createdAt, createdAt)),
+          and(
+            eq(listItems.position, position),
+            eq(listItems.createdAt, createdAt),
+            gt(listItems.id, id),
+          ),
+        )!,
+      )
+    }
+    const rows = await this.db
+      .select()
+      .from(listItems)
+      .where(and(...conds))
+      .orderBy(
+        sql`${listItems.position} asc`,
+        sql`${listItems.createdAt} asc`,
+        sql`${listItems.id} asc`,
+      )
+      .limit(opts.limit)
+    return rows.map(rowToItem)
+  }
+
   async update(id: string, fields: UpdateListItemInput): Promise<ListItemRecord | null> {
     const [row] = await this.db
       .update(listItems)
@@ -398,21 +471,31 @@ export class D1ListItemRepo implements ListItemRepo {
   ): Promise<string[]> {
     if (items.length === 0) return []
 
-    // Fast path: uniform base-only patch — one scoped UPDATE statement.
+    // Fast path: uniform base-only patch — one scoped UPDATE per id chunk
+    // (the id list can reach the 200-id validator cap, past D1's 100
+    // bound-param limit; 12 reserved covers the WHERE listId param plus
+    // every SET column buildUpdateSet can emit, with margin for new ones).
+    // Multiple chunks run in one db.batch() so the fast path stays atomic.
     if (isCollapsibleBaseBatch(items)) {
       const ids = items.map((i) => i.id)
-      const rows = await this.db
-        .update(listItems)
-        .set(buildUpdateSet(items[0]!.fields))
-        .where(
-          and(
-            inArray(listItems.id, ids),
-            eq(listItems.listId, listId),
-            isNull(listItems.deletedAt),
-          ),
-        )
-        .returning({ id: listItems.id })
-      const hit = new Set(rows.map((r) => r.id))
+      const chunkStmts = chunkForBoundParams(ids, 1, 12).map(
+        (chunk) =>
+          this.db
+            .update(listItems)
+            .set(buildUpdateSet(items[0]!.fields))
+            .where(
+              and(
+                inArray(listItems.id, chunk),
+                eq(listItems.listId, listId),
+                isNull(listItems.deletedAt),
+              ),
+            )
+            .returning({ id: listItems.id }) as Stmt,
+      )
+      const chunkResults = await this.db.batch(chunkStmts as [Stmt, ...Stmt[]])
+      const hit = new Set(
+        (chunkResults as { id: string }[][]).flat().map((r) => r.id),
+      )
       return ids.filter((id) => hit.has(id))
     }
 
@@ -440,18 +523,24 @@ export class D1ListItemRepo implements ListItemRepo {
 
   async bulkSoftDelete(listId: string, itemIds: string[], when: Date): Promise<string[]> {
     if (itemIds.length === 0) return []
-    const rows = await this.db
-      .update(listItems)
-      .set({ deletedAt: when, updatedAt: new Date() })
-      .where(
-        and(
-          inArray(listItems.id, itemIds),
-          eq(listItems.listId, listId),
-          isNull(listItems.deletedAt),
-        ),
-      )
-      .returning({ id: listItems.id })
-    return rows.map((r) => r.id)
+    // Chunked past D1's bound-param cap (up to 200 ids from the validator);
+    // one atomic batch, 4 reserved covers listId + the SET params.
+    const stmts = chunkForBoundParams(itemIds, 1, 4).map(
+      (chunk) =>
+        this.db
+          .update(listItems)
+          .set({ deletedAt: when, updatedAt: new Date() })
+          .where(
+            and(
+              inArray(listItems.id, chunk),
+              eq(listItems.listId, listId),
+              isNull(listItems.deletedAt),
+            ),
+          )
+          .returning({ id: listItems.id }) as Stmt,
+    )
+    const results = await this.db.batch(stmts as [Stmt, ...Stmt[]])
+    return (results as { id: string }[][]).flat().map((r) => r.id)
   }
 
   async clearChildParent(listId: string, parentId: string): Promise<number> {
@@ -471,17 +560,23 @@ export class D1ListItemRepo implements ListItemRepo {
 
   async bulkClearChildParent(listId: string, parentIds: string[]): Promise<number> {
     if (parentIds.length === 0) return 0
-    const rows = await this.db
-      .update(listItems)
-      .set({ parentId: null, updatedAt: new Date() })
-      .where(
-        and(
-          eq(listItems.listId, listId),
-          inArray(listItems.parentId, parentIds),
-          isNull(listItems.deletedAt),
-        ),
-      )
-      .returning({ id: listItems.id })
-    return rows.length
+    // Chunked past D1's bound-param cap (parentIds mirrors bulkSoftDelete's
+    // up-to-200 id list); one atomic batch.
+    const stmts = chunkForBoundParams(parentIds, 1, 4).map(
+      (chunk) =>
+        this.db
+          .update(listItems)
+          .set({ parentId: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(listItems.listId, listId),
+              inArray(listItems.parentId, chunk),
+              isNull(listItems.deletedAt),
+            ),
+          )
+          .returning({ id: listItems.id }) as Stmt,
+    )
+    const results = await this.db.batch(stmts as [Stmt, ...Stmt[]])
+    return (results as { id: string }[][]).flat().length
   }
 }

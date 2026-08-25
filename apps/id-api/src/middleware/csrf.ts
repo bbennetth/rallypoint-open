@@ -1,80 +1,26 @@
-import { randomBytes } from 'node:crypto'
-import { createMiddleware } from 'hono/factory'
+import type { MiddlewareHandler } from 'hono'
+import {
+  createRequireCsrf,
+  createCsrfIssueHandler,
+  generateCsrfToken,
+  CSRF_HEADER,
+} from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
-import { constantTimeEqual, readCookie, buildSetCookie } from '@rallypoint/crypto'
-import { ApiError, errors } from '../errors.js'
+import { errors } from '../errors.js'
 
-// CSRF — double-submit token per docs/design/cookies-csrf.md.
-//
-//   1. GET /api/v1/ui/csrf issues a random 32-byte base64url
-//      token, sets it as the CSRF cookie (NOT HttpOnly so the
-//      hosted UI JS can read it), and returns it in the body
-//      for convenience.
-//   2. State-changing POST/PATCH/DELETE under /api/v1/ui/*
-//      require the cookie AND a matching X-RP-CSRF header.
-//      Constant-time compared.
-//
-// The "double submit" pattern works because an attacker on a
-// different origin cannot set our cookie (SameSite=Lax +
-// optionally __Host- prefix), and cannot read our cookie (same-
-// origin policy), so they cannot satisfy both halves of the
-// check simultaneously. CSP + Origin gate (#18) close the rest.
+// CSRF double-submit. Shared implementation lives in @rallypoint/api-kit;
+// this app supplies its cookie-name env key + error factory. id-api's env
+// vars are unprefixed (CSRF_COOKIE_NAME, not <APP>_CSRF_COOKIE_NAME).
 
-const CSRF_HEADER = 'x-rp-csrf'
-const CSRF_LIFETIME_S = 60 * 60 * 24 * 30 // 30 days, matches session
-
-export function generateCsrfToken(): string {
-  return randomBytes(32).toString('base64url')
+const config = {
+  cookieNameEnvKey: 'CSRF_COOKIE_NAME',
+  errors: { csrfInvalid: () => errors.csrfInvalid() },
 }
 
-// Issued by GET /api/v1/ui/csrf. The handler is intentionally
-// tiny — it just sets-or-rotates the cookie and returns the
-// value. Idempotent.
-export const csrfIssueHandler = createMiddleware<HonoApp>(async (c) => {
-  const cookieName = c.var.env.CSRF_COOKIE_NAME
-  const existing = readCookie(c.req.header('cookie') ?? '', cookieName)
-  const token = existing && /^[A-Za-z0-9_-]{40,}$/.test(existing)
-    ? existing
-    : generateCsrfToken()
-  c.header(
-    'Set-Cookie',
-    buildSetCookie(cookieName, token, { maxAge: CSRF_LIFETIME_S, httpOnly: false, secure: c.var.env.NODE_ENV === 'production' }),
-  )
-  return c.json({ ok: true, csrfToken: token })
-})
+export const csrfIssueHandler = createCsrfIssueHandler(config) as MiddlewareHandler<HonoApp>
 
-// Mount as middleware on /api/v1/ui/* for non-GET methods.
-// GET/HEAD/OPTIONS are exempt per HTTP semantics (must remain
-// side-effect-free; if any of ours aren't, that's the bug, not
-// the CSRF rule).
-export function requireCsrf() {
-  return createMiddleware<HonoApp>(async (c, next) => {
-    const method = c.req.method.toUpperCase()
-    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
-      return next()
-    }
-    const cookieName = c.var.env.CSRF_COOKIE_NAME
-    const cookieValue = readCookie(c.req.header('cookie') ?? '', cookieName)
-    const headerValue = c.req.header(CSRF_HEADER)
-    if (!cookieValue || !headerValue) {
-      throw errors.csrfInvalid()
-    }
-    if (!constantTimeEqual(cookieValue, headerValue)) {
-      throw errors.csrfInvalid()
-    }
-    await next()
-  })
+export function requireCsrf(): MiddlewareHandler<HonoApp> {
+  return createRequireCsrf(config) as MiddlewareHandler<HonoApp>
 }
 
-// Re-export for tests / unusual call sites.
-export { CSRF_HEADER }
-
-// Hook so SDK / non-browser callers can bypass CSRF cleanly if
-// they ever hit a UI route by mistake. Not used in V1.
-export function bypassCsrfForRequest(_c: never): never {
-  throw new ApiError({
-    code: 'csrf_token_invalid',
-    message: 'CSRF bypass is not enabled.',
-    status: 403,
-  })
-}
+export { generateCsrfToken, CSRF_HEADER }

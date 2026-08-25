@@ -3,11 +3,18 @@
 // noop stubs for the peer-app clients so a test that doesn't exercise
 // a particular client doesn't have to spell out the full interface.
 //
-// (Production wiring lives in services/index.ts.)
+// (Production wiring lives in services/index.ts. As of feat/rpc-bindings
+// PR 2, the lists/money proxies are narrowed to just what events-api
+// consumes — see EventsListsClient / EventsMoneyClient in
+// services/types.ts — so these stubs no longer have to implement the
+// full @rallypoint/*-client SDK surface.)
 
 import type { ObjectStore } from '@rallypoint/object-store'
-import type { ListsClient } from '@rallypoint/lists-client'
-import type { EnsureGroupLedgerResult, MoneyClient } from '@rallypoint/money-client'
+import type {
+  EventsListsClient,
+  EventsMoneyClient,
+  EventsMoneyLedgerDto,
+} from '../services/types.js'
 
 // Stub ObjectStore — any method call throws with a clear message so a test
 // that accidentally exercises upload/serve logic fails loudly rather than
@@ -25,66 +32,46 @@ export function makeStubObjectStore(): ObjectStore {
   }
 }
 
-const fakeLedgerFromInput = (input: { groupId: string; ownerUserId: string; name?: string; currency?: string }): EnsureGroupLedgerResult => ({
+const fakeLedgerFromInput = (input: {
+  groupId: string
+  ownerUserId: string
+  name?: string
+  currency?: string
+}): EventsMoneyLedgerDto & { created: boolean } => ({
   id: `led_test_${input.groupId}`,
   scopeType: 'group',
   scopeId: input.groupId,
   ownerUserId: input.ownerUserId,
   name: input.name ?? 'Group expenses',
-  currency: (input.currency ?? 'USD') as EnsureGroupLedgerResult['currency'],
+  currency: input.currency ?? 'USD',
   description: null,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
   created: true,
 })
 
-// Noop ListsClient stub — any method call throws unless the test
-// supplies its own override (see group-lists.it.test.ts for an
-// in-memory implementation).
-export function makeNoopListsClient(): ListsClient {
-  const fail = (label: string) => async () => {
-    throw new Error(`stub listsClient.${label} called`)
-  }
+// Noop EventsListsClient stub — `listLists` returns []; `listItems`
+// throws unless the test supplies its own override.
+export function makeNoopListsClient(): EventsListsClient {
   return {
-    health: async () => ({ status: 'stub' }),
     listLists: async () => [],
-    listItems: fail('listItems') as unknown as ListsClient['listItems'],
-    listFieldDefs: fail('listFieldDefs') as unknown as ListsClient['listFieldDefs'],
-    listStatuses: fail('listStatuses') as unknown as ListsClient['listStatuses'],
-    listLabels: fail('listLabels') as unknown as ListsClient['listLabels'],
-    listGroups: fail('listGroups') as unknown as ListsClient['listGroups'],
-    createGroup: fail('createGroup') as unknown as ListsClient['createGroup'],
-    createList: fail('createList') as unknown as ListsClient['createList'],
-    deleteList: fail('deleteList') as unknown as ListsClient['deleteList'],
-    createListItem: fail('createListItem') as unknown as ListsClient['createListItem'],
-    updateListItem: fail('updateListItem') as unknown as ListsClient['updateListItem'],
-    moveListItem: fail('moveListItem') as unknown as ListsClient['moveListItem'],
-    findItemInScope: fail('findItemInScope') as unknown as ListsClient['findItemInScope'],
-    deleteListItem: fail('deleteListItem') as unknown as ListsClient['deleteListItem'],
-    createListItemSeries: fail('createListItemSeries') as unknown as ListsClient['createListItemSeries'],
-    listSeries: fail('listSeries') as unknown as ListsClient['listSeries'],
-    updateSeries: fail('updateSeries') as unknown as ListsClient['updateSeries'],
-    deleteSeries: fail('deleteSeries') as unknown as ListsClient['deleteSeries'],
-    createFieldDef: fail('createFieldDef') as unknown as ListsClient['createFieldDef'],
-    updateFieldDef: fail('updateFieldDef') as unknown as ListsClient['updateFieldDef'],
-    deleteFieldDef: fail('deleteFieldDef') as unknown as ListsClient['deleteFieldDef'],
-    listComments: fail('listComments') as unknown as ListsClient['listComments'],
-    createComment: fail('createComment') as unknown as ListsClient['createComment'],
+    listItems: async (_listId: string, _actor: string) => {
+      throw new Error('stub listsClient.listItems called')
+    },
   }
 }
 
-// Noop MoneyClient stub. ensureGroupLedger returns a deterministic
+// Noop EventsMoneyClient stub. ensureGroupLedger returns a deterministic
 // fake ledger so the group POST handler can record its activity and
 // surface the ledger_id without a real money-api running.
-export function makeNoopMoneyClient(): MoneyClient {
+export function makeNoopMoneyClient(): EventsMoneyClient {
   return {
-    health: async () => ({ status: 'stub' }),
     listLedgers: async () => [],
     ensureGroupLedger: async (input) => fakeLedgerFromInput(input),
     listExpenses: async () => [],
     getBalances: async (ledgerId, viewerUserId) => ({
       ledgerId,
-      currency: 'USD' as const,
+      currency: 'USD',
       viewerUserId,
       items: [],
     }),

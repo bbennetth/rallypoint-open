@@ -1,11 +1,13 @@
-import { type ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   AppChrome as SharedAppChrome,
   AppSwitcher,
+  SwUpdateBanner,
   UserMenu,
   type AppChromeNavItem,
 } from '@rallypoint/ui'
+import { bootSucceeded, useSwUpdatePrompt } from '@rallypoint/web-kit'
 import { signout } from '../lib/api.js'
 import { useSession, RPID_UI_URL } from '../lib/session.js'
 
@@ -21,6 +23,12 @@ const NAV: readonly AppChromeNavItem[] = [
 export function AppChrome({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const { profile } = useSession()
+  const { updateReady, applyUpdate } = useSwUpdatePrompt()
+  // Shell mounted — tell the boot watchdog this launch made it, so the
+  // white-screen failure counter resets.
+  useEffect(() => {
+    bootSucceeded()
+  }, [])
 
   async function handleSignout() {
     try {
@@ -52,6 +60,7 @@ export function AppChrome({ children }: { children: ReactNode }) {
         />
       )}
     >
+      <SwUpdateBanner updateReady={updateReady} onReload={applyUpdate} />
       {children}
     </SharedAppChrome>
   )

@@ -2,13 +2,18 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { captureEmbeddedShell, detectStandalone, installConnectionListeners, registerThemePersister, Toaster } from '@rallypoint/ui'
-import { initAnalytics } from '@rallypoint/web-kit'
+import { initAnalytics, initBootWatchdog } from '@rallypoint/web-kit'
 import { App } from './App.js'
 import { updateSettings } from './lib/api.js'
 import './index.css'
 
 // Bootstrap analytics (no-op when VITE_POSTHOG_KEY is unset).
-initAnalytics()
+initAnalytics('rallypoint-events-web')
+
+// Detect a previous launch that never booted (white-screened standalone
+// PWA) and self-heal: activate a waiting SW, or nuke SW + caches on a
+// repeat failure. AppChrome marks success via bootSucceeded().
+initBootWatchdog()
 
 // Tag standalone PWA mode pre-React so the Rallypoint Minimal theme's
 // `html[data-pwa-standalone='true'] .app-tabbar` rules (tab bar flush

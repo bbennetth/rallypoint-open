@@ -3,11 +3,10 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 // scripts/gen-cf-secrets.sh assembles the CF_WORKER_SECRETS JSON the deploy
-// workflow consumes. The interesting (and only error-prone) logic is the
-// cross-app peer-key duplication: a single generated *_API_KEY value has to
-// land in every app that authenticates against it (id-api is the authority).
-// These tests run the real script and assert the structural + duplication +
-// independence invariants on its output.
+// workflow consumes. Since the RPC-bindings migration retired the cross-app
+// *_API_KEY peer keys, every key is per-app independent — these tests run the
+// real script and lock the per-app key contract plus the randomness /
+// placeholder / qa-prod-independence invariants on its output.
 
 const SCRIPT = fileURLToPath(new URL('./gen-cf-secrets.sh', import.meta.url))
 
@@ -28,40 +27,28 @@ function run(...args: string[]): Record<string, Record<string, Record<string, st
   return JSON.parse(out)
 }
 
-const APPS = ['id-api', 'lists-api', 'lists-mcp', 'events-api', 'money-api', 'planner-api']
+// lists-mcp is intentionally absent: it has no runtime secrets (only NODE_ENV).
+const APPS = ['id-api', 'lists-api', 'events-api', 'money-api', 'planner-api', 'fitness-api', 'admin-api']
 // 32 random bytes base64-encoded (no padding stripped) -> 44 chars.
 const RANDOM_KEY = /^[A-Za-z0-9+/]{43}=$/
 
 // The exact key set the script must emit per app, mirroring docs/deploy/
-// cloudflare.md section 3. OPEN_METEO_COMMERCIAL_API_KEY is intentionally
-// omitted (optional, commercial weather tier only). Locks the contract so a
+// cloudflare.md section 3. Intentionally omitted: OPEN_METEO_COMMERCIAL_API_KEY
+// (optional, commercial weather tier only) and planner-api's VAPID_* trio
+// (hand-generated per env via gen-vapid-keys.ts — an identical placeholder in
+// both envs would trip check-vapid-isolation.sh). Locks the contract so a
 // stray or dropped key fails loudly.
 const EXPECTED_KEYS: Record<string, string[]> = {
   'id-api': [
     'ARGON2_PEPPER', 'SESSION_HMAC_KEY', 'SIGNIN_CODE_HMAC_KEY',
-    'EVENTS_API_KEY', 'LISTS_API_KEY', 'MONEY_API_KEY', 'PLANNER_API_KEY',
     'ADMIN_TOKEN', 'RESEND_API_KEY', 'TURNSTILE_SECRET',
   ],
-  'lists-api': [
-    'LISTS_API_KEY', 'LISTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
-    'EVENTS_API_KEY', 'PLANNER_API_KEY', 'MCP_API_KEY',
-  ],
-  // The Lists MCP Worker (RPL v1.0.0 slice 11) presents LISTS_MCP_API_KEY,
-  // which must equal lists-api's MCP_API_KEY.
-  'lists-mcp': ['LISTS_MCP_API_KEY'],
-  // events-api needs PLANNER_API_KEY too: it gates the /api/v1/sdk/
-  // personal-events/* routes the Planner BFF calls (My Day / Upcoming fan out
-  // to personal events), accepting the Planner BFF's PLANNER_API_KEY bearer.
-  'events-api': [
-    'EVENTS_API_KEY', 'PLANNER_API_KEY', 'EVENTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
-  ],
-  // money-api needs EVENTS_API_KEY too: it gates its /api/v1/sdk/* routes
-  // (group ledgers/expenses) on EVENTS_API_KEY, the bearer events-api presents
-  // when proxying group-ledger calls (apps/events-api/src/routes/groups.ts).
-  'money-api': [
-    'MONEY_API_KEY', 'EVENTS_API_KEY', 'MONEY_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY',
-  ],
-  'planner-api': ['PLANNER_API_KEY', 'PLANNER_SESSION_KEY_V1'],
+  'lists-api': ['LISTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY'],
+  'events-api': ['EVENTS_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY', 'ADMIN_USER_IDS'],
+  'money-api': ['MONEY_SESSION_KEY_V1', 'REALTIME_TOKEN_HMAC_KEY'],
+  'planner-api': ['PLANNER_SESSION_KEY_V1'],
+  'fitness-api': ['FITNESS_SESSION_KEY_V1'],
+  'admin-api': ['ADMIN_SESSION_KEY_V1', 'ADMIN_USER_IDS'],
 }
 
 describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
@@ -91,20 +78,16 @@ describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
     }
   })
 
-  it('duplicates each shared peer key into every app that uses it', () => {
+  it('gives every app an independent session key (no cross-app duplication)', () => {
     for (const env of Object.values(run())) {
-      // id-api is the authority for the four *_API_KEY peer keys.
-      expect(env['lists-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
-      expect(env['events-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
-      expect(env['money-api'].EVENTS_API_KEY).toBe(env['id-api'].EVENTS_API_KEY)
-      expect(env['lists-api'].LISTS_API_KEY).toBe(env['id-api'].LISTS_API_KEY)
-      expect(env['money-api'].MONEY_API_KEY).toBe(env['id-api'].MONEY_API_KEY)
-      expect(env['lists-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
-      expect(env['events-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
-      expect(env['planner-api'].PLANNER_API_KEY).toBe(env['id-api'].PLANNER_API_KEY)
-      // The MCP key the lists-mcp Worker presents must match the one lists-api
-      // accepts (RPL v1.0.0 slice 11).
-      expect(env['lists-mcp'].LISTS_MCP_API_KEY).toBe(env['lists-api'].MCP_API_KEY)
+      const sessions = new Set([
+        env['lists-api'].LISTS_SESSION_KEY_V1,
+        env['events-api'].EVENTS_SESSION_KEY_V1,
+        env['money-api'].MONEY_SESSION_KEY_V1,
+        env['planner-api'].PLANNER_SESSION_KEY_V1,
+        env['fitness-api'].FITNESS_SESSION_KEY_V1,
+      ])
+      expect(sessions.size).toBe(5)
     }
   })
 
@@ -125,6 +108,7 @@ describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
     expect(qa['id-api'].SESSION_HMAC_KEY).toMatch(RANDOM_KEY)
     expect(qa['id-api'].ADMIN_TOKEN).toMatch(RANDOM_KEY)
     expect(qa['planner-api'].PLANNER_SESSION_KEY_V1).toMatch(RANDOM_KEY)
+    expect(qa['fitness-api'].FITNESS_SESSION_KEY_V1).toMatch(RANDOM_KEY)
 
     // Third-party credentials remain placeholders for the operator to fill.
     expect(qa['id-api'].RESEND_API_KEY).toBe('REPLACE_ME')
@@ -143,6 +127,6 @@ describe.skipIf(!hasOpenssl())('gen-cf-secrets.sh', () => {
   it('generates independent values for qa and prod', () => {
     const d = run()
     expect(d.qa['id-api'].SESSION_HMAC_KEY).not.toBe(d.prod['id-api'].SESSION_HMAC_KEY)
-    expect(d.qa['id-api'].EVENTS_API_KEY).not.toBe(d.prod['id-api'].EVENTS_API_KEY)
+    expect(d.qa['fitness-api'].FITNESS_SESSION_KEY_V1).not.toBe(d.prod['fitness-api'].FITNESS_SESSION_KEY_V1)
   })
 })

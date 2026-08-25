@@ -5,6 +5,7 @@
 import tsParser from '@typescript-eslint/parser'
 import tsPlugin from '@typescript-eslint/eslint-plugin'
 import prettierConfig from 'eslint-config-prettier'
+import staleAsyncPlugin from './tools/eslint/no-stale-async-setstate.js'
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
@@ -43,6 +44,16 @@ export default [
       eqeqeq: ['error', 'always', { null: 'ignore' }],
       'no-implicit-coercion': 'error',
     },
+  },
+  {
+    // Components stay mounted while a useParams() id / prop changes, so an async
+    // load that commits without a staleness guard can show entity A while writes
+    // target B (see tools/eslint/stale-async-core.js). Flag it across all app
+    // components; the fix is useAsyncTask()/ctx.stale() from @rallypoint/web-kit.
+    files: ['apps/*/src/**/*.tsx'],
+    ignores: ['**/*.test.tsx'],
+    plugins: { rallypoint: staleAsyncPlugin },
+    rules: { 'rallypoint/no-stale-async-setstate': 'error' },
   },
   prettierConfig,
 ]

@@ -40,6 +40,7 @@ function makeFakeLists(): { client: ListsClient } {
   const groups: GroupDto[] = []
   const lists: ListDto[] = []
   const items: ListItemDto[] = []
+  const deletedAt = new Map<string, string>()
 
   function ownsGroup(actor: string, scopeId: string): boolean {
     return groups.some((g) => g.id === scopeId && g.createdBy === actor)
@@ -64,7 +65,12 @@ function makeFakeLists(): { client: ListsClient } {
     },
     listLists: async (scope: { scopeType: string; scopeId: string }) =>
       lists.filter((l) => l.scopeType === scope.scopeType && l.scopeId === scope.scopeId),
-    listItems: async (listId: string) => items.filter((i) => i.listId === listId),
+    listItems: async (listId: string) =>
+      items.filter((i) => i.listId === listId && !deletedAt.has(i.id)),
+    listDeletedItems: async (listId: string) =>
+      items
+        .filter((i) => i.listId === listId && deletedAt.has(i.id))
+        .map((i) => ({ ...i, deletedAt: deletedAt.get(i.id)! })),
     createList: async (input: Omit<ListDto, 'id' | 'incompleteCount' | 'createdBy' | 'createdAt' | 'updatedAt'>, actor: string) => {
       if (input.scopeType === 'list_group' && !ownsGroup(actor, input.scopeId)) {
         throw new ListsClientError(404, 'not_found', 'List group not found.')
@@ -85,9 +91,15 @@ function makeFakeLists(): { client: ListsClient } {
       lists.push(l)
       return l
     },
-    createListItem: async (
+    createListItem: vi.fn(async (
       listId: string,
-      input: { title: string; notes?: string | null; dueDate?: string | null; priority?: string | null },
+      input: {
+        title: string
+        notes?: string | null
+        dueDate?: string | null
+        priority?: string | null
+        ref?: string | null
+      },
       actor: string,
     ) => {
       const list = listOf(listId)
@@ -115,23 +127,36 @@ function makeFakeLists(): { client: ListsClient } {
       }
       items.push(it)
       return it
-    },
+    }),
     updateListItem: async (
       listId: string,
       itemId: string,
-      patch: { title?: string; notes?: string | null },
+      patch: { title?: string; notes?: string | null; completed?: boolean },
       _actor: string,
     ) => {
       const it = items.find((x) => x.id === itemId && x.listId === listId)
       if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
       if (patch.title !== undefined) it.title = patch.title
       if (patch.notes !== undefined) it.notes = patch.notes
+      if (patch.completed !== undefined) {
+        it.completed = patch.completed
+        it.completedAt = patch.completed ? isoNow() : null
+      }
       return it
     },
     deleteListItem: async (listId: string, itemId: string, _actor: string) => {
-      const idx = items.findIndex((x) => x.id === itemId && x.listId === listId)
-      if (idx === -1) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
-      items.splice(idx, 1)
+      const it = items.find((x) => x.id === itemId && x.listId === listId && !deletedAt.has(x.id))
+      if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
+      deletedAt.set(it.id, isoNow())
+    },
+    restoreListItem: async (listId: string, itemId: string, _actor: string) => {
+      const it = items.find((x) => x.id === itemId && x.listId === listId)
+      if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
+      if (!deletedAt.has(it.id)) {
+        throw new ListsClientError(409, 'item_not_deleted', 'Item is not deleted.')
+      }
+      deletedAt.delete(it.id)
+      return it
     },
     deleteList: async (listId: string, actor: string) => {
       const idx = lists.findIndex((l) => l.id === listId)
@@ -167,7 +192,7 @@ function makeFakeLists(): { client: ListsClient } {
       if (scope.scopeType === 'list_group' && !ownsGroup(actor, scope.scopeId)) {
         throw new ListsClientError(404, 'list_not_found', 'List not found.')
       }
-      const it = items.find((x) => x.id === itemId)
+      const it = items.find((x) => x.id === itemId && !deletedAt.has(x.id))
       if (!it) return null
       const list = listOf(it.listId)
       if (!list || list.scopeType !== scope.scopeType || list.scopeId !== scope.scopeId) {
@@ -199,6 +224,7 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
   let repos: Repos
   let env: Env
   let app: Hono<HonoApp>
+  let services: Services
 
   const baseServices = (): Services => ({
     idClient: {
@@ -217,7 +243,8 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
   })
 
   beforeEach(() => {
-    app = buildApp({ env, logger: undefined, repos, services: baseServices() })
+    services = baseServices()
+    app = buildApp({ env, logger: undefined, repos, services })
   })
 
   async function loginAs(userId: string): Promise<string> {
@@ -246,6 +273,7 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       ...extra,
     }
   }
@@ -287,6 +315,15 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
     expect(((await get.json()) as ListItemDto[]).map((n) => n.title)).toEqual(['Idea'])
   })
 
+  it('forwards a client-supplied ref (offline outbox idempotency key) to the Lists SDK', async () => {
+    const bearer = await loginAs('user_n2b')
+    const res = await postNote(bearer, { title: 'Idea', ref: 'tmp_note_abc123' })
+    expect(res.status).toBe(201)
+    const createListItem = services.listsClient.createListItem as ReturnType<typeof vi.fn>
+    expect(createListItem).toHaveBeenCalledTimes(1)
+    expect(createListItem.mock.calls[0]?.[1]).toMatchObject({ ref: 'tmp_note_abc123' })
+  })
+
   it('rejects a note with no title at the BFF boundary (400)', async () => {
     const bearer = await loginAs('user_n3')
     const res = await postNote(bearer, { notes: 'orphan body' })
@@ -312,6 +349,57 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
     expect(del.status).toBe(204)
     const after = await app.request('http://localhost/api/v1/ui/notes', { headers: headers(bearer) })
     expect((await after.json()) as ListItemDto[]).toEqual([])
+  })
+
+  it('closes, soft-deletes, lists, and restores a note in its original state', async () => {
+    const bearer = await loginAs('user_restore')
+    const note = (await (await postNote(bearer, { title: 'Keep me' })).json()) as ListItemDto & {
+      folderId: string
+    }
+
+    const close = await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ completed: true }),
+    })
+    expect(close.status).toBe(200)
+    expect(((await close.json()) as ListItemDto).completed).toBe(true)
+
+    expect(
+      (
+        await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+          method: 'DELETE',
+          headers: headers(bearer),
+        })
+      ).status,
+    ).toBe(204)
+
+    const deleted = await app.request('http://localhost/api/v1/ui/notes/deleted', {
+      headers: headers(bearer),
+    })
+    expect(deleted.status).toBe(200)
+    const rows = (await deleted.json()) as Array<ListItemDto & { folderId: string; deletedAt: string }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ id: note.id, folderId: note.folderId, completed: true })
+    expect(rows[0]!.deletedAt).toEqual(expect.any(String))
+
+    const restore = await app.request(`http://localhost/api/v1/ui/notes/${note.id}/restore`, {
+      method: 'POST',
+      headers: headers(bearer),
+    })
+    expect(restore.status).toBe(200)
+    expect(await restore.json()).toMatchObject({
+      id: note.id,
+      folderId: note.folderId,
+      completed: true,
+    })
+    expect(
+      await (
+        await app.request('http://localhost/api/v1/ui/notes/deleted', {
+          headers: headers(bearer),
+        })
+      ).json(),
+    ).toEqual([])
   })
 
   it('PATCH 404s when the user has no notes list yet', async () => {
@@ -442,6 +530,28 @@ describe('D1 integration — Planner Quick Notes BFF', () => {
     expect(del.status).toBe(204)
     const folders = (await (await getFolders(bearer)).json()) as FolderDto[]
     expect(folders.some((f) => f.id === folder.id)).toBe(false)
+  })
+
+  it('refuses to delete a folder with a restorable deleted note', async () => {
+    const bearer = await loginAs('user_f6_deleted')
+    const folder = (await (await postFolder(bearer, { name: 'Archive' })).json()) as FolderDto
+    const note = (await (await postNote(bearer, { title: 'recoverable' })).json()) as NoteRow
+    await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'PATCH',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ folderId: folder.id }),
+    })
+    await app.request(`http://localhost/api/v1/ui/notes/${note.id}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+
+    const del = await app.request(`http://localhost/api/v1/ui/notes/folders/${folder.id}`, {
+      method: 'DELETE',
+      headers: headers(bearer),
+    })
+    expect(del.status).toBe(409)
+    expect(((await del.json()) as { error: { code: string } }).error.code).toBe('folder_not_empty')
   })
 
   it('moves a note between folders via PATCH { folderId }', async () => {

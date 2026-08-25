@@ -1,5 +1,5 @@
 import { and, asc, count, eq } from 'drizzle-orm'
-import { groupMembers } from '@rallypoint/events-db'
+import { groupMembers, groups } from '@rallypoint/events-db'
 import type { GroupMemberRecord, GroupMemberRepo, GroupRole } from '../types.js'
 import type { Db } from './db.js'
 import { mapUniqueViolation } from './_errors.js'
@@ -47,6 +47,16 @@ export class D1GroupMemberRepo implements GroupMemberRepo {
       .where(eq(groupMembers.groupId, groupId))
       .orderBy(asc(groupMembers.joinedAt))
     return rows.map(rowToMember)
+  }
+
+  async isMemberOfAnyGroupInEvent(eventId: string, userId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: groupMembers.id })
+      .from(groupMembers)
+      .innerJoin(groups, eq(groupMembers.groupId, groups.id))
+      .where(and(eq(groups.eventId, eventId), eq(groupMembers.userId, userId)))
+      .limit(1)
+    return rows.length > 0
   }
 
   async countForGroup(groupId: string): Promise<number> {

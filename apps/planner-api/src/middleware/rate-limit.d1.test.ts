@@ -99,6 +99,7 @@ describe('D1 integration — rate limiting', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${csrfCookiePair()}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
     }
   }
 
@@ -138,6 +139,7 @@ describe('D1 integration — rate limiting', () => {
             cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
             'x-rp-csrf': CSRF,
             'x-forwarded-for': ip,
+            origin: env.PLANNER_UI_ORIGIN,
           },
           body: JSON.stringify({ code: `code-${i}`, state: stateNonce }),
         })
@@ -155,6 +157,7 @@ describe('D1 integration — rate limiting', () => {
           cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
           'x-rp-csrf': CSRF,
           'x-forwarded-for': ip,
+          origin: env.PLANNER_UI_ORIGIN,
         },
         body: JSON.stringify({ code: 'code-overflow', state: stateNonce }),
       })
@@ -180,6 +183,7 @@ describe('D1 integration — rate limiting', () => {
             cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
             'x-rp-csrf': CSRF,
             'x-forwarded-for': ip1,
+            origin: env.PLANNER_UI_ORIGIN,
           },
           body: JSON.stringify({ code: `code-ip1-${i}`, state: stateNonce }),
         })
@@ -193,6 +197,7 @@ describe('D1 integration — rate limiting', () => {
           cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
           'x-rp-csrf': CSRF,
           'x-forwarded-for': ip1,
+          origin: env.PLANNER_UI_ORIGIN,
         },
         body: JSON.stringify({ code: 'overflow', state: stateNonce }),
       })
@@ -207,6 +212,7 @@ describe('D1 integration — rate limiting', () => {
           cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
           'x-rp-csrf': CSRF,
           'x-forwarded-for': ip2,
+          origin: env.PLANNER_UI_ORIGIN,
         },
         body: JSON.stringify({ code: 'code-ip2', state: stateNonce }),
       })

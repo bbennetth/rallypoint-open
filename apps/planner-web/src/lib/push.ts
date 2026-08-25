@@ -1,4 +1,5 @@
 import { registerPushSubscription, removePushSubscription } from './api.js'
+import type { TestPushResult } from './api.js'
 
 // Browser-side Web Push setup: request permission, subscribe via the
 // PushManager with the VAPID applicationServerKey, and register the
@@ -18,6 +19,14 @@ export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer
 
 export type EnablePushResult = 'subscribed' | 'denied' | 'unsupported'
 
+// Map the /push/test response to the settings-page status line. Pure +
+// unit-tested; the backend deliberately returns booleans, not device counts.
+export function testPushStatusMessage(result: TestPushResult): string {
+  if (!result.registered) return 'No devices registered yet — turn notifications on first.'
+  if (result.delivered) return 'Sent — check for the notification.'
+  return 'Couldn’t reach any device. Try turning notifications off and on again.'
+}
+
 // True when this browser can do Web Push at all.
 export function pushSupported(): boolean {
   return (
@@ -29,24 +38,66 @@ export function pushSupported(): boolean {
   )
 }
 
-const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY ?? ''
+// Fetch the VAPID public key from planner-api at runtime. Served by the
+// worker (not baked into the build) so the browser always subscribes with
+// the keypair this deploy's worker actually signs with — a build-time key
+// can drift from the server's and every push then 403s at send time.
+async function fetchVapidPublicKey(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/v1/push/public-key')
+    if (!res.ok) return null
+    const body = (await res.json()) as { publicKey?: string }
+    return body.publicKey || null
+  } catch {
+    return null
+  }
+}
+
+// Compare an existing subscription's applicationServerKey against the
+// server's current VAPID public key. `existing` is
+// subscription.options.applicationServerKey — an ArrayBuffer on Chrome/
+// Firefox, but null on some browsers (Safari). On null we can't prove a
+// mismatch, so treat it as a match: force-cycling a subscription we can't
+// inspect risks breaking a working one, and the server reaps dead
+// subscriptions on send anyway. Pure + unit-tested.
+export function serverKeyMatches(
+  existing: ArrayBuffer | null | undefined,
+  expected: Uint8Array,
+): boolean {
+  if (existing == null) return true
+  const bytes = new Uint8Array(existing)
+  if (bytes.length !== expected.length) return false
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] !== expected[i]) return false
+  }
+  return true
+}
 
 // Ask for permission, subscribe, and register with the backend. Returns
 // 'denied' if the user declined the OS/browser prompt, 'unsupported' if Web
-// Push isn't available (or no VAPID key is configured), 'subscribed' on success.
+// Push isn't available (or the key fetch failed), 'subscribed' on success.
+// A subscription made under a stale server key is unsubscribed and replaced
+// so it self-heals without the user having to toggle anything.
 export async function enablePush(): Promise<EnablePushResult> {
-  if (!pushSupported() || !VAPID_PUBLIC_KEY) return 'unsupported'
+  if (!pushSupported()) return 'unsupported'
+  const publicKey = await fetchVapidPublicKey()
+  if (!publicKey) return 'unsupported'
 
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') return 'denied'
 
   const registration = await navigator.serviceWorker.ready
-  const existing = await registration.pushManager.getSubscription()
+  const expectedKey = urlBase64ToUint8Array(publicKey)
+  let existing = await registration.pushManager.getSubscription()
+  if (existing && !serverKeyMatches(existing.options.applicationServerKey, expectedKey)) {
+    await existing.unsubscribe().catch(() => undefined)
+    existing = null
+  }
   const subscription =
     existing ??
     (await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      applicationServerKey: expectedKey,
     }))
 
   const json = subscription.toJSON()

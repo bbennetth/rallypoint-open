@@ -67,6 +67,21 @@ export interface StartEventsPrunerOptions {
   now?: () => Date
 }
 
+// Object keys stored inline on `events.public_page_config.theme` —
+// the app icon (per-event PWA install) and the public-page background.
+// Read defensively rather than via the zod schema: a config that fails
+// validation still has bytes in R2 that must be reaped, and a purge is
+// the last chance to do it.
+export function themeObjectKeys(publicPageConfig: unknown): string[] {
+  if (typeof publicPageConfig !== 'object' || publicPageConfig === null) return []
+  const theme = (publicPageConfig as { theme?: unknown }).theme
+  if (typeof theme !== 'object' || theme === null) return []
+  const t = theme as { icon_image_key?: unknown; background_image_key?: unknown }
+  return [t.icon_image_key, t.background_image_key].filter(
+    (k): k is string => typeof k === 'string' && k.length > 0,
+  )
+}
+
 export function startEventsPruner(args: {
   repos: Repos
   logger: Logger
@@ -93,6 +108,11 @@ export function startEventsPruner(args: {
     const keys = [
       ...maps.map((m) => m.objectKey),
       ...tickets.map((t) => t.objectKey),
+      // Theme images live on the public_page_config JSON blob rather
+      // than in a table, so they have no row for the sweeps above to
+      // walk. Without this they'd survive the parent event's purge
+      // forever — the bucket is private, so nothing else ever reaps them.
+      ...themeObjectKeys(event.publicPageConfig),
     ]
     let objectsReaped = 0
     let objectsFailed = 0

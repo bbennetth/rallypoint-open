@@ -30,6 +30,11 @@ import {
   excludeDiaryLists,
   findDiaryList,
   resolveDiaryList,
+  BRAINDUMP_LIST_NAME,
+  selectBraindumpList,
+  excludeBraindumpLists,
+  findBraindumpList,
+  resolveBraindumpList,
 } from './personal-scope.js'
 
 // Pure unit coverage for the stateless personal-scope resolver. The Lists
@@ -51,16 +56,29 @@ function group(over: Partial<GroupDto> & { id: string; createdBy: string }): Gro
 function makeFake(seed: {
   groups?: GroupDto[]
   lists?: ListDto[]
-}): { client: ListsClient; created: GroupDto[]; createdLists: ListDto[] } {
+}): {
+  client: ListsClient
+  created: GroupDto[]
+  createdLists: ListDto[]
+  mergeCalls: { targetListId: string; sourceListIds: string[]; actor: string }[]
+} {
   const groups = [...(seed.groups ?? [])]
   const lists = [...(seed.lists ?? [])]
   const created: GroupDto[] = []
   const createdLists: ListDto[] = []
+  const mergeCalls: { targetListId: string; sourceListIds: string[]; actor: string }[] = []
   const notImpl = (name: string) => () => {
     throw new Error(`unexpected call: ${name}`)
   }
   const client = {
     listGroups: async (actor: string) => groups.filter((g) => g.createdBy === actor),
+    // Recording stub — the fold mechanics live in lists-api's mergeListsCore
+    // (covered there). resolveTasksList must only CALL this with the canonical
+    // target + non-canonical sources, which the merge test below asserts.
+    mergeLists: async (targetListId: string, sourceListIds: string[], actor: string) => {
+      mergeCalls.push({ targetListId, sourceListIds, actor })
+      return { fieldDefsCreated: 0, seriesMoved: 0, itemsMoved: 0 }
+    },
     createGroup: async (input: { name: string }, actor: string) => {
       const g = group({ id: `lgr_new${created.length}`, createdBy: actor, name: input.name })
       groups.push(g)
@@ -101,7 +119,7 @@ function makeFake(seed: {
     updateSeries: notImpl('updateSeries'),
     deleteSeries: notImpl('deleteSeries'),
   } as unknown as ListsClient
-  return { client, created, createdLists }
+  return { client, created, createdLists, mergeCalls }
 }
 
 describe('selectPersonalGroup', () => {
@@ -465,22 +483,45 @@ describe('resolveTasksList (provision-only paths)', () => {
   const actor = 'user_alice'
 
   it('provisions a Tasks list on first call (fresh user, no merge)', async () => {
-    const { client, created, createdLists } = makeFake({ groups: [] })
+    const { client, created, createdLists, mergeCalls } = makeFake({ groups: [] })
     const result = await resolveTasksList(client, actor)
     expect(created).toHaveLength(1) // personal group
     expect(createdLists).toHaveLength(1) // the Tasks list
     expect(result.listType).toBe('tasks')
     expect(result.name).toBe(TASKS_LIST_NAME)
     expect(result.visibility).toBe('all')
+    expect(mergeCalls).toHaveLength(0) // nothing to fold in
   })
 
   it('returns the existing sole task list without provisioning or merging', async () => {
     const personal = group({ id: 'lgr_p', createdBy: actor })
     const existing = list({ id: 'lst_t', scopeId: 'lgr_p' })
-    const { client, createdLists } = makeFake({ groups: [personal], lists: [existing] })
+    const { client, createdLists, mergeCalls } = makeFake({ groups: [personal], lists: [existing] })
     const result = await resolveTasksList(client, actor)
     expect(result.id).toBe('lst_t')
     expect(createdLists).toHaveLength(0)
+    expect(mergeCalls).toHaveLength(0) // single list → no merge
+  })
+
+  it('folds non-canonical task lists via mergeLists (canonical target, oldest-first sources)', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    // Oldest task list is canonical; two newer ones are the merge sources.
+    const canonical = list({ id: 'lst_canon', scopeId: 'lgr_p', createdAt: '2026-01-01T00:00:00.000Z' })
+    const srcA = list({ id: 'lst_a', scopeId: 'lgr_p', createdAt: '2026-02-01T00:00:00.000Z' })
+    const srcB = list({ id: 'lst_b', scopeId: 'lgr_p', createdAt: '2026-03-01T00:00:00.000Z' })
+    const { client, createdLists, mergeCalls } = makeFake({
+      groups: [personal],
+      lists: [srcB, canonical, srcA], // unordered on purpose
+    })
+    const result = await resolveTasksList(client, actor)
+    expect(result.id).toBe('lst_canon')
+    expect(createdLists).toHaveLength(0) // canonical already existed
+    expect(mergeCalls).toHaveLength(1)
+    expect(mergeCalls[0]).toEqual({
+      targetListId: 'lst_canon',
+      sourceListIds: ['lst_a', 'lst_b'],
+      actor,
+    })
   })
 })
 
@@ -754,6 +795,124 @@ describe('resolveDiaryList', () => {
     const { client, createdLists } = makeFake({ groups: [personal] })
     const first = await resolveDiaryList(client, actor)
     const second = await resolveDiaryList(client, actor)
+    expect(createdLists).toHaveLength(1)
+    expect(first.created).toBe(true)
+    expect(second.created).toBe(false)
+    expect(first.list.id).toBe(second.list.id)
+  })
+})
+
+// --- brain-dump list ----------------------------------------------------
+
+describe('selectBraindumpList', () => {
+  it('returns null when there is no brain-dump list', () => {
+    expect(selectBraindumpList([])).toBeNull()
+    expect(selectBraindumpList([list({ id: 'lst_t' })])).toBeNull()
+  })
+
+  it('picks the braindump-type list', () => {
+    const lists = [list({ id: 'lst_t' }), list({ id: 'lst_bd', listType: 'braindump' })]
+    expect(selectBraindumpList(lists)?.id).toBe('lst_bd')
+  })
+
+  it('picks the OLDEST on the unlikely duplicate', () => {
+    const lists = [
+      list({ id: 'lst_new', listType: 'braindump', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_old', listType: 'braindump', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectBraindumpList(lists)?.id).toBe('lst_old')
+  })
+})
+
+describe('excludeBraindumpLists', () => {
+  it('drops braindump-type lists, keeps the rest', () => {
+    const lists = [
+      list({ id: 'lst_t', listType: 'tasks' }),
+      list({ id: 'lst_bd', listType: 'braindump' }),
+      list({ id: 'lst_n', listType: 'notes' }),
+    ]
+    expect(excludeBraindumpLists(lists).map((l) => l.id)).toEqual(['lst_t', 'lst_n'])
+  })
+
+  it('is a no-op when there is no brain-dump list', () => {
+    const lists = [list({ id: 'lst_1' }), list({ id: 'lst_2', listType: 'notes' })]
+    expect(excludeBraindumpLists(lists).map((l) => l.id)).toEqual(['lst_1', 'lst_2'])
+  })
+})
+
+describe('listPersonalTaskLists excludes braindump', () => {
+  const actor = 'user_alice'
+
+  it('filters out the brain-dump list alongside notes + shopping + chores + diary', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const taskList = list({ id: 'lst_t' })
+    const braindumpList = list({ id: 'lst_bd', listType: 'braindump' })
+    const diaryList = list({ id: 'lst_d', listType: 'diary' })
+    const { client } = makeFake({
+      groups: [personal],
+      lists: [taskList, braindumpList, diaryList],
+    })
+    const result = await listPersonalTaskLists(client, actor)
+    expect(result.map((l) => l.id)).toEqual(['lst_t'])
+  })
+})
+
+describe('braindump never swallowed by the #543 canonical-Tasks merge', () => {
+  it('selectTasksList ignores a braindump list even when it is the oldest', () => {
+    const lists = [
+      list({ id: 'lst_bd', listType: 'braindump', createdAt: '2025-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_t', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+    ]
+    expect(selectTasksList(lists)?.id).toBe('lst_t')
+  })
+
+  it('selectNonCanonicalTaskLists never includes a braindump list among merge sources', () => {
+    const lists = [
+      list({ id: 'lst_old', listType: 'tasks', createdAt: '2026-01-01T00:00:00.000Z' }),
+      list({ id: 'lst_new', listType: 'tasks', createdAt: '2026-05-01T00:00:00.000Z' }),
+      list({ id: 'lst_bd', listType: 'braindump', createdAt: '2026-02-01T00:00:00.000Z' }),
+    ]
+    expect(selectNonCanonicalTaskLists(lists).map((l) => l.id)).toEqual(['lst_new'])
+  })
+})
+
+describe('findBraindumpList', () => {
+  const actor = 'user_alice'
+
+  it('returns null when the actor has no personal group', async () => {
+    const { client } = makeFake({ groups: [] })
+    expect(await findBraindumpList(client, actor)).toBeNull()
+  })
+
+  it('returns the brain-dump list without provisioning', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({
+      groups: [personal],
+      lists: [list({ id: 'lst_bd', scopeId: 'lgr_p', listType: 'braindump' })],
+    })
+    expect((await findBraindumpList(client, actor))?.id).toBe('lst_bd')
+    expect(createdLists).toHaveLength(0)
+  })
+})
+
+describe('resolveBraindumpList', () => {
+  const actor = 'user_alice'
+
+  it('provisions a brain-dump list (and the group) on first access, flagged created', async () => {
+    const { client, created, createdLists } = makeFake({ groups: [] })
+    const result = await resolveBraindumpList(client, actor)
+    expect(created).toHaveLength(1) // personal group
+    expect(createdLists).toHaveLength(1)
+    expect(result.created).toBe(true)
+    expect(result.list.listType).toBe('braindump')
+    expect(result.list.name).toBe(BRAINDUMP_LIST_NAME)
+  })
+
+  it('is idempotent: repeated calls return the SAME brain-dump list, created=false on warm calls', async () => {
+    const personal = group({ id: 'lgr_p', createdBy: actor })
+    const { client, createdLists } = makeFake({ groups: [personal] })
+    const first = await resolveBraindumpList(client, actor)
+    const second = await resolveBraindumpList(client, actor)
     expect(createdLists).toHaveLength(1)
     expect(first.created).toBe(true)
     expect(second.created).toBe(false)

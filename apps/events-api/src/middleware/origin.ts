@@ -1,19 +1,15 @@
-import { createMiddleware } from 'hono/factory'
+import type { MiddlewareHandler } from 'hono'
+import { createRequireAllowedOrigin } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 
-// Origin allowlist for /api/v1/ui/*, ported from RPID's origin
-// middleware. A missing Origin is allowed (curl / server-side /
-// same-origin GET don't send it; CSRF is the real cross-site
-// defense). A present Origin must equal EVENTS_UI_ORIGIN, else 403.
+// Origin allowlist for /api/v1/ui/* (hardened: state-changing requests must
+// carry an Origin header). Shared implementation lives in @rallypoint/api-kit;
+// this app supplies its allowed-origin env key.
 
-export function requireAllowedOrigin() {
-  return createMiddleware<HonoApp>(async (c, next) => {
-    const origin = c.req.header('origin')
-    if (!origin) return next()
-    if (origin !== c.var.env.EVENTS_UI_ORIGIN) {
-      throw errors.forbidden(`Origin not allowed: ${origin}`)
-    }
-    await next()
-  })
+export function requireAllowedOrigin(): MiddlewareHandler<HonoApp> {
+  return createRequireAllowedOrigin({
+    allowedOriginEnvKeys: ['EVENTS_UI_ORIGIN'],
+    errors: { forbidden: errors.forbidden },
+  }) as MiddlewareHandler<HonoApp>
 }

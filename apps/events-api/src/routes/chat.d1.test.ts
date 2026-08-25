@@ -96,6 +96,7 @@ describe('D1 integration — group chat', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -201,6 +202,58 @@ describe('D1 integration — group chat', () => {
     const p3 = (await third.json()) as { items: { body: string }[]; next_before: string | null }
     expect(p3.items.map((i) => i.body)).toEqual(['m1'])
     expect(p3.next_before).toBeNull()
+  })
+
+  it('paginates via the opaque cursor and dual-emits next_before', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_curs`)
+    const eventId = await createEvent(bearer, 'Cursor Event')
+    const group = await createGroup(bearer, eventId, 'Ravens')
+    for (const body of ['c1', 'c2', 'c3', 'c4', 'c5']) {
+      expect((await req(bearer, 'POST', `/api/v1/ui/groups/${group.id}/chat`, { body })).status).toBe(201)
+    }
+
+    const seen: string[] = []
+    let cursor: string | null = null
+    let guard = 0
+    do {
+      const url: string = `/api/v1/ui/groups/${group.id}/chat?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const page = (await (await req(bearer, 'GET', url)).json()) as {
+        items: { body: string }[]
+        next_cursor: string | null
+        next_before: string | null
+      }
+      for (const m of page.items) seen.push(m.body)
+      // Opaque cursor, and next_before is dual-emitted for stale bundles.
+      if (page.next_cursor) {
+        expect(page.next_cursor).not.toMatch(/^msg_/)
+        expect(page.next_before).not.toBeNull()
+      }
+      cursor = page.next_cursor
+    } while (cursor && ++guard < 10)
+
+    expect(cursor).toBeNull()
+    expect(seen).toEqual(['c5', 'c4', 'c3', 'c2', 'c1'])
+  })
+
+  it('rejects an undecodable opaque cursor with 400 (but tolerates a bad before)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_curbad`)
+    const eventId = await createEvent(bearer, 'Cursor Bad Event')
+    const group = await createGroup(bearer, eventId, 'Jays')
+    for (const body of ['x', 'y']) {
+      await req(bearer, 'POST', `/api/v1/ui/groups/${group.id}/chat`, { body })
+    }
+    // New cursor param is strict.
+    const bad = await req(bearer, 'GET', `/api/v1/ui/groups/${group.id}/chat?cursor=@@notacursor@@`)
+    expect(bad.status).toBe(400)
+    // Legacy before stays tolerant: an unknown/garbage id pages from newest.
+    const tolerant = await req(
+      bearer,
+      'GET',
+      `/api/v1/ui/groups/${group.id}/chat?before=${'z'.repeat(80)}`,
+    )
+    expect(tolerant.status).toBe(200)
+    const page = (await tolerant.json()) as { items: { body: string }[] }
+    expect(page.items.map((i) => i.body)).toEqual(['y', 'x'])
   })
 
   it('returns next_before=null when the page is exactly limit with nothing older', async () => {

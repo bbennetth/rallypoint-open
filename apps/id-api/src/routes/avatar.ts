@@ -11,7 +11,7 @@ import {
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
-import { rateLimit } from '../middleware/rate-limit.js'
+import { rateLimit, applyPerUserRateLimit } from '../middleware/rate-limit.js'
 import { toUserInfo } from './auth/session.js'
 
 // Avatar upload — native R2 binding (#409). The browser POSTs the image
@@ -65,6 +65,14 @@ export const avatarUiRoutes = new Hono<HonoApp>()
   // avatar_key, then best-effort reap the previous object.
   .post('/api/v1/ui/me/avatar', requireSession('cookie'), async (c) => {
     const userId = c.var.session!.userId
+    // Per-user cap on top of the per-IP me-avatar bucket: throttles R2
+    // write churn from a single authenticated account.
+    await applyPerUserRateLimit(c, {
+      userId,
+      route: 'me-avatar',
+      limit: 10,
+      windowSeconds: 3600,
+    })
     const contentType = declaredContentType(c)
     if (!isAvatarMimeType(contentType)) throw unsupportedType()
 

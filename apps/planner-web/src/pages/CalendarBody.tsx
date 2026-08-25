@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
-  getSettings,
-  getUpcoming,
-  listHolidays,
-  listPersonalEvents,
+  holidaysQuery,
+  personalEventsQuery,
   setTaskItemCompleted,
+  settingsQuery,
   updateSettings,
+  upcomingQuery,
   type EventDayDto,
   type HolidayDto,
   type MyDayTask,
@@ -14,6 +14,7 @@ import {
   type Upcoming,
   type UpcomingItem,
 } from '../lib/api.js'
+import { useCachedQuery } from '../lib/offline/use-cached-query.js'
 import { groupUpcomingByDay, localToday } from '../lib/planner-helpers.js'
 import {
   personalEventsToGroups,
@@ -64,21 +65,33 @@ type CalendarSelected =
   | CalendarDetail
 
 export function CalendarBody({ view }: { view: CalendarView }) {
-  const todayYmd = useMemo(() => localToday().date, [])
+  const today = useMemo(() => localToday(), [])
+  const todayYmd = today.date
 
   // Calendar navigation state, initialised once from today.
   const [calYear, setCalYear] = useState(() => Number(todayYmd.slice(0, 4)))
   const [calMonth, setCalMonth] = useState(() => Number(todayYmd.slice(5, 7)))
   const [weekAnchor, setWeekAnchor] = useState(() => todayYmd)
 
-  // Data sources.
+  // Render-from-cache: one forward-looking read feeds every future month;
+  // personalEventsQuery gives full event history. `upcoming` is a local
+  // optimistic mirror (re-synced whenever the cache delivers fresh data) so
+  // task check-off below can patch it in place without waiting on a refetch —
+  // toggling a task only writes the `taskItems` cache channel, not this
+  // aggregate `upcoming` one.
+  const upcomingQ = useCachedQuery(useMemo(() => upcomingQuery(today.date, today.tz), [today]))
   const [upcoming, setUpcoming] = useState<Upcoming | null>(null)
-  const [events, setEvents] = useState<PersonalEventDto[]>([])
-  const [holidays, setHolidays] = useState<HolidayDto[]>([])
-  const [plannerSettings, setPlannerSettings] = useState<Record<string, unknown>>({})
+  useEffect(() => setUpcoming(upcomingQ.data ?? null), [upcomingQ.data])
+
+  const eventsQ = useCachedQuery(useMemo(() => personalEventsQuery(), []))
+  const events = useMemo(() => eventsQ.data ?? [], [eventsQ.data])
 
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const loading = upcomingQ.status === 'loading'
+
+  useEffect(() => {
+    if (upcomingQ.status === 'error') setError(errMessage(upcomingQ.error))
+  }, [upcomingQ.status, upcomingQ.error])
 
   // Drawer selection + the event-edit sheet opened from EventDetail's Edit.
   const [selected, setSelected] = useState<CalendarSelected | null>(null)
@@ -96,67 +109,47 @@ export function CalendarBody({ view }: { view: CalendarView }) {
     triggerAttach,
   } = useEventTickets(activeEventId, setError)
 
-  // One forward-looking fetch feeds every future month; listPersonalEvents gives
-  // full event history. Both best-effort: a personal-events hiccup still renders
-  // the upcoming-derived chips.
-  const refresh = useCallback(async () => {
-    const { date, tz } = localToday()
-    const [up, ev] = await Promise.allSettled([getUpcoming(date, tz), listPersonalEvents()])
-    if (up.status === 'fulfilled') {
-      setUpcoming(up.value)
-      setError(null)
-    } else {
-      setError(errMessage(up.reason))
-    }
-    setEvents(ev.status === 'fulfilled' ? ev.value : [])
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
-
   // Items created via the global FAB show up without a manual reload.
-  useEffect(() => onCreated('task', () => void refresh()), [refresh])
-  useEffect(() => onCreated('event', () => void refresh()), [refresh])
-  useEffect(() => onCreated('chore', () => void refresh()), [refresh])
+  const refetchUpcoming = upcomingQ.refetch
+  const refetchEvents = eventsQ.refetch
+  const refetchAll = useCallback(() => {
+    void refetchUpcoming()
+    void refetchEvents()
+  }, [refetchUpcoming, refetchEvents])
+  useEffect(() => onCreated('task', refetchAll), [refetchAll])
+  useEffect(() => onCreated('event', refetchAll), [refetchAll])
+  useEffect(() => onCreated('chore', refetchAll), [refetchAll])
 
-  // Load planner holiday prefs on mount.
-  useEffect(() => {
-    let cancelled = false
-    void getSettings('planner')
-      .then((s) => {
-        if (!cancelled) setPlannerSettings(s)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // Planner holiday prefs — best-effort; holiday interleave stays off if
+  // this read fails or hasn't resolved yet.
+  const settingsQ = useCachedQuery(useMemo(() => settingsQuery('planner'), []))
+  const [plannerSettings, setPlannerSettings] = useState<Record<string, unknown>>({})
+  useEffect(() => setPlannerSettings(settingsQ.data ?? {}), [settingsQ.data])
 
-  // Holidays are fetched for exactly the days the calendar shows.
+  // Holidays are fetched for exactly the days the calendar shows — a
+  // dependent query, null while holidays are off in settings.
   const holidayWindow = useMemo(
     () => calendarWindow(view, calYear, calMonth, weekAnchor),
     [view, calYear, calMonth, weekAnchor],
   )
-
+  const holidaysOn = holidaysEnabled(plannerSettings)
+  const holidaysDataQ = useCachedQuery(
+    useMemo(
+      () => (holidaysOn ? holidaysQuery(holidayWindow.from, holidayWindow.to) : null),
+      [holidaysOn, holidayWindow],
+    ),
+  )
+  const [holidays, setHolidays] = useState<HolidayDto[]>([])
   useEffect(() => {
-    if (!holidaysEnabled(plannerSettings)) {
+    if (!holidaysOn || !holidaysDataQ.data) {
       setHolidays([])
       return
     }
-    let cancelled = false
-    void listHolidays(holidayWindow.from, holidayWindow.to)
-      .then((rows) => {
-        if (cancelled) return
-        const hidden = hiddenHolidays(plannerSettings)
-        setHolidays(hidden.length > 0 ? rows.filter((h) => !hidden.includes(h.id)) : rows)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [holidayWindow, plannerSettings])
+    const hidden = hiddenHolidays(plannerSettings)
+    setHolidays(
+      hidden.length > 0 ? holidaysDataQ.data.filter((h) => !hidden.includes(h.id)) : holidaysDataQ.data,
+    )
+  }, [holidaysOn, holidaysDataQ.data, plannerSettings])
 
   // ── Group assembly ────────────────────────────────────────────────
   // Tasks + group event-days come from the forward-looking upcoming feed;
@@ -317,6 +310,7 @@ export function CalendarBody({ view }: { view: CalendarView }) {
                           done={tk.completed}
                           sz={18}
                           onClick={() => toggleTask(tk.listId, tk.id, tk.completed)}
+                          label={tk.completed ? `Mark ${tk.title} not done` : `Mark ${tk.title} done`}
                         />
                       </span>
                       <span
@@ -360,7 +354,7 @@ export function CalendarBody({ view }: { view: CalendarView }) {
         {selected?.kind === 'task' && (
           <TaskDetail
             task={selected.task}
-            onChanged={() => void refresh()}
+            onChanged={() => refetchAll()}
             onClose={() => setSelected(null)}
           />
         )}
@@ -394,7 +388,7 @@ export function CalendarBody({ view }: { view: CalendarView }) {
         {editing && (
           <PersonalEventEdit
             event={editing}
-            onChanged={() => void refresh()}
+            onChanged={() => refetchAll()}
             onClose={() => setEditing(null)}
           />
         )}

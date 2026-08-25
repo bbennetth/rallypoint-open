@@ -1,10 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
+  MAX_BULK_SHOPPING_ITEMS,
   addShoppingItemByTitle,
+  addShoppingItemsByTitles,
   completedItemIds,
   groupItemsByCategory,
   isShoppingCategory,
   itemCategory,
+  itemQuantity,
+  normalizeQuantityInput,
+  parseShoppingLines,
+  MAX_QUANTITY_LEN,
 } from './shopping-helpers.js'
 import type { ShoppingItemDto } from './api.js'
 import { CATEGORY_KEY } from './api.js'
@@ -32,6 +38,69 @@ function makeItem(
     createdAt: new Date().toISOString(),
   }
 }
+
+// An item carrying an arbitrary raw value under the quantity field-def id.
+const QTY_ID = 'lfd_qty'
+function makeItemWithQuantity(raw: unknown): ShoppingItemDto {
+  const item = makeItem('itm_q', 'Watermelon', 'produce')
+  return { ...item, customFields: { ...item.customFields, [QTY_ID]: raw } }
+}
+
+// --- itemQuantity() -----------------------------------------------------
+describe('itemQuantity()', () => {
+  it('returns the trimmed string value', () => {
+    expect(itemQuantity(makeItemWithQuantity('  4 bags '), QTY_ID)).toBe('4 bags')
+  })
+
+  it('returns null when the item has no quantity key', () => {
+    expect(itemQuantity(makeItem('itm_1', 'Limes', 'produce'), QTY_ID)).toBeNull()
+  })
+
+  it('returns null for an empty or whitespace-only value', () => {
+    expect(itemQuantity(makeItemWithQuantity(''), QTY_ID)).toBeNull()
+    expect(itemQuantity(makeItemWithQuantity('   '), QTY_ID)).toBeNull()
+  })
+
+  it('returns null when the field id is unknown (BFF could not resolve the def)', () => {
+    expect(itemQuantity(makeItemWithQuantity('2'), null)).toBeNull()
+  })
+
+  // A def retyped to `number` from the Lists UI must not blank every chip.
+  it('stringifies a finite numeric value', () => {
+    expect(itemQuantity(makeItemWithQuantity(12), QTY_ID)).toBe('12')
+    expect(itemQuantity(makeItemWithQuantity(0), QTY_ID)).toBe('0')
+  })
+
+  it('returns null for non-finite numbers and other non-string types', () => {
+    expect(itemQuantity(makeItemWithQuantity(Number.NaN), QTY_ID)).toBeNull()
+    expect(itemQuantity(makeItemWithQuantity(Number.POSITIVE_INFINITY), QTY_ID)).toBeNull()
+    expect(itemQuantity(makeItemWithQuantity(null), QTY_ID)).toBeNull()
+    expect(itemQuantity(makeItemWithQuantity(true), QTY_ID)).toBeNull()
+    expect(itemQuantity(makeItemWithQuantity({ n: 1 }), QTY_ID)).toBeNull()
+  })
+})
+
+// --- normalizeQuantityInput() -------------------------------------------
+describe('normalizeQuantityInput()', () => {
+  it('trims the typed value', () => {
+    expect(normalizeQuantityInput('  3 cs  ')).toBe('3 cs')
+  })
+
+  it('maps empty / whitespace-only input to null (clears the field)', () => {
+    expect(normalizeQuantityInput('')).toBeNull()
+    expect(normalizeQuantityInput('   ')).toBeNull()
+  })
+
+  it('caps an over-long value', () => {
+    const out = normalizeQuantityInput('x'.repeat(MAX_QUANTITY_LEN + 20))
+    expect(out).toHaveLength(MAX_QUANTITY_LEN)
+  })
+
+  // Trim happens before the cap, so leading spaces don't eat the budget.
+  it('trims before capping', () => {
+    expect(normalizeQuantityInput('   ab   ')).toBe('ab')
+  })
+})
 
 // --- isShoppingCategory() -----------------------------------------------
 describe('isShoppingCategory()', () => {
@@ -95,7 +164,7 @@ describe('groupItemsByCategory()', () => {
     // produce comes before dairy in SHOPPING_CATEGORY_ORDER
     expect(catNames[0]).toBe('produce')
     expect(catNames[1]).toBe('dairy')
-    expect(groups[1].items.map((i) => i.id)).toEqual(['a', 'b'])
+    expect(groups[1]!.items.map((i) => i.id)).toEqual(['a', 'b'])
   })
 
   it('places items with no category into "other"', () => {
@@ -105,8 +174,8 @@ describe('groupItemsByCategory()', () => {
     ]
     const groups = groupItemsByCategory(items)
     expect(groups.length).toBe(1)
-    expect(groups[0].category).toBe('other')
-    expect(groups[0].items.length).toBe(2)
+    expect(groups[0]!.category).toBe('other')
+    expect(groups[0]!.items.length).toBe(2)
   })
 
   it('preserves server-side item order within each category group', () => {
@@ -117,7 +186,7 @@ describe('groupItemsByCategory()', () => {
     ]
     const groups = groupItemsByCategory(items)
     expect(groups.length).toBe(1)
-    expect(groups[0].items.map((i) => i.id)).toEqual(['first', 'second', 'third'])
+    expect(groups[0]!.items.map((i) => i.id)).toEqual(['first', 'second', 'third'])
   })
 
   it('respects SHOPPING_CATEGORY_ORDER for section ordering', () => {
@@ -139,7 +208,7 @@ describe('groupItemsByCategory()', () => {
     const items = [makeItem('x', 'Salmon', 'meat-seafood')]
     const groups = groupItemsByCategory(items)
     expect(groups.length).toBe(1)
-    expect(groups[0].category).toBe('meat-seafood')
+    expect(groups[0]!.category).toBe('meat-seafood')
   })
 
   it('does not mutate the input array', () => {
@@ -216,5 +285,111 @@ describe('addShoppingItemByTitle()', () => {
     ;(api.getShoppingList as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('network error'))
     await expect(addShoppingItemByTitle('Milk')).rejects.toThrow('network error')
     expect(api.createShoppingItem).not.toHaveBeenCalled()
+  })
+})
+
+// --- parseShoppingLines() -----------------------------------------------
+describe('parseShoppingLines()', () => {
+  it('returns [] for empty input', () => {
+    expect(parseShoppingLines('')).toEqual([])
+  })
+
+  it('returns [] for whitespace-only input', () => {
+    expect(parseShoppingLines('   \n \n\t\n')).toEqual([])
+  })
+
+  it('returns one title per non-empty line, in order', () => {
+    expect(parseShoppingLines('Milk\nEggs\nBread')).toEqual(['Milk', 'Eggs', 'Bread'])
+  })
+
+  it('trims each line and drops blank lines between items', () => {
+    expect(parseShoppingLines('  Milk  \n\n  Eggs\n   \nBread ')).toEqual(['Milk', 'Eggs', 'Bread'])
+  })
+
+  it('normalizes CRLF line endings', () => {
+    expect(parseShoppingLines('Milk\r\nEggs\r\nBread')).toEqual(['Milk', 'Eggs', 'Bread'])
+  })
+
+  it('keeps duplicate lines', () => {
+    expect(parseShoppingLines('Milk\nMilk')).toEqual(['Milk', 'Milk'])
+  })
+
+  it('truncates each line to 200 characters', () => {
+    const long = 'x'.repeat(250)
+    const result = parseShoppingLines(`${long}\nMilk`)
+    expect(result[0]).toBe('x'.repeat(200))
+    expect(result[1]).toBe('Milk')
+  })
+
+  it('handles a single line with no trailing newline', () => {
+    expect(parseShoppingLines('Milk')).toEqual(['Milk'])
+  })
+})
+
+// --- addShoppingItemsByTitles() -----------------------------------------
+describe('addShoppingItemsByTitles()', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    const api = await import('./api.js')
+    ;(api.getShoppingList as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'lst_shop', name: 'Shopping' })
+    ;(api.createShoppingItem as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_listId: string, title: string) => makeItem(`itm_${title}`, title),
+    )
+  })
+
+  it('rejects for an empty titles array', async () => {
+    await expect(addShoppingItemsByTitles([])).rejects.toThrow('No items to add')
+  })
+
+  it('rejects when over MAX_BULK_SHOPPING_ITEMS without creating anything', async () => {
+    const api = await import('./api.js')
+    const titles = Array.from({ length: MAX_BULK_SHOPPING_ITEMS + 1 }, (_, i) => `Item ${i}`)
+    await expect(addShoppingItemsByTitles(titles)).rejects.toThrow('Too many items')
+    expect(api.getShoppingList).not.toHaveBeenCalled()
+    expect(api.createShoppingItem).not.toHaveBeenCalled()
+  })
+
+  it('accepts exactly MAX_BULK_SHOPPING_ITEMS titles', async () => {
+    const titles = Array.from({ length: MAX_BULK_SHOPPING_ITEMS }, (_, i) => `Item ${i}`)
+    const result = await addShoppingItemsByTitles(titles)
+    expect(result.created.length).toBe(MAX_BULK_SHOPPING_ITEMS)
+    expect(result.remaining).toEqual([])
+    expect(result.error).toBeUndefined()
+  })
+
+  it('resolves the list once and creates one item per title, in order', async () => {
+    const api = await import('./api.js')
+    const result = await addShoppingItemsByTitles(['Milk', 'Eggs', 'Bread'])
+    expect(api.getShoppingList).toHaveBeenCalledOnce()
+    expect((api.createShoppingItem as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+      ['lst_shop', 'Milk'],
+      ['lst_shop', 'Eggs'],
+      ['lst_shop', 'Bread'],
+    ])
+    expect(result.created.map((i) => i.title)).toEqual(['Milk', 'Eggs', 'Bread'])
+    expect(result.remaining).toEqual([])
+    expect(result.error).toBeUndefined()
+  })
+
+  it('rethrows a getShoppingList failure without creating anything', async () => {
+    const api = await import('./api.js')
+    ;(api.getShoppingList as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('network error'))
+    await expect(addShoppingItemsByTitles(['Milk'])).rejects.toThrow('network error')
+    expect(api.createShoppingItem).not.toHaveBeenCalled()
+  })
+
+  it('stops at the first failing create and reports created/remaining/error', async () => {
+    const api = await import('./api.js')
+    const boom = new Error('create failed')
+    ;(api.createShoppingItem as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async (_l: string, title: string) => makeItem('itm_1', title))
+      .mockRejectedValueOnce(boom)
+    const result = await addShoppingItemsByTitles(['Milk', 'Eggs', 'Bread'])
+    expect(api.createShoppingItem).toHaveBeenCalledTimes(2)
+    expect(result.created.map((i) => i.title)).toEqual(['Milk'])
+    // The failed title stays in `remaining` so a retry of just the remainder
+    // cannot duplicate the items that already landed.
+    expect(result.remaining).toEqual(['Eggs', 'Bread'])
+    expect(result.error).toBe(boom)
   })
 })

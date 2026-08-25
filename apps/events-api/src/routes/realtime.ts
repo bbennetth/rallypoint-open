@@ -64,13 +64,41 @@ export const realtimeRoutes = new Hono<HonoApp>()
     return c.json(issueToken(c, groupChannel(group.id)))
   })
   // Per-event channel token (event detail + lineup + map invalidations).
-  // Same gate as the SSE event stream: loadForAction 404s a missing event
-  // AND a non-member alike so event existence is never leaked to outsiders.
-  // Mounted before eventsRoutes so "realtime-token" is never captured as an
-  // event id by GET /api/v1/ui/events/:id.
+  // Base gate matches the SSE event stream: loadForAction 404s a missing
+  // event AND a non-member alike so event existence is never leaked to
+  // outsiders. WIDENED for the attendee Map tab: a member of any group
+  // under the event may also subscribe — code-joined group members have
+  // no event_members row but still need live map/POI/zone invalidations.
+  // (Read-only invalidation channel: payloads are ids, not content.)
+  // The attendee-revocation rule still applies to the widened path.
+  // Mounted before eventsRoutes so "realtime-token" is never captured as
+  // an event id by GET /api/v1/ui/events/:id.
   .get('/api/v1/ui/events/:id/realtime-token', async (c) => {
-    const { event } = await loadForAction(c, c.req.param('id'), 'viewer')
-    return c.json(issueToken(c, eventChannel(event.id)))
+    const eventId = c.req.param('id')
+    try {
+      const { event } = await loadForAction(c, eventId, 'viewer')
+      return c.json(issueToken(c, eventChannel(event.id)))
+    } catch (err) {
+      // Only the not-found/no-access rejection falls through to the
+      // widened group-membership path; any other failure propagates
+      // without paying the extra lookups.
+      if (!(err instanceof ApiError) || err.status !== 404) throw err
+      const userId = c.var.session!.userId
+      const event = await c.var.repos.events.findById(eventId)
+      if (event && !event.deletedAt) {
+        const isGroupMember = await c.var.repos.groupMembers.isMemberOfAnyGroupInEvent(
+          event.id,
+          userId,
+        )
+        if (isGroupMember) {
+          const attendee = await c.var.repos.attendees.findByEventAndUser(event.id, userId)
+          const revoked =
+            attendee !== null && attendee.removedAt !== null && event.ownerUserId !== userId
+          if (!revoked) return c.json(issueToken(c, eventChannel(event.id)))
+        }
+      }
+      throw err
+    }
   })
   // WebSocket upgrade → channel DO. The token carries the (signed)
   // channel; we route to idFromName(token.channel) so a client can only
@@ -106,5 +134,14 @@ export const realtimeRoutes = new Hono<HonoApp>()
       })
     }
     const stub = hub.get(hub.idFromName(verdict.channel))
-    return stub.fetch(c.req.raw)
+    const res = await stub.fetch(c.req.raw)
+    // A 101 carrying webSocket must pass through untouched — cloning
+    // breaks the handshake. Anything else (DO error responses) is
+    // re-wrapped so its fetch()-immutable headers become mutable for
+    // downstream middleware. (webSocket is a Workers-runtime extension
+    // absent from the Node Response type, hence the structural cast.)
+    const ws = (res as Response & { webSocket?: unknown }).webSocket
+    // Also pass any 101 through: the Response constructor rejects
+    // status 101, so re-wrapping one would throw.
+    return ws || res.status === 101 ? res : new Response(res.body, res)
   })

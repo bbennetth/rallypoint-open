@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { calendarDateField } from '@rallypoint/lists-shared'
+import { calendarDateField, resolveRecurrenceDues } from '@rallypoint/lists-shared'
 import { eventTimezoneField } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
@@ -8,9 +8,8 @@ import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
 import { bestEffort, proxyEvents, proxyLists } from '../lib/sdk-error.js'
 import { listPersonalTaskLists } from '../lib/personal-scope.js'
 import { fetchChoresFeedItems } from '../lib/chores-feed.js'
-import { resolveRecurrenceDues } from '../lib/recurrence-time.js'
 import { mergeSharedGroupEvents, sharedEventIdSet } from '../lib/shared-merge.js'
-import { zonedDayWindow } from '../lib/day-window.js'
+import { zonedDayWindow } from '@rallypoint/shared'
 import { composeUpcoming } from '../lib/upcoming.js'
 
 // Planner Upcoming BFF (slice 9). A forward-looking, date-sorted merge of the
@@ -50,13 +49,14 @@ export const upcomingRoutes = new Hono<HonoApp>()
     const [personalLists, choreItems, events, userEvents] = await Promise.all([
       proxyLists(async () => {
         const lists = await listPersonalTaskLists(listsClient, actor)
-        const perList = await Promise.all(lists.map((l) => listsClient.listItems(l.id)))
+        const perList = await Promise.all(lists.map((l) => listsClient.listItems(l.id, actor)))
         return { lists, items: perList.flat() }
       }),
-      // Chores are additive and gated by the showChoresInFeeds setting — a
-      // chores/settings hiccup degrades to [] so it never drops the actor's
+      // Chores are additive and gated by the showChoresInFeeds setting (scope
+      // 'future' — Upcoming is the toggle's home now that today is always-on).
+      // A chores/settings hiccup degrades to [] so it never drops the actor's
       // tasks + events. Items carry their listId so the UI can badge them.
-      bestEffort(() => fetchChoresFeedItems(listsClient, settings, actor), []),
+      bestEffort(() => fetchChoresFeedItems(listsClient, settings, actor, 'future'), []),
       proxyEvents(() => eventsClient.listPersonalEvents({ actor })),
       // Group (festival) events are additive — degrade to [] on any hiccup so
       // an events-api failure never drops the actor's tasks + personal events.

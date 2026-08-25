@@ -12,9 +12,8 @@
 # CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
 # wrangler >=4.45 (bootstrap step creates rp-planner-{qa,prod} if absent).
 # Real secrets via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
-#   PLANNER_API_KEY
 #   PLANNER_SESSION_KEY_V1
-#   VAPID_PUBLIC_KEY      (also shipped to planner-web as VITE_VAPID_PUBLIC_KEY)
+#   VAPID_PUBLIC_KEY      (served to planner-web via GET /api/v1/push/public-key)
 #   VAPID_PRIVATE_KEY
 #   VAPID_SUBJECT         (contact URI, e.g. mailto:ops@rallypt.app)
 
@@ -39,13 +38,11 @@ run_worker_first = ["/api/*"]
 # DOES carry a [triggers] cron (below) for the notification drain.
 
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
-# dev-safe defaults for the secrets and the BFF target URLs.
+# dev-safe defaults for the secrets. RPID/LISTS/EVENTS are reached via the
+# [[services]] RPC bindings below, not URL vars.
 [vars]
 NODE_ENV = "development"
 PLANNER_UI_ORIGIN = "http://localhost:5177"
-RPID_API_URL = "http://localhost:8080"
-LISTS_API_URL = "http://localhost:8082"
-EVENTS_API_URL = "http://localhost:8081"
 
 # Notification drain — every minute, so a timed notification fires within ~1
 # minute of its due instant (1 min is Cloudflare's cron floor). Restated per
@@ -61,13 +58,56 @@ database_name = "rp-planner-local"
 database_id = "local-dev-unused"
 migrations_dir = "../../packages/planner-db/migrations"
 
+# Top-level service bindings — required for cross-process RPC under
+# wrangler's local dev registry (PR 2 of feat/rpc-bindings).
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+[[services]]
+binding = "LISTS"
+service = "rallypoint-lists"
+entrypoint = "ListsRPC"
+
+[[services]]
+binding = "EVENTS"
+service = "rallypoint-events"
+entrypoint = "EventsRPC"
+
+[[services]]
+binding = "FITNESS"
+service = "rallypoint-fitness"
+entrypoint = "FitnessRPC"
+
+# Workers AI binding for AI Assist (POST /api/v1/ui/assist/parse — free-text
+# capture → task/shopping/event/note/diary categorization). Local `wrangler
+# dev` proxies the call to the real Workers AI runtime when the developer is
+# logged in; offline / absent → the route 503s.
+[ai]
+binding = "AI"
+
+# AI trace-corpus ingest + feedback (ai-api). Fire-and-forget from the assist
+# service; absent binding just means assist runs untraced.
+[[services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai"
+entrypoint = "AiRPC"
+
 # ---- QA: planner.rallypt.dev ----------------------------------------
 # vars must be redeclared per env — wrangler does NOT inherit top-level
 # [vars] into named envs, so omitting one here would let the zod default
 # silently fall back to localhost (no "vars not inherited" warning only
 # because every consumed var is restated).
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
 [env.qa]
-vars = { NODE_ENV = "production", PLANNER_UI_ORIGIN = "https://planner.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", LISTS_API_URL = "https://lists.rallypt.dev", EVENTS_API_URL = "https://events.rallypt.dev" }
+# AI_GATEWAY_ID routes the AI Assist Workers AI call through the
+# `rallypoint-ai` Cloudflare AI Gateway (logging / caching / cost visibility).
+# The gateway must exist in the CF account before deploy. Omitted from the
+# top-level dev [vars] so local `wrangler dev` calls Workers AI directly.
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", PLANNER_UI_ORIGIN = "https://planner.rallypt.dev", AI_GATEWAY_ID = "rallypoint-ai", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
 [env.qa.triggers]
 crons = ["* * * * *"]
@@ -88,14 +128,30 @@ migrations_dir = "../../packages/planner-db/migrations"
 [[env.qa.services]]
 binding = "RPID"
 service = "rallypoint-id-qa"
+entrypoint = "IdRPC"
 
 [[env.qa.services]]
 binding = "LISTS"
 service = "rallypoint-lists-qa"
+entrypoint = "ListsRPC"
 
 [[env.qa.services]]
 binding = "EVENTS"
 service = "rallypoint-events-qa"
+entrypoint = "EventsRPC"
+
+[[env.qa.services]]
+binding = "FITNESS"
+service = "rallypoint-fitness-qa"
+entrypoint = "FitnessRPC"
+
+[[env.qa.services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai-qa"
+entrypoint = "AiRPC"
+
+[env.qa.ai]
+binding = "AI"
 
 [[env.qa.routes]]
 pattern = "planner.rallypt.dev"
@@ -103,7 +159,7 @@ custom_domain = true
 
 # ---- Prod: planner.rallypt.app --------------------------------------
 [env.prod]
-vars = { NODE_ENV = "production", PLANNER_UI_ORIGIN = "https://planner.rallypt.app", RPID_API_URL = "https://id.rallypt.app", LISTS_API_URL = "https://lists.rallypt.app", EVENTS_API_URL = "https://events.rallypt.app" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", PLANNER_UI_ORIGIN = "https://planner.rallypt.app", AI_GATEWAY_ID = "rallypoint-ai", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
 [env.prod.triggers]
 crons = ["* * * * *"]
@@ -118,14 +174,30 @@ migrations_dir = "../../packages/planner-db/migrations"
 [[env.prod.services]]
 binding = "RPID"
 service = "rallypoint-id-prod"
+entrypoint = "IdRPC"
 
 [[env.prod.services]]
 binding = "LISTS"
 service = "rallypoint-lists-prod"
+entrypoint = "ListsRPC"
 
 [[env.prod.services]]
 binding = "EVENTS"
 service = "rallypoint-events-prod"
+entrypoint = "EventsRPC"
+
+[[env.prod.services]]
+binding = "FITNESS"
+service = "rallypoint-fitness-prod"
+entrypoint = "FitnessRPC"
+
+[[env.prod.services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai-prod"
+entrypoint = "AiRPC"
+
+[env.prod.ai]
+binding = "AI"
 
 [[env.prod.routes]]
 pattern = "planner.rallypt.app"

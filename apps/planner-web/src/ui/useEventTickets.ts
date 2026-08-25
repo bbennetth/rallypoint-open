@@ -6,6 +6,7 @@ import {
   uploadTicket,
   type TicketDto,
 } from '../lib/api.js'
+import { isTempId } from '../lib/offline/outbox-ops.js'
 
 // Client-side affordance only; events-api is the real gate on type + size.
 export const ACCEPTED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
@@ -46,7 +47,10 @@ export function useEventTickets(
   )
 
   useEffect(() => {
-    if (activeEventId) void refreshTickets(activeEventId)
+    // A just-created event still carries a tmp id until its outbox create
+    // flushes — the server has never heard of it, so skip the load (a tmp
+    // event can't have tickets yet anyway).
+    if (activeEventId && !isTempId(activeEventId)) void refreshTickets(activeEventId)
     else setTickets([])
   }, [activeEventId, refreshTickets])
 
@@ -54,6 +58,12 @@ export function useEventTickets(
     const file = e.target.files?.[0]
     e.target.value = '' // allow re-selecting the same file later
     if (!file || !activeEventId) return
+    if (isTempId(activeEventId)) {
+      // Ticket upload is raw request/response (binary body — not outboxed);
+      // it can't target an id the server hasn't minted yet.
+      onError('This event is still syncing — try attaching the ticket again in a moment.')
+      return
+    }
     if (!ACCEPTED_MIME.includes(file.type)) {
       onError('Tickets must be a JPEG, PNG, WebP, or PDF file.')
       return

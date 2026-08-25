@@ -18,6 +18,7 @@ import {
   events,
   personalTickets,
 } from '@rallypoint/events-db'
+import { SYSTEM_USER_ID } from '@rallypoint/shared'
 import type {
   CreateEventInput,
   EventRecord,
@@ -30,8 +31,11 @@ import type {
   ScopeType,
 } from '../types.js'
 import type { Db } from './db.js'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
+import { buildPage } from '@rallypoint/api-kit'
+import { eventsCursorCodec } from '../../lib/events-cursor.js'
+import type { BatchItem } from 'drizzle-orm/batch'
 
 function num(n: number | null | undefined): number | null {
   return n === null || n === undefined ? null : n
@@ -76,21 +80,18 @@ function rowToEvent(
     ticketPlatform: row.ticketPlatform ?? null,
     ticketAccountEmail: row.ticketAccountEmail ?? null,
     allDay: row.allDay ?? null,
+    ref: row.ref ?? null,
   }
 }
 
-function encodeCursor(e: EventRecord): string {
-  return Buffer.from(`${e.createdAt.toISOString()}|${e.id}`, 'utf8').toString('base64url')
-}
+// Cursor encode/decode moved to lib/events-cursor.ts (shared api-kit codec:
+// opaque v1 emit + legacy `<iso>|<id>` accept). The repo keeps speaking
+// opaque strings on both the option (`opts.cursor`) and page (`nextCursor`)
+// boundaries, so the admin system-events RPC relay and events-web are
+// untouched. Page shaping (over-fetch-by-one → items + encoded nextCursor)
+// goes through the shared buildPage helper.
 function decodeCursor(c: string): { at: Date; id: string } | null {
-  try {
-    const [iso, id] = Buffer.from(c, 'base64url').toString('utf8').split('|')
-    if (!iso || !id) return null
-    const at = new Date(iso)
-    return Number.isNaN(at.getTime()) ? null : { at, id }
-  } catch {
-    return null
-  }
+  return eventsCursorCodec.decode(c)
 }
 
 export class D1EventRepo implements EventRepo {
@@ -120,6 +121,7 @@ export class D1EventRepo implements EventRepo {
           ticketPlatform: input.ticketPlatform ?? null,
           ticketAccountEmail: input.ticketAccountEmail ?? null,
           ...(input.allDay !== undefined ? { allDay: input.allDay } : {}),
+          ref: input.ref ?? null,
         })
         .returning()
       return rowToEvent(row!)
@@ -153,9 +155,29 @@ export class D1EventRepo implements EventRepo {
       .where(eq(eventMembers.userId, userId))
     const memberEventIds = memberRows.map((r) => r.eventId)
 
+    // Admins self-attending a system-owned event get an event_attendees
+    // row but no event_members row (actorRole short-circuits to 'owner'
+    // for them), so membership alone would hide the event here.
+    const attendedSystemEventIds: string[] = []
+    if (opts.includeAttendedSystemEvents) {
+      const rows = await this.db
+        .select({ eventId: eventAttendees.eventId })
+        .from(eventAttendees)
+        .innerJoin(events, eq(events.id, eventAttendees.eventId))
+        .where(
+          and(
+            eq(eventAttendees.userId, userId),
+            isNull(eventAttendees.removedAt),
+            eq(events.ownerUserId, SYSTEM_USER_ID),
+          ),
+        )
+      attendedSystemEventIds.push(...rows.map((r) => r.eventId))
+    }
+
+    const visibleIds = [...new Set([...memberEventIds, ...attendedSystemEventIds])]
     const visibility =
-      memberEventIds.length > 0
-        ? or(eq(events.ownerUserId, userId), inArray(events.id, memberEventIds))
+      visibleIds.length > 0
+        ? or(eq(events.ownerUserId, userId), inArray(events.id, visibleIds))
         : eq(events.ownerUserId, userId)
 
     const conds = [visibility]
@@ -178,11 +200,73 @@ export class D1EventRepo implements EventRepo {
       .orderBy(sql`${events.createdAt} desc, ${events.id} desc`)
       .limit(opts.limit + 1)
 
-    const mapped = rows.map(rowToEvent)
-    const hasMore = mapped.length > opts.limit
-    const items = hasMore ? mapped.slice(0, opts.limit) : mapped
-    const nextCursor = hasMore && items.length > 0 ? encodeCursor(items[items.length - 1]!) : null
-    return { items, nextCursor }
+    return buildPage(rows.map(rowToEvent), opts.limit, eventsCursorCodec, (e) => ({
+      at: e.createdAt,
+      id: e.id,
+    }))
+  }
+
+  async listByOwner(ownerUserId: string, opts: ListEventsOptions): Promise<ListEventsPage> {
+    // Same cursor/pagination contract as listForUser, but ownership
+    // only — backs the admin system-events listing (owner = the
+    // SYSTEM_USER_ID sentinel, which never has member rows).
+    const conds = [eq(events.ownerUserId, ownerUserId)]
+    if (!opts.includeDeleted) conds.push(isNull(events.deletedAt))
+
+    const cursor = opts.cursor ? decodeCursor(opts.cursor) : null
+    if (cursor) {
+      conds.push(
+        or(
+          lt(events.createdAt, cursor.at),
+          and(eq(events.createdAt, cursor.at), lt(events.id, cursor.id)),
+        )!,
+      )
+    }
+
+    const rows = await this.db
+      .select()
+      .from(events)
+      .where(and(...conds))
+      .orderBy(sql`${events.createdAt} desc, ${events.id} desc`)
+      .limit(opts.limit + 1)
+
+    return buildPage(rows.map(rowToEvent), opts.limit, eventsCursorCodec, (e) => ({
+      at: e.createdAt,
+      id: e.id,
+    }))
+  }
+
+  async listBrowsable(opts: ListEventsOptions): Promise<ListEventsPage> {
+    // Browse tab (#browse-tab): system-owned OR public, never deleted.
+    // SQL twin of routes/_access.ts isBrowsableEvent; same cursor
+    // contract as listForUser/listByOwner. opts.includeDeleted is
+    // deliberately ignored — deleted events are never browsable.
+    const conds = [
+      isNull(events.deletedAt),
+      or(eq(events.ownerUserId, SYSTEM_USER_ID), eq(events.privacyMode, 'public'))!,
+    ]
+
+    const cursor = opts.cursor ? decodeCursor(opts.cursor) : null
+    if (cursor) {
+      conds.push(
+        or(
+          lt(events.createdAt, cursor.at),
+          and(eq(events.createdAt, cursor.at), lt(events.id, cursor.id)),
+        )!,
+      )
+    }
+
+    const rows = await this.db
+      .select()
+      .from(events)
+      .where(and(...conds))
+      .orderBy(sql`${events.createdAt} desc, ${events.id} desc`)
+      .limit(opts.limit + 1)
+
+    return buildPage(rows.map(rowToEvent), opts.limit, eventsCursorCodec, (e) => ({
+      at: e.createdAt,
+      id: e.id,
+    }))
   }
 
   async patch(id: string, fields: PatchEventInput): Promise<EventRecord | null> {
@@ -295,6 +379,15 @@ export class D1EventRepo implements EventRepo {
     return rows.map(rowToEvent)
   }
 
+  async findByOwnerAndRef(ownerUserId: string, ref: string): Promise<EventRecord | null> {
+    const rows = await this.db
+      .select({ ...getTableColumns(events), ticketCount: ticketCountSql })
+      .from(events)
+      .where(and(eq(events.ownerUserId, ownerUserId), eq(events.ref, ref)))
+      .limit(1)
+    return rows[0] ? rowToEvent(rows[0]) : null
+  }
+
   async listGroupForUser(userId: string): Promise<EventRecord[]> {
     const [memberRows, attendeeRows] = await Promise.all([
       this.db
@@ -337,6 +430,16 @@ export class D1EventRepo implements EventRepo {
     oldOwnerMemberId: string
   }): Promise<void> {
     // Static write-set → db.batch([...]).
+    //
+    // Audit E3 #9 NOTE: D1 `db.batch()` runs the listed statements as
+    // a single transaction — if any one fails, the entire sequence is
+    // rolled back (Cloudflare docs: "Batched statements are SQL
+    // transactions"). The audit's E3 #9 finding flagged this as non-
+    // atomic, but that was based on stale D1 semantics. The code here
+    // IS atomic as-written. The MONEY-api transferOwnership equivalent
+    // (E2 #6) makes 3 SEPARATE awaits — that one is the real
+    // non-atomic case and is fixed in a separate PR by converting it
+    // to a single batch like this one.
     const now = new Date()
     await this.db.batch([
       this.db
@@ -393,9 +496,13 @@ export class D1EventRepo implements EventRepo {
     }
 
     // Static write-set: attendee upsert + invite consume in one batch.
-    // The member row is already inserted above (or skipped), so the
-    // remaining writes are always the same two statements.
-    await this.db.batch([
+    // On the re-admission path (skipMemberAdd=true) we ALSO update the
+    // existing event_members row's role so a previously-editor user
+    // re-invited as viewer doesn't keep editor access (audit E2 #8).
+    // The member row is already inserted above (or carries through
+    // here via the role update), so the remaining writes are the
+    // same 2 (or 3) statements.
+    const statements: BatchItem<'sqlite'>[] = [
       this.db
         .insert(eventAttendees)
         .values({
@@ -418,7 +525,93 @@ export class D1EventRepo implements EventRepo {
         .update(eventInvites)
         .set({ consumedAt: now, consumedByUserId: input.userId })
         .where(eq(eventInvites.id, input.inviteId)),
-    ])
+    ]
+    if (input.skipMemberAdd) {
+      // Update the existing member row's role to match the new invite.
+      // No-op when the role already matches; harmless either way.
+      statements.push(
+        this.db
+          .update(eventMembers)
+          .set({ role: input.role })
+          .where(
+            and(
+              eq(eventMembers.eventId, input.eventId),
+              eq(eventMembers.userId, input.userId),
+            ),
+          ),
+      )
+    }
+    // Non-empty by construction: two attendee/invite statements are
+    // always pushed above, so this array-to-tuple assertion is sound
+    // (drizzle's D1 batch signature requires a non-empty tuple type).
+    await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+    return { ok: true as const, readmitted: input.skipMemberAdd }
+  }
+
+  async joinAsViewer(input: {
+    memberId: string
+    attendeeId: string
+    eventId: string
+    userId: string
+    skipMemberAdd: boolean
+  }): Promise<
+    { ok: true; readmitted: boolean } | { ok: false; reason: 'already_active_member' }
+  > {
+    const now = new Date()
+
+    // Same shape as acceptInvite: solo conditional member insert first
+    // so a concurrent double-join surfaces as the unique violation.
+    if (!input.skipMemberAdd) {
+      try {
+        await this.db.insert(eventMembers).values({
+          id: input.memberId,
+          eventId: input.eventId,
+          userId: input.userId,
+          role: 'viewer',
+        })
+      } catch (err) {
+        const mapped = mapUniqueViolation(err)
+        if (mapped instanceof UniqueConstraintError) {
+          return { ok: false as const, reason: 'already_active_member' as const }
+        }
+        throw err
+      }
+    }
+
+    const statements: BatchItem<'sqlite'>[] = [
+      this.db
+        .insert(eventAttendees)
+        .values({
+          id: input.attendeeId,
+          eventId: input.eventId,
+          userId: input.userId,
+        })
+        .onConflictDoUpdate({
+          target: [eventAttendees.eventId, eventAttendees.userId],
+          set: {
+            removedAt: null,
+            joinedAt: sql`CASE WHEN ${eventAttendees.removedAt} IS NULL
+                               THEN ${eventAttendees.joinedAt}
+                               ELSE ${now.getTime()} END`,
+          },
+        }),
+    ]
+    if (input.skipMemberAdd) {
+      // Re-admission through self-join always lands as 'viewer' — see
+      // the interface comment in ../types.ts.
+      statements.push(
+        this.db
+          .update(eventMembers)
+          .set({ role: 'viewer' })
+          .where(
+            and(
+              eq(eventMembers.eventId, input.eventId),
+              eq(eventMembers.userId, input.userId),
+            ),
+          ),
+      )
+    }
+    await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
     return { ok: true as const, readmitted: input.skipMemberAdd }
   }
 }

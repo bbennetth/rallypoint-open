@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useThemeStore } from '@rallypoint/ui'
 
 // Cloudflare Turnstile widget loader. Loads the Turnstile script
 // once per page; renders the widget into a div; calls onToken
@@ -51,11 +52,20 @@ export interface TurnstileProps {
   onToken: (token: string) => void
   onError?: () => void
   onExpired?: () => void
+  // Widget chrome theme. Defaults to the app's own light/dark toggle
+  // (`@rallypoint/ui`'s theme store) so the widget always matches
+  // whatever chassis the user is currently looking at, rather than the
+  // previously-hardcoded 'dark' mismatching a user on the light theme.
+  // Callers can still override explicitly (or pass 'auto' to defer to
+  // Turnstile's own prefers-color-scheme detection instead).
+  theme?: 'light' | 'dark' | 'auto'
 }
 
-export function Turnstile({ siteKey, onToken, onError, onExpired }: TurnstileProps) {
+export function Turnstile({ siteKey, onToken, onError, onExpired, theme }: TurnstileProps) {
   const ref = useRef<HTMLDivElement>(null)
   const widgetId = useRef<string | undefined>(undefined)
+  const appTheme = useThemeStore((s) => s.theme)
+  const resolvedTheme = theme ?? appTheme
 
   // Keep the latest callbacks in a ref so the render effect does NOT depend on
   // them. Callers pass inline callbacks (e.g. onError={() => setToken(null)}),
@@ -82,7 +92,7 @@ export function Turnstile({ siteKey, onToken, onError, onExpired }: TurnstilePro
           callback: (token) => cbs.current.onToken(token),
           'error-callback': () => cbs.current.onError?.(),
           'expired-callback': () => cbs.current.onExpired?.(),
-          theme: 'dark',
+          theme: resolvedTheme,
         })
       })
       .catch(() => {
@@ -99,8 +109,10 @@ export function Turnstile({ siteKey, onToken, onError, onExpired }: TurnstilePro
         }
       }
     }
-    // Render once per sitekey — NOT on callback identity (see cbs ref above).
-  }, [sitekey])
+    // Render once per sitekey/theme — NOT on callback identity (see cbs
+    // ref above). A theme flip re-renders the widget (a fresh challenge),
+    // which is an acceptable cost for chrome matching the current chassis.
+  }, [sitekey, resolvedTheme])
 
   return <div ref={ref} className="mb-4" />
 }

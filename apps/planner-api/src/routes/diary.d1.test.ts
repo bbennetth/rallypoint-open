@@ -214,6 +214,7 @@ describe('D1 integration — Planner Diary BFF', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       ...extra,
     }
   }

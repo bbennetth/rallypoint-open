@@ -35,6 +35,3 @@ export const authMethods = sqliteTable(
     userKindIdx: uniqueIndex('auth_methods_user_kind_unique_idx').on(t.userId, t.kind),
   }),
 )
-
-export type DbAuthMethod = typeof authMethods.$inferSelect
-export type DbAuthMethodInsert = typeof authMethods.$inferInsert

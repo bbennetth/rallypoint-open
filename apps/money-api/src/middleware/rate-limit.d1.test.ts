@@ -67,6 +67,9 @@ describe('D1 integration — sso/exchange rate limiter', () => {
       cookie: `${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'x-forwarded-for': ip,
+      // E1 #19 — origin gate requires Origin on POST; supply the correct
+      // value so requests are blocked by the rate-limiter, not the origin check.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 

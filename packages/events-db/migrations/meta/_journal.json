@@ -43,6 +43,55 @@
       "when": 1781500000000,
       "tag": "0005_all_day_flag",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1781600000000,
+      "tag": "0006_personal_event_ref",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1786229335117,
+      "tag": "0007_workable_marvel_zombies",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1786470593012,
+      "tag": "0008_cooing_bloodscream",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1786587795885,
+      "tag": "0009_faithful_champions",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1786590998642,
+      "tag": "0010_artist_mb_sweep",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1786662624443,
+      "tag": "0011_dark_loners",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1787316021636,
+      "tag": "0012_blushing_daimon_hellstrom",
+      "breakpoints": true
     }
   ]
 }

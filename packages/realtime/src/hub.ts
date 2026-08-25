@@ -43,6 +43,14 @@ declare const WebSocketPair: { new (): { 0: CfWebSocket; 1: CfWebSocket } }
 // the sweep cadence.
 const SWEEP_INTERVAL_MS = 30_000
 
+// Upper bound on an inbound client message before it's dropped unparsed.
+// The only message a client ever sends is {type:'token', token:<jwt-ish>};
+// a channel token is a few hundred bytes, so 4 KB is generous. Guarding
+// the length before JSON.parse stops a client with a valid channel token
+// from shipping a multi-megabyte string and blocking the single-threaded
+// Durable Object (shared by every socket on the channel) while it parses.
+const MAX_INBOUND_MESSAGE_BYTES = 4096
+
 // WebSocket.readyState value for an OPEN socket. The Workers `WebSocket`
 // global isn't in this file's typecheck scope (see the WebSocketPair note
 // above), so the numeric readyState is used directly. Standard enum:
@@ -102,6 +110,10 @@ export class RealtimeHub {
   // Any other message shape is ignored (clients only ever read).
   async webSocketMessage(ws: CfWebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== 'string') return
+    // Drop oversized messages before JSON.parse — a valid token refresh is
+    // tiny, and parsing an attacker-sized string would stall the DO for
+    // every other socket on this channel.
+    if (message.length > MAX_INBOUND_MESSAGE_BYTES) return
     let parsed: { type?: unknown; token?: unknown }
     try {
       parsed = JSON.parse(message) as { type?: unknown; token?: unknown }

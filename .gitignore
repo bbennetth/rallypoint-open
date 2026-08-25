@@ -17,6 +17,9 @@ coverage/
 .vscode/
 *.swp
 
+# ad-hoc spike / debug scripts at repo root (keep docs/screenshots/*.mjs)
+/*.mjs
+
 # logs
 *.log
 npm-debug.log*
@@ -45,3 +48,14 @@ test-results/
 playwright-report/
 # saved E2E auth sessions contain real session cookies — never commit
 e2e/.auth/
+
+# Worker [assets] dirs (apps/<api>/public) get wiped + repopulated from
+# the per-app <web>/dist at deploy time (cf-deploy.yml's matrix job:
+# `rm -rf apps/<app>/public && cp -r <web_dist> apps/<app>/public`). The
+# placeholder index.html is the only thing tracked so `wrangler dev`
+# works pre-build; everything else (sw.js, sw.js.map, registerSW.js,
+# manifest.webmanifest, assets/, icons/) is vite-plugin-pwa build
+# output that lives transiently. Audit E4 O1: stop these from
+# polluting `git status` and prevent accidental commits.
+apps/*-api/public/*
+!apps/*-api/public/index.html

@@ -7,7 +7,6 @@
 # wrangler / the bootstrap step (rp-money-{qa,prod} created if absent;
 # database_id injected by cf-deploy.yml at deploy time). Real secrets via
 # `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
-#   MONEY_API_KEY
 #   MONEY_SESSION_KEY_V1
 #   REALTIME_TOKEN_HMAC_KEY
 # Receipt object storage is a native R2 binding (OBJECT_STORE), not keys (#409).
@@ -63,9 +62,19 @@ migrations_dir = "../../packages/money-db/migrations"
 binding = "OBJECT_STORE"
 bucket_name = "rallypoint-money-dev"
 
+# Top-level service binding — required for cross-process RPC under
+# wrangler's local dev registry (PR 2 of feat/rpc-bindings).
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
 # ---- QA: money.rallypt.dev ------------------------------------------
 [env.qa]
-vars = { NODE_ENV = "production", MONEY_UI_ORIGIN = "https://money.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", MONEY_UI_ORIGIN = "https://money.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
 [[env.qa.r2_buckets]]
 binding = "OBJECT_STORE"
@@ -90,6 +99,7 @@ class_name = "RealtimeHub"
 # path so single-app dev keeps working.
 [[env.qa.services]]
 binding = "RPID"
+entrypoint = "IdRPC"
 service = "rallypoint-id-qa"
 
 [[env.qa.routes]]
@@ -98,7 +108,7 @@ custom_domain = true
 
 # ---- Prod: money.rallypt.app ----------------------------------------
 [env.prod]
-vars = { NODE_ENV = "production", MONEY_UI_ORIGIN = "https://money.rallypt.app", RPID_API_URL = "https://id.rallypt.app" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", MONEY_UI_ORIGIN = "https://money.rallypt.app", RPID_API_URL = "https://id.rallypt.app", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
 [[env.prod.r2_buckets]]
 binding = "OBJECT_STORE"
@@ -117,6 +127,7 @@ class_name = "RealtimeHub"
 
 [[env.prod.services]]
 binding = "RPID"
+entrypoint = "IdRPC"
 service = "rallypoint-id-prod"
 
 [[env.prod.routes]]

@@ -22,6 +22,7 @@ import type { UserId } from '@rallypoint/shared'
 
 const PEPPER = 'pepper-12345678901234567890123456789012'
 const CODE_KEY = 'signin-hmac-key-1234567890123456789012345678'
+const SESSION_KEY = 'session-hmac-key-123456789012345678901234567'
 
 function buildCtx() {
   const repos = buildInMemoryRepos()
@@ -42,6 +43,7 @@ function buildCtx() {
       publicBaseUrl: 'https://id.example.com',
       argon2PepperKey: PEPPER,
       signinCodeHmacKey: CODE_KEY,
+      sessionHmacKey: SESSION_KEY,
       ipAddress: '203.0.113.5',
       userAgent: 'test-agent/1.0',
     },
@@ -67,6 +69,7 @@ async function signupVerifyAndSignin(setup: ReturnType<typeof buildCtx>): Promis
     tenantId: 'rallypoint',
     ipHash: 'a'.repeat(64),
     uaHash: 'b'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
   })
   return { userId: u.id, sessionIdHash: s.idHash }
 }
@@ -103,6 +106,7 @@ describe('handleChangePassword', () => {
       tenantId: 'rallypoint',
       ipHash: 'c'.repeat(64),
       uaHash: 'd'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
     })
 
     const result = await handleChangePassword(
@@ -316,6 +320,7 @@ describe('email-change request -> confirm -> sign-in', () => {
       tenantId: 'rallypoint',
       ipHash: 'e'.repeat(64),
       uaHash: 'f'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
     })
 
     await expect(
@@ -451,6 +456,7 @@ describe('handleDeleteMe', () => {
       tenantId: 'rallypoint',
       ipHash: 'c'.repeat(64),
       uaHash: 'd'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
     })
     const result = await handleDeleteMe(
       {

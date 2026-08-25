@@ -1,5 +1,6 @@
 import { InMemoryRateLimitRepo } from '@rallypoint/rate-limit'
-import { UniqueConstraintError } from './errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
+import { EXPENSE_LIST_FOR_LEDGER_CAP } from './types.js'
 import type {
   AddLedgerGroupMemberInput,
   AddLedgerMemberInput,
@@ -15,6 +16,7 @@ import type {
   ExpenseRepo,
   ExpenseSplitRecord,
   ExpenseWithSplits,
+  LedgerActivityPage,
   LedgerActivityRecord,
   LedgerActivityRepo,
   LedgerGroupMemberRecord,
@@ -138,6 +140,39 @@ export class MemoryLedgerRepo implements LedgerRepo {
     if (!r || r.deletedAt) return null
     r.ownerUserId = input.newOwnerUserId
     r.updatedAt = new Date()
+    return { ...r }
+  }
+
+  // Atomic owner swap — see types.ts for the contract. The memory impl
+  // mutates synchronously so there's no real partial-write window, but
+  // we still couple the 3 ops here so behaviour parity holds with the
+  // D1 impl. memberRepo is wired in by the repo factory (passed via
+  // setMemberRepo) since circular construction prevents a constructor
+  // dependency.
+  private memberRepo: MemoryLedgerMemberRepo | null = null
+  setMemberRepo(m: MemoryLedgerMemberRepo): void {
+    this.memberRepo = m
+  }
+  async transferOwnershipAtomic(input: {
+    ledgerId: string
+    newOwnerUserId: string
+    oldOwnerUserId: string
+    oldOwnerMemberId: string
+  }): Promise<LedgerRecord | null> {
+    const r = this.byId.get(input.ledgerId)
+    if (!r || r.deletedAt) return null
+    if (!this.memberRepo) {
+      throw new Error('MemoryLedgerRepo.transferOwnershipAtomic requires setMemberRepo')
+    }
+    await this.memberRepo.remove(input.ledgerId, input.newOwnerUserId)
+    r.ownerUserId = input.newOwnerUserId
+    r.updatedAt = new Date()
+    await this.memberRepo.add({
+      id: input.oldOwnerMemberId,
+      ledgerId: input.ledgerId,
+      userId: input.oldOwnerUserId,
+      role: 'member',
+    })
     return { ...r }
   }
 }
@@ -357,13 +392,38 @@ export class MemoryLedgerActivityRepo implements LedgerActivityRepo {
 
   async listForLedger(
     ledgerId: string,
-    opts?: { limit?: number },
-  ): Promise<LedgerActivityRecord[]> {
-    const rows = this.rows
+    opts?: { limit?: number; cursor?: string | null },
+  ): Promise<LedgerActivityPage> {
+    let rows = this.rows
       .filter((r) => r.ledgerId === ledgerId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+    const cursor = opts?.cursor ? decodeActivityCursor(opts.cursor) : null
+    if (cursor) {
+      rows = rows.filter(
+        (r) =>
+          r.createdAt.getTime() < cursor.at.getTime() ||
+          (r.createdAt.getTime() === cursor.at.getTime() && r.id < cursor.id),
+      )
+    }
     const limit = opts?.limit ?? rows.length
-    return rows.slice(0, limit).map((r) => ({ ...r }))
+    const hasMore = rows.length > limit
+    const items = rows.slice(0, limit).map((r) => ({ ...r }))
+    const nextCursor = hasMore && items.length > 0 ? encodeActivityCursor(items[items.length - 1]!) : null
+    return { items, nextCursor }
+  }
+}
+
+function encodeActivityCursor(r: LedgerActivityRecord): string {
+  return Buffer.from(`${r.createdAt.toISOString()}|${r.id}`, 'utf8').toString('base64url')
+}
+function decodeActivityCursor(c: string): { at: Date; id: string } | null {
+  try {
+    const [iso, id] = Buffer.from(c, 'base64url').toString('utf8').split('|')
+    if (!iso || !id) return null
+    const at = new Date(iso)
+    return Number.isNaN(at.getTime()) ? null : { at, id }
+  } catch {
+    return null
   }
 }
 
@@ -438,7 +498,8 @@ export class MemoryExpenseRepo implements ExpenseRepo {
       if (a.spentAt !== b.spentAt) return a.spentAt < b.spentAt ? 1 : -1
       return a.id < b.id ? 1 : -1
     })
-    return rows.map((r) => ({
+    // Match the D1 repo's defensive cap so the doubles agree on behavior.
+    return rows.slice(0, EXPENSE_LIST_FOR_LEDGER_CAP).map((r) => ({
       ...r,
       splits: (this.splitsByExpense.get(r.id) ?? []).map((s) => ({ ...s })),
     }))
@@ -574,6 +635,7 @@ export class MemorySettlementRepo implements SettlementRepo {
       settledAt: input.settledAt,
       createdBy: input.createdBy,
       createdAt: new Date(),
+      ref: input.ref ?? null,
     }
     this.byId.set(rec.id, rec)
     return { ...rec }
@@ -582,6 +644,13 @@ export class MemorySettlementRepo implements SettlementRepo {
   async findById(id: string): Promise<SettlementRecord | null> {
     const r = this.byId.get(id)
     return r ? { ...r } : null
+  }
+
+  async findByRef(ledgerId: string, ref: string): Promise<SettlementRecord | null> {
+    for (const s of this.byId.values()) {
+      if (s.ledgerId === ledgerId && s.ref === ref) return { ...s }
+    }
+    return null
   }
 
   async listForLedger(ledgerId: string): Promise<SettlementRecord[]> {
@@ -633,9 +702,15 @@ export class MemoryMoneySessionRepo implements MoneySessionRepo {
 export function buildMemoryRepos(): Repos {
   const ledgers = new MemoryLedgerRepo()
   const expenses = new MemoryExpenseRepo()
+  const ledgerMembers = new MemoryLedgerMemberRepo(ledgers)
+  // Wire the back-reference so transferOwnershipAtomic can coordinate
+  // the member-row swap (the D1 impl batches all 3 statements; the
+  // memory impl mutates synchronously, so this is just for behaviour
+  // parity).
+  ledgers.setMemberRepo(ledgerMembers)
   return {
     ledgers,
-    ledgerMembers: new MemoryLedgerMemberRepo(ledgers),
+    ledgerMembers,
     ledgerGroups: new MemoryLedgerGroupRepo(),
     ledgerInvites: new MemoryLedgerInviteRepo(),
     ledgerActivity: new MemoryLedgerActivityRepo(),

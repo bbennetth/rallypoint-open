@@ -37,6 +37,13 @@ export const sessions = sqliteTable(
     absoluteExpiresAt: integer('absolute_expires_at', { mode: 'timestamp_ms' }).notNull(),
     ipHash: text('ip_hash').notNull(),
     uaHash: text('ua_hash').notNull(),
+    // Wall-clock instant of the most recent successful verifyRpidBearer
+    // (E4 O2). Read by the session middleware to grant offline-grace
+    // requests when id-api is unreachable: a verify transport error is
+    // silently treated as success when this column is within
+    // SESSION_OFFLINE_TTL_HOURS of now. Nullable for backward compat —
+    // legacy rows with NULL never qualify for grace.
+    lastVerifiedAt: integer('last_verified_at', { mode: 'timestamp_ms' }),
   },
   (t) => ({
     userIdx: index('planner_sessions_user_idx').on(t.userId),

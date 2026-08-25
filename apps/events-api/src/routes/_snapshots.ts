@@ -1,12 +1,11 @@
 import { ulid } from 'ulid'
-import type { Context } from 'hono'
-import type { HonoApp } from '../context.js'
 import type {
   EventArtistRecord,
   SessionApprovalStatus,
   SessionRecord,
   SessionVisibility,
   SnapshotKind,
+  Repos,
 } from '../repos/types.js'
 
 // Version history for the bulk-editable Lineup and Sessions tabs
@@ -31,7 +30,9 @@ export function deserializeLineupSnapshot(data: unknown): EventArtistRecord[] {
     return {
       eventId: String(r.eventId),
       artistId: String(r.artistId),
-      dayId: String(r.dayId),
+      // Nullable since migration 0008 (unscheduled/TBA slots). String()
+      // here would corrupt null to the literal "null" on restore.
+      dayId: (r.dayId as string | null) ?? null,
       stageId: (r.stageId as string | null) ?? null,
       tier: (r.tier as string | null) ?? null,
       genre: (r.genre as string | null) ?? null,
@@ -82,21 +83,21 @@ export function deserializeSessionsSnapshot(data: unknown): SessionRecord[] {
   })
 }
 
-// --- capture (route-side, needs repo context) ------------------------
+// --- capture (needs repo access) -------------------------------------
 
 // Capture the current full row set for `kind` into a snapshot, then
 // prune older snapshots past the retention window. Returns the created
-// snapshot id (or null when there is nothing to snapshot — never the
-// case in practice since we capture before every apply). Call this
-// INSIDE the route, after loadForAction, BEFORE the mutation.
+// snapshot id. Routes call this after loadForAction and BEFORE the
+// mutation (passing c.var.repos); the admin ingest RPC core calls it
+// with deps.repos — takes the repo bag, not a Hono Context, so both
+// paths share it.
 export async function captureSnapshot(
-  c: Context<HonoApp>,
+  repos: Pick<Repos, 'eventArtists' | 'eventSessions' | 'eventSnapshots'>,
   eventId: string,
   kind: SnapshotKind,
   reason: string,
   userId: string,
 ): Promise<string> {
-  const repos = c.var.repos
   const data =
     kind === 'lineup'
       ? await repos.eventArtists.listForEvent(eventId)

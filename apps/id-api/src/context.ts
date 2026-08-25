@@ -5,14 +5,28 @@ import type { Services } from './services/types.js'
 import type { PasswordHasher } from './crypto/password.js'
 import type { SessionRecord } from './repos/session.js'
 import type { SessionCache } from './session/cache.js'
+import type { OAuthProviders } from './services/oauth/index.js'
 
 // Type-level extension of Hono's request context. Variables we
 // attach in middleware live in `Variables`.
 
 // SSO client identifier — must match the values in
-// CLIENT_ALLOWLIST in routes/sso.ts and the per-app key env names in
-// middleware/app-api-key.ts.
-export type AppApiKeyClient = 'events' | 'lists' | 'money' | 'planner'
+// CLIENT_ALLOWLIST in routes/sso.ts. Still in use as the
+// `RpcCallerContext.client` field on the `IdRPC` RPC methods so
+// callers can identify themselves to id-api for compartmentalisation
+// (e.g. an `events` caller may not exchange a `lists`-minted SSO
+// code). The legacy `appApiKeyClient` HonoVar + the
+// `requireAppApiKey` middleware that set it were removed in PR 3 of
+// feat/rpc-bindings.
+export type AppApiKeyClient =
+  | 'events'
+  | 'lists'
+  | 'money'
+  | 'planner'
+  | 'fitness'
+  | 'admin'
+  // ai-api's deletion sweep (listDeletedUserIds) — not an SSO client.
+  | 'ai'
 
 export type HonoVars = {
   env: Env
@@ -23,12 +37,7 @@ export type HonoVars = {
   passwordHasher: PasswordHasher
   sessionCache?: SessionCache
   session?: SessionRecord
-  // Set by requireAppApiKey middleware to the client identifier of
-  // the matched key. SDK handlers compare this against the resource's
-  // own client field (e.g. sso_codes.client) to enforce per-app
-  // compartmentalisation: an EVENTS key can't exchange a LISTS code.
-  // Phase 0 follow-up to issue #159.
-  appApiKeyClient?: AppApiKeyClient
+  oauthProviders: OAuthProviders
 }
 
 export type HonoApp = {

@@ -72,12 +72,14 @@ export interface ArtistDto {
   appleMusic: string | null
   youtubeMusic: string | null
   instagram: string | null
+  // Optional: older events-api deployments omit it during rollout.
+  genre?: string | null
 }
 
 export interface EventArtistDto {
   eventId: string
   artistId: string
-  dayId: string
+  dayId: string | null
   stageId: string | null
   tier: string | null
   genre: string | null
@@ -163,6 +165,15 @@ export interface CreatePersonalEventInput {
   ticketAccountEmail?: string | undefined
   /** Issue #545: true = all-day; false = timed; omit to let the server infer. */
   allDay?: boolean | undefined
+  /**
+   * Offline-create idempotency key (repo-wide "offline create retries
+   * must be idempotent" fix). Callers with an offline queue should pass
+   * a stable client-generated id (e.g. `tmp_<uuid>`) that survives
+   * retries; the server dedupes on (owner, ref) and returns the
+   * original event instead of creating a duplicate. Omit for un-keyed
+   * creates (duplicates allowed, matches historical behavior).
+   */
+  ref?: string | null | undefined
 }
 
 // Sparse patch of an owned personal event. Omitted = leave alone; `null`
@@ -449,11 +460,11 @@ export function createEventsClient(config: EventsClientConfig): EventsClient {
 
     // --- personal events (Slice 2) -----------------------------------
 
-    createPersonalEvent({ actor, name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay }) {
+    createPersonalEvent({ actor, name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay, ref }) {
       return request<PersonalEventDto>(
         'POST',
         '/api/v1/sdk/personal-events',
-        { name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay },
+        { name, description, startAt, endAt, locationLabel, ticketPlatform, ticketAccountEmail, allDay, ref },
         { 'x-actor': actor },
       )
     },

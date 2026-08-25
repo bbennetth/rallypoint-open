@@ -67,6 +67,7 @@ describe('D1 integration — lists read authz (#128)', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 

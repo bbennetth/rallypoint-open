@@ -1,45 +1,36 @@
-import { getSettings, patchSettings, SettingsError } from '@rallypoint/id-client'
-import type { UserId } from '@rallypoint/shared'
+import type { Service } from '@cloudflare/workers-types'
+import type { IdRPC } from '@rallypoint/id-api'
+import { SettingsError } from '@rallypoint/id-client'
 import type { SettingsClientService } from './types.js'
+import type { RpcReturn } from './_rpc.js'
 
-// Wraps the @rallypoint/id-client generic settings SDK, presenting
-// EVENTS_API_KEY as the caller and forwarding the session user as the
-// `x-actor` subject. RPID enforces the namespace access rule against the
-// app key's client ('events') plus the shared cross-app bag; this
-// wrapper just plumbs the bearer + subject through.
+// Delegates to the `Service<IdRPC>` binding's settings methods. The
+// `client: 'events'` caller hint is what id-api uses to enforce the
+// per-app namespace allowlist (events may access its own + the shared
+// `'shared'` bag); a `forbidden` result becomes the legacy
+// `SettingsError('forbidden')` so call sites keep their catch shape.
 
 export { SettingsError }
 
-export function createSettingsClientService(opts: {
-  apiBase: string
-  apiKey: string
-  // Optional fetch override — a Cloudflare service-binding fetcher when one
-  // is bound (RPID), else the global fetch. The id-client settings SDK
-  // accepts the override as `fetch`.
-  fetchImpl?: typeof fetch | undefined
-}): SettingsClientService {
-  // Spread `fetch` in only when present so the SDK's `fetch?` (no explicit
-  // `| undefined`) isn't handed undefined; absent → SDK global fetch.
-  const fetchOpt = opts.fetchImpl ? { fetch: opts.fetchImpl } : {}
+export function createSettingsClientService(binding: Service<IdRPC>): SettingsClientService {
   return {
     async get(userId, namespace) {
-      return getSettings({
-        baseUrl: opts.apiBase,
-        apiKey: opts.apiKey,
-        userId: userId as UserId,
-        namespace,
-        ...fetchOpt,
-      })
+      const result = (await binding.getSettings(userId, namespace, { client: 'events' })) as RpcReturn<
+        IdRPC['getSettings']
+      >
+      if (result.kind === 'forbidden') {
+        throw new SettingsError(403, 'forbidden', 'App may not access this settings namespace.')
+      }
+      return result.settings
     },
     async patch(userId, namespace, patch) {
-      return patchSettings({
-        baseUrl: opts.apiBase,
-        apiKey: opts.apiKey,
-        userId: userId as UserId,
-        namespace,
-        patch,
-        ...fetchOpt,
-      })
+      const result = (await binding.patchSettings(userId, namespace, patch, {
+        client: 'events',
+      })) as RpcReturn<IdRPC['patchSettings']>
+      if (result.kind === 'forbidden') {
+        throw new SettingsError(403, 'forbidden', 'App may not access this settings namespace.')
+      }
+      return result.settings
     },
   }
 }

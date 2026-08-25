@@ -90,6 +90,7 @@ describe('D1 integration — group short codes + join preview (#440)', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -280,6 +281,6 @@ describe('D1 integration — group short codes + join preview (#440)', () => {
       caught = err
     }
     expect(caught).toBeTruthy()
-    expect(String((caught as { constraintName?: string }).constraintName)).toContain('short_code')
+    expect(String((caught as { constraint?: string }).constraint)).toContain('short_code')
   })
 })

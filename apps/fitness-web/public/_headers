@@ -1,0 +1,31 @@
+# Security headers for fitness-web — issue #675 P2 bug sweep.
+# Format: Cloudflare Workers Assets `_headers` (per-path rules), modeled on
+# apps/www/_headers. Vite's default publicDir copies this into dist/, and
+# cf-deploy-app.yml copies dist/ -> apps/fitness-api/public (the Worker
+# assets dir) at deploy time — see apps/fitness-api/wrangler.toml [assets].
+#
+# Verify in production with:
+#   curl -sI https://health.rallypt.app/ | grep -iE 'strict|frame|content-type-opt|referrer|content-security'
+
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  # fitness-web talks to fitness-api same-origin at /api/v1/ui/* (relative
+  # fetches via apps/fitness-web/src/lib/api.ts's createCsrfClient); the
+  # only cross-origin traffic is a browser *navigation* (redirect) to
+  # id-web for SSO, which CSP connect-src does not gate. connect-src is
+  # 'self' plus the analytics hosts (PostHog via the t.rallypt.app reverse
+  # proxy).
+  # 'wasm-unsafe-eval' (issue #702): the food-logger barcode scanner
+  # instantiates the zxing-wasm reader on-device (iOS Safari + the live
+  # scanner). Browsers require this token in script-src to run
+  # WebAssembly.instantiate even for a same-origin binary; it does NOT
+  # re-enable JS eval(). The wasm is served same-origin from /assets/, so
+  # connect-src needs no extra host for it.
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://t.rallypt.app https://static.cloudflareinsights.com 'wasm-unsafe-eval' 'sha256-gopMjDnBwg9lxgEEjjCKPvnGp9H5dUVpXCM2gHFbW1k=' 'sha256-I1MFeOsgI3wsAmP0/m3jXRyE9uGUUL4SCBthQ8hKawU='; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://t.rallypt.app https://cloudflareinsights.com https://us.i.posthog.com https://*.i.posthog.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  # camera=(self) (issue #702): the live barcode scanner opens the rear
+  # camera via getUserMedia; a bare camera=() would hard-block it. Scoped
+  # to first-party only.
+  Permissions-Policy: accelerometer=(), camera=(self), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()

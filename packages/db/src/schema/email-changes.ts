@@ -37,5 +37,3 @@ export const emailChanges = sqliteTable(
     expiresIdx: index('email_changes_expires_idx').on(t.expiresAt),
   }),
 )
-
-export type DbEmailChange = typeof emailChanges.$inferSelect

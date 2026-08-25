@@ -1,9 +1,15 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { eventAttendees, groupInvites, groupMembers, groups } from '@rallypoint/events-db'
-import type { CreateGroupInput, GroupRecord, GroupRepo, PatchGroupInput } from '../types.js'
+import type {
+  CreateGroupInput,
+  GroupRecord,
+  GroupRepo,
+  GroupRole,
+  PatchGroupInput,
+} from '../types.js'
 import type { Db } from './db.js'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
 
 function rowToGroup(row: typeof groups.$inferSelect): GroupRecord {
@@ -100,6 +106,19 @@ export class D1GroupRepo implements GroupRepo {
       if (!out.has(r.eventId)) out.set(r.eventId, r.groupId)
     }
     return out
+  }
+
+  async listUserGroupsForEvent(
+    userId: string,
+    eventId: string,
+  ): Promise<{ group: GroupRecord; role: GroupRole }[]> {
+    const rows = await this.db
+      .select({ group: groups, role: groupMembers.role })
+      .from(groupMembers)
+      .innerJoin(groups, eq(groupMembers.groupId, groups.id))
+      .where(and(eq(groupMembers.userId, userId), eq(groups.eventId, eventId)))
+      .orderBy(asc(groupMembers.joinedAt))
+    return rows.map((r) => ({ group: rowToGroup(r.group), role: r.role as GroupRole }))
   }
 
   async listForEvent(eventId: string): Promise<GroupRecord[]> {

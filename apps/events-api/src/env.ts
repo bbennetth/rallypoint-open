@@ -23,21 +23,21 @@ const EnvSchema = z.object({
   EVENTS_UI_ORIGIN: z.string().url().default('http://localhost:5174'),
   SDK_CORS_ALLOWED_ORIGINS: z.string().default(''),
 
-  // Rallypoint ID coordinates. events-api uses these in slice 2
-  // when it starts consuming @rallypoint/id-client.
-  RPID_API_URL: z.string().url().default('http://localhost:8080'),
+  // Rallypoint ID UI origin — the in-browser id-web SPA. Required for the
+  // SSO mint flow (the browser is redirected here for sign-in).
+  // The companion `RPID_API_URL` / `LISTS_API_URL` / `MONEY_API_URL`
+  // server-to-server origins were retired in PR 3 of feat/rpc-bindings —
+  // events-api now reaches its sibling Workers via `Service<XRPC>`
+  // bindings, not HTTP.
   RPID_UI_URL: z.string().url().default('http://localhost:5173'),
 
-  // Base origin of lists-api, for the group-lists BFF proxy. events-api
-  // calls @rallypoint/lists-client against this server-to-server,
-  // presenting EVENTS_API_KEY to lists-api's /sdk/* gate.
-  LISTS_API_URL: z.string().url().default('http://localhost:8082'),
-
-  // Base origin of money-api, for the per-group ledger auto-attach +
-  // BFF read (design §8). events-api calls @rallypoint/money-client
-  // against this server-to-server, presenting EVENTS_API_KEY to
-  // money-api's /sdk/* gate (which already allowlists the events key).
-  MONEY_API_URL: z.string().url().default('http://localhost:8083'),
+  // Comma-separated user ids granted owner-equivalent access to
+  // system-owned events (events whose owner is the SYSTEM_USER_ID
+  // sentinel). Must be kept in lockstep with admin-api's
+  // ADMIN_USER_IDS (same secret value in the deploy pipeline) —
+  // drift means an admin can manage a system event via admin-web but
+  // 404 on it in events-web. Empty (default) → nobody.
+  ADMIN_USER_IDS: z.string().default(''),
 
   // Trust policy for IP-extraction headers (#33).
   //   legacy           — current behavior: leftmost XFF, then
@@ -57,27 +57,6 @@ const EnvSchema = z.object({
   TRUSTED_PROXY_HEADER: z
     .enum(['legacy', 'xff', 'cf-connecting-ip', 'none'])
     .default('legacy'),
-
-  // Bearer presented to RPID's EVENTS_API_KEY-gated SDK endpoints
-  // (/sdk/sso/exchange, /sdk/session/reauth). MUST match the value
-  // RPID's apps/id-api parses under the same name. Required in
-  // production; a dev default is supplied post-parse so the local
-  // stack boots without manual config (the local dev stack sets the same
-  // value on both services).
-  EVENTS_API_KEY: z
-    .string()
-    .min(32, 'EVENTS_API_KEY must be at least 32 characters (set a longer shared secret).')
-    .optional(),
-
-  // Key events-api ACCEPTS from the Planner BFF on the
-  // /api/v1/sdk/personal-events/* namespace (Slice 2). Optional in
-  // production — a deployment without Planner simply has no key and the
-  // namespace 404s (anti-fingerprint). A dev default is supplied
-  // post-parse so the local stack boots without manual config.
-  PLANNER_API_KEY: z
-    .string()
-    .min(32, 'PLANNER_API_KEY must be at least 32 characters (set a longer shared secret).')
-    .optional(),
 
   // Symmetric key material for sealing the RPID session bearer at
   // rest (crypto/encryption.ts). The active version is
@@ -116,13 +95,29 @@ const EnvSchema = z.object({
     .int()
     .min(60_000)
     .default(3 * 60 * 60 * 1000),
-  EVENTS_WEATHER_REFRESH_ENABLED: z.coerce.boolean().default(true),
 
   // HMAC key for short-lived realtime channel tokens (Phase 4). The Worker
   // mints a token after the read-authorization check; the RealtimeHub
   // Durable Object verifies it on WebSocket connect/refresh. Required in
   // production; dev default supplied post-parse.
   REALTIME_TOKEN_HMAC_KEY: z.string().min(32).optional(),
+
+  // Cloudflare AI Gateway id for the lineup-ingestion extraction calls
+  // (@rallypoint/ai runAiJson). Set in qa/prod wrangler vars; unset in
+  // dev → direct Workers AI call, no gateway logging.
+  AI_GATEWAY_ID: z.string().min(1).optional(),
+
+  // PostHog server-side error tracking. The project API key is a public
+  // `phc_…` write key (same class of value the web bundles ship), so it
+  // lives in wrangler.toml [vars], not secrets. Unset (local dev/FOSS) →
+  // exception capture is a no-op.
+  POSTHOG_KEY: z.string().min(1).optional(),
+  POSTHOG_HOST: z.string().url().optional(),
+  // Deploy target (qa/prod) — becomes the OTel
+  // `deployment.environment` resource attribute on forwarded logs.
+  // QA and prod share one PostHog project, so without it their logs
+  // are indistinguishable. Unset locally.
+  DEPLOY_ENV: z.enum(['qa', 'prod']).optional(),
 
   // Build metadata — set by the Dockerfile at image-build time.
   BUILD_VERSION: z.string().default('dev'),
@@ -137,14 +132,12 @@ type ParsedEnv = z.infer<typeof EnvSchema>
 // callers can treat them as non-optional.
 export type Env = Omit<
   ParsedEnv,
-  | 'EVENTS_API_KEY'
   | 'EVENTS_SESSION_KEY_V1'
   | 'REALTIME_TOKEN_HMAC_KEY'
   | 'EVENTS_SESSION_COOKIE_NAME'
   | 'EVENTS_CSRF_COOKIE_NAME'
   | 'EVENTS_SSO_STATE_COOKIE_NAME'
 > & {
-  EVENTS_API_KEY: string
   EVENTS_SESSION_KEY_V1: string
   REALTIME_TOKEN_HMAC_KEY: string
   EVENTS_SESSION_COOKIE_NAME: string
@@ -154,16 +147,9 @@ export type Env = Omit<
 
 // Dev-only fallbacks for the required secrets. Production refuses to boot
 // without explicit values; dev/test get a fixed stand-in so the local stack
-// and the test suite run unconfigured. Must match the local dev stack and
-// .env.example so the SSO exchange works even when an app is started
-// outside the dev stack (RPID and events-api must present the SAME key or RPID
-// 403s the exchange).
-const DEV_API_KEY = 'dev-events-api-key-do-not-use-in-production-32+chars'
+// and the test suite run unconfigured.
 const DEV_SESSION_KEY_V1 = 'dev-events-session-key-v1-000000000000'
 const DEV_REALTIME_TOKEN_HMAC_KEY = 'dev-realtime-token-hmac-key-0000000000000'
-// Dev default for the Planner BFF key (Slice 2). In production the key
-// is supplied explicitly or left absent (namespace 404s — intentional).
-const DEV_PLANNER_API_KEY = 'dev-planner-api-key-do-not-use-in-production-32+chars'
 
 export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const result = EnvSchema.safeParse(source)
@@ -176,14 +162,12 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = result.data
   const isProd = parsed.NODE_ENV === 'production'
 
-  const apiKey = parsed.EVENTS_API_KEY ?? (isProd ? undefined : DEV_API_KEY)
   const sessionKeyV1 =
     parsed.EVENTS_SESSION_KEY_V1 ?? (isProd ? undefined : DEV_SESSION_KEY_V1)
   const realtimeKey =
     parsed.REALTIME_TOKEN_HMAC_KEY ?? (isProd ? undefined : DEV_REALTIME_TOKEN_HMAC_KEY)
-  if (!apiKey || !sessionKeyV1 || !realtimeKey) {
+  if (!sessionKeyV1 || !realtimeKey) {
     const missing = [
-      !apiKey ? 'EVENTS_API_KEY' : null,
       !sessionKeyV1 ? 'EVENTS_SESSION_KEY_V1' : null,
       !realtimeKey ? 'REALTIME_TOKEN_HMAC_KEY' : null,
     ]
@@ -194,7 +178,6 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
   return {
     ...parsed,
-    EVENTS_API_KEY: apiKey,
     EVENTS_SESSION_KEY_V1: sessionKeyV1,
     REALTIME_TOKEN_HMAC_KEY: realtimeKey,
     EVENTS_SESSION_COOKIE_NAME:
@@ -205,9 +188,6 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
     EVENTS_SSO_STATE_COOKIE_NAME:
       parsed.EVENTS_SSO_STATE_COOKIE_NAME ??
       (isProd ? '__Host-rpe_sso_state' : 'rpe_sso_state'),
-    // Planner key: undefined in prod when not configured → namespace 404s.
-    // Dev gets a fixed stand-in so the local stack and tests have a working key.
-    PLANNER_API_KEY: parsed.PLANNER_API_KEY ?? (isProd ? undefined : DEV_PLANNER_API_KEY),
   }
 }
 

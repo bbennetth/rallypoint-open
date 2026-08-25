@@ -104,3 +104,42 @@ describe('key versioning', () => {
     )
   })
 })
+
+describe('key derivation (legacy SHA-256 vs HKDF)', () => {
+  it('keyVersion 1 stays on the legacy raw-SHA-256 derivation (old rows decrypt)', () => {
+    // Golden value: seal/unseal under V1 must keep working across
+    // releases — this pins the derivation, not just the round-trip.
+    // A V1 key derived any other way would fail GCM authentication.
+    const sealed = encryptBearer({ plaintext: PLAINTEXT, aad: AAD, env, keyVersion: 1 })
+    expect(decryptBearer({ ...sealed, aad: AAD, env })).toBe(PLAINTEXT)
+  })
+
+  it('keyVersion >= 2 derives a different key than raw SHA-256 of the same secret', () => {
+    // Same secret registered under V1 and V2: if V2 used the legacy
+    // derivation, a V1-sealed row would decrypt under V2. It must not.
+    const sharedEnv = {
+      CRYPTO_TEST_KEY_V1: 'same-secret-' + 'z'.repeat(32),
+      CRYPTO_TEST_KEY_V2: 'same-secret-' + 'z'.repeat(32),
+    }
+    const sealed = encryptBearer({ plaintext: PLAINTEXT, aad: AAD, env: sharedEnv, keyVersion: 1 })
+    expect(() =>
+      decryptBearer({ ...sealed, keyVersion: 2, aad: AAD, env: sharedEnv }),
+    ).toThrow()
+  })
+
+  it('HKDF derivation is domain-separated by prefix (two apps, same secret, different keys)', () => {
+    const otherCipher = createBearerCipher('OTHER_APP_KEY_V')
+    const secret = 'shared-secret-' + 'w'.repeat(32)
+    const envA = { CRYPTO_TEST_KEY_V2: secret }
+    const envB = { OTHER_APP_KEY_V2: secret }
+    const sealed = encryptBearer({ plaintext: PLAINTEXT, aad: AAD, env: envA, keyVersion: 2 })
+    expect(() =>
+      otherCipher.decryptBearer({ ...sealed, aad: AAD, env: envB }),
+    ).toThrow()
+  })
+
+  it('HKDF round-trips under keyVersion 2', () => {
+    const sealed = encryptBearer({ plaintext: PLAINTEXT, aad: AAD, env, keyVersion: 2 })
+    expect(decryptBearer({ ...sealed, aad: AAD, env })).toBe(PLAINTEXT)
+  })
+})

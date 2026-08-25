@@ -11,7 +11,7 @@ import './index.css'
 // during hydration.
 
 // Bootstrap analytics (no-op when VITE_POSTHOG_KEY is unset).
-initAnalytics()
+initAnalytics('rallypoint-id-web')
 
 const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('Root element #root missing from index.html')

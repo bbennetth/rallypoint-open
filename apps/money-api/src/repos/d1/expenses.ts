@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { expenseSplits, expenses } from '@rallypoint/money-db'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError, chunkForBoundParams } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
+import { EXPENSE_LIST_FOR_LEDGER_CAP } from '../types.js'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type {
   CreateExpenseInput,
@@ -67,12 +68,14 @@ export class D1ExpenseRepo implements ExpenseRepo {
         })
         .returning(),
     ]
-    if (input.splits.length > 0) {
+    // One insert statement per chunk keeps each under the D1 bound-param cap
+    // while staying inside the single atomic batch (4 params per split row).
+    for (const chunk of chunkForBoundParams(input.splits, 4)) {
       stmts.push(
         this.db
           .insert(expenseSplits)
           .values(
-            input.splits.map((s) => ({
+            chunk.map((s) => ({
               expenseId: input.id,
               userId: s.userId,
               amountCents: s.amountCents,
@@ -85,11 +88,7 @@ export class D1ExpenseRepo implements ExpenseRepo {
     try {
       const results = await this.db.batch(stmts)
       const expenseRow = (results[0] as typeof expenses.$inferSelect[])[0]!
-      // Collect splits from the batch result if we inserted them, or empty array.
-      const splitRows: typeof expenseSplits.$inferSelect[] =
-        input.splits.length > 0
-          ? (results[1] as typeof expenseSplits.$inferSelect[])
-          : []
+      const splitRows = (results.slice(1) as typeof expenseSplits.$inferSelect[][]).flat()
       // D1 batch doesn't guarantee ORDER BY on RETURNING; sort splits by userId
       // to match the PG impl's ordering.
       splitRows.sort((a, b) => (a.userId < b.userId ? -1 : 1))
@@ -142,17 +141,43 @@ export class D1ExpenseRepo implements ExpenseRepo {
       .from(expenses)
       .where(and(eq(expenses.ledgerId, ledgerId), isNull(expenses.deletedAt)))
       .orderBy(desc(expenses.spentAt), desc(expenses.id))
+      // Defensive cap so a runaway ledger can't return an unbounded result
+      // set (and materialize every split for it). The ledger-detail and
+      // balances views consume the whole list; if a ledger ever approaches
+      // this many active expenses it needs real pagination (follow-up).
+      .limit(EXPENSE_LIST_FOR_LEDGER_CAP)
     if (rows.length === 0) return []
-    const out: ExpenseWithSplits[] = []
-    for (const row of rows) {
-      const splits = await this.db
-        .select()
-        .from(expenseSplits)
-        .where(eq(expenseSplits.expenseId, row.id))
-        .orderBy(asc(expenseSplits.userId))
-      out.push({ ...rowToExpense(row), splits: splits.map(rowToSplit) })
+
+    // Fetch every split for the page in ONE query instead of N+1 (one
+    // SELECT per expense). Ordered by userId so per-expense grouping keeps
+    // the same stable order the single-expense reads use.
+    // Chunked to stay under the D1 bound-param cap (the page holds up to
+    // EXPENSE_LIST_FOR_LEDGER_CAP ids). Each expense's splits come wholly
+    // from the chunk containing its id, so per-chunk userId ordering
+    // preserves the per-expense order the single-expense reads use.
+    const ids = rows.map((r) => r.id)
+    const splitRows: (typeof expenseSplits.$inferSelect)[] = []
+    for (const chunk of chunkForBoundParams(ids, 1)) {
+      splitRows.push(
+        ...(await this.db
+          .select()
+          .from(expenseSplits)
+          .where(inArray(expenseSplits.expenseId, chunk))
+          .orderBy(asc(expenseSplits.userId))),
+      )
     }
-    return out
+
+    const splitsByExpense = new Map<string, ExpenseSplitRecord[]>()
+    for (const row of splitRows) {
+      const arr = splitsByExpense.get(row.expenseId) ?? []
+      arr.push(rowToSplit(row))
+      splitsByExpense.set(row.expenseId, arr)
+    }
+
+    return rows.map((row) => ({
+      ...rowToExpense(row),
+      splits: splitsByExpense.get(row.id) ?? [],
+    }))
   }
 
   async patch(id: string, fields: PatchExpenseInput): Promise<ExpenseRecord | null> {
@@ -195,15 +220,23 @@ export class D1ExpenseRepo implements ExpenseRepo {
   }
 
   async clearReceipt(id: string): Promise<{ priorObjectKey: string | null } | null> {
-    // Pre-fetch the prior key, then clear. Race-tolerant because two
-    // concurrent clears both land at null.
-    const prior = await this.db
+    // Batch the SELECT + UPDATE so both run in one D1 round-trip, preventing
+    // a concurrent upload landing between the read and write and having its
+    // key silently dropped by the trailing UPDATE. D1 batch runs statements
+    // sequentially in the same isolate tick; the SELECT sees the pre-update
+    // state and the UPDATE lands immediately after — there is no inter-
+    // statement gap for another request to slip through.
+    //
+    // In SQLite/D1, RETURNING reflects the NEW row values (post-SET), so
+    // we cannot use a single UPDATE…RETURNING to recover the prior key.
+    // Instead: batch([read, write]) — results[0] is the SELECT output
+    // (the prior key), results[1] is the UPDATE output (not used).
+    const selectStmt = this.db
       .select({ key: expenses.receiptObjectKey })
       .from(expenses)
       .where(eq(expenses.id, id))
-      .limit(1)
-    if (prior.length === 0) return null
-    await this.db
+      .limit(1) as unknown as BatchItem<'sqlite'>
+    const updateStmt = this.db
       .update(expenses)
       .set({
         receiptObjectKey: null,
@@ -211,7 +244,14 @@ export class D1ExpenseRepo implements ExpenseRepo {
         receiptBytes: null,
         updatedAt: new Date(),
       })
-      .where(eq(expenses.id, id))
+      .where(eq(expenses.id, id)) as unknown as BatchItem<'sqlite'>
+
+    const [selectResult] = await this.db.batch([selectStmt, updateStmt] as [
+      BatchItem<'sqlite'>,
+      BatchItem<'sqlite'>,
+    ])
+    const prior = (selectResult as { key: string | null }[])
+    if (prior.length === 0) return null
     return { priorObjectKey: prior[0]!.key ?? null }
   }
 }

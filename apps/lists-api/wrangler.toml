@@ -5,8 +5,7 @@
 # Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
 # CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
 # wrangler >=4.45 (bootstrap step creates rp-lists-{qa,prod} if absent).
-# Real secrets (LISTS_API_KEY, LISTS_SESSION_KEY_V1, REALTIME_TOKEN_HMAC_KEY,
-# EVENTS_API_KEY, PLANNER_API_KEY)
+# Real secrets (LISTS_SESSION_KEY_V1, REALTIME_TOKEN_HMAC_KEY)
 # via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step).
 
 name = "rallypoint-lists"
@@ -50,9 +49,21 @@ database_name = "rp-lists-local"
 database_id = "local-dev-unused"
 migrations_dir = "../../packages/lists-db/migrations"
 
+# Top-level service binding — required for cross-process RPC under
+# wrangler's local dev registry (PR 2 of feat/rpc-bindings). When
+# rallypoint-id is up under the same dev session, calls dispatch
+# RPC method-to-method.
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
 # ---- QA: lists.rallypt.dev ------------------------------------------
 [env.qa]
-vars = { NODE_ENV = "production", LISTS_UI_ORIGIN = "https://lists.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", LISTS_UI_ORIGIN = "https://lists.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
 [[env.qa.d1_databases]]
 binding = "DB"
@@ -74,6 +85,7 @@ class_name = "RealtimeHub"
 [[env.qa.services]]
 binding = "RPID"
 service = "rallypoint-id-qa"
+entrypoint = "IdRPC"
 
 [[env.qa.routes]]
 pattern = "lists.rallypt.dev"
@@ -81,7 +93,7 @@ custom_domain = true
 
 # ---- Prod: lists.rallypt.app ----------------------------------------
 [env.prod]
-vars = { NODE_ENV = "production", LISTS_UI_ORIGIN = "https://lists.rallypt.app", RPID_API_URL = "https://id.rallypt.app" }
+vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", LISTS_UI_ORIGIN = "https://lists.rallypt.app", RPID_API_URL = "https://id.rallypt.app", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
 [[env.prod.d1_databases]]
 binding = "DB"
@@ -97,6 +109,7 @@ class_name = "RealtimeHub"
 [[env.prod.services]]
 binding = "RPID"
 service = "rallypoint-id-prod"
+entrypoint = "IdRPC"
 
 [[env.prod.routes]]
 pattern = "lists.rallypt.app"

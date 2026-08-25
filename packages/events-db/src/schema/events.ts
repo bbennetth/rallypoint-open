@@ -46,6 +46,12 @@ export const events = sqliteTable(
     // Both are nullable plaintext — no secrets, no FK.
     ticketPlatform: text('ticket_platform'),
     ticketAccountEmail: text('ticket_account_email'),
+    // Offline-create idempotency key (repo-wide "offline create retries
+    // must be idempotent" fix, mirrors money-api's expense/settlement
+    // `ref`). Clients carry a stable `tmp_<uuid>` across retries and send
+    // it as `ref` on personal-event create; unique per owner via the
+    // partial index below. NULL for un-keyed creates (duplicates allowed).
+    ref: text('ref'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -59,6 +65,12 @@ export const events = sqliteTable(
     ownerIdx: index('events_owner_idx').on(t.ownerUserId),
     // Slice 2: backs listPersonalForUser queries (tenant + scope + owner + time).
     personalIdx: index('events_personal_idx').on(t.tenantId, t.scopeType, t.ownerUserId, t.startAt),
+    // Idempotent-create dedup key: one non-null `ref` per owner. Personal
+    // events are private to a single owner, so the index is scoped by
+    // owner_user_id (not tenant_id, unlike money's per-ledger settlement ref).
+    refUq: uniqueIndex('events_owner_ref_uq')
+      .on(t.ownerUserId, t.ref)
+      .where(sql`${t.ref} IS NOT NULL`),
   }),
 )
 

@@ -8,16 +8,17 @@ import {
   UpdateFieldDefSchema,
   UpdateListItemSchema,
   UpdateSeriesSchema,
+  resolveRecurrenceDues,
 } from '@rallypoint/lists-shared'
 import { eventTimezoneField } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
+import { parsePlannerPage } from './_page.js'
 import { proxyLists } from '../lib/sdk-error.js'
 import { listPersonalLists, resolveTasksList } from '../lib/personal-scope.js'
-import { resolveRecurrenceDues } from '../lib/recurrence-time.js'
-import { syncTaskNotification, type NotifiableTask } from '../lib/notifications.js'
+import { parseIanaTimezone, syncTaskNotification, type NotifiableTask } from '../lib/notifications.js'
 
 // Best-effort: keep a one-off task's scheduled push notification in sync with a
 // write. Only runs when the client passed a valid IANA `tz` (the Tasks UI
@@ -91,10 +92,26 @@ export const listsRoutes = new Hono<HonoApp>()
     // for a legacy recurring task series still surfacing in a tasks list.
     const tzParsed = eventTimezoneField.safeParse(c.req.query('tz') ?? 'UTC')
     if (!tzParsed.success) throw errors.validation({ tz: 'must be a valid IANA timezone' })
-    const items = await proxyLists(async () => {
+    const assertOwned = async (): Promise<void> => {
       const owned = await listPersonalLists(lists, actor)
       if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      return lists.listItems(listId)
+    }
+    // Opt-in pagination: `?limit=`/`?cursor=` switch to `{items, next_cursor}`;
+    // without them the legacy whole-array shape is preserved for planner-web.
+    const page = parsePlannerPage(c)
+    if (page) {
+      const result = await proxyLists(async () => {
+        await assertOwned()
+        return lists.listItemsPage(listId, actor, { limit: page.limit, cursor: page.cursor ?? null })
+      })
+      return c.json({
+        items: resolveRecurrenceDues(result.items, tzParsed.data),
+        next_cursor: result.nextCursor,
+      })
+    }
+    const items = await proxyLists(async () => {
+      await assertOwned()
+      return lists.listItems(listId, actor)
     })
     return c.json(resolveRecurrenceDues(items, tzParsed.data))
   })
@@ -112,7 +129,7 @@ export const listsRoutes = new Hono<HonoApp>()
     const defs = await proxyLists(async () => {
       const owned = await listPersonalLists(lists, actor)
       if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      return lists.listFieldDefs(listId)
+      return lists.listFieldDefs(listId, actor)
     })
     return c.json(defs)
   })
@@ -166,7 +183,7 @@ export const listsRoutes = new Hono<HonoApp>()
     const rows = await proxyLists(async () => {
       const owned = await listPersonalLists(lists, actor)
       if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      return lists.listSeries(listId)
+      return lists.listSeries(listId, actor)
     })
     return c.json(rows)
   })
@@ -202,7 +219,7 @@ export const listsRoutes = new Hono<HonoApp>()
     const updated = await proxyLists(async () => {
       const owned = await listPersonalLists(lists, actor)
       if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      const series = await lists.listSeries(listId)
+      const series = await lists.listSeries(listId, actor)
       if (!series.some((s) => s.id === seriesId)) throw errors.notFound('Series not found.')
       return lists.updateSeries(seriesId, parsed.data, actor)
     })
@@ -220,7 +237,7 @@ export const listsRoutes = new Hono<HonoApp>()
     await proxyLists(async () => {
       const owned = await listPersonalLists(lists, actor)
       if (!owned.some((l) => l.id === listId)) throw errors.notFound('List not found.')
-      const series = await lists.listSeries(listId)
+      const series = await lists.listSeries(listId, actor)
       if (!series.some((s) => s.id === seriesId)) throw errors.notFound('Series not found.')
       return lists.deleteSeries(seriesId, actor)
     })
@@ -237,7 +254,9 @@ export const listsRoutes = new Hono<HonoApp>()
     const parsed = CreateListItemSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const created = await proxyLists(() => lists.createListItem(listId, parsed.data, actor))
-    const tz = c.req.query('tz')
+    const rawTz = c.req.query('tz')
+    const tz = rawTz ? parseIanaTimezone(rawTz) : null
+    if (rawTz && !tz) c.var.logger.warn({ rawTz, itemId: created.id }, 'invalid tz on create-item; skipping notification sync')
     if (tz) await syncTaskNotificationSafe(c, actor, created, tz)
     return c.json(created, 201)
   })
@@ -253,7 +272,9 @@ export const listsRoutes = new Hono<HonoApp>()
     const updated = await proxyLists(() =>
       lists.updateListItem(listId, itemId, parsed.data, actor),
     )
-    const tz = c.req.query('tz')
+    const rawTz = c.req.query('tz')
+    const tz = rawTz ? parseIanaTimezone(rawTz) : null
+    if (rawTz && !tz) c.var.logger.warn({ rawTz, itemId: updated.id }, 'invalid tz on update-item; skipping notification sync')
     if (tz) await syncTaskNotificationSafe(c, actor, updated, tz)
     return c.json(updated)
   })

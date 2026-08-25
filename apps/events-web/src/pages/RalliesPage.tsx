@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { ConfirmDialog } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   createRally,
   deleteRally,
   getGroup,
   listDays,
-  listPois,
+  listGroupPois,
   listRallies,
   rsvpRally,
   type GroupDetailDto,
@@ -20,8 +22,8 @@ import {
 import { useRefreshBus } from '../lib/refresh-bus.js'
 import { useAttendeeOutlet } from '../ui/AttendeeChrome.js'
 
-// Group role ranks — writes (create/delete) need sidekick+, RSVP is a
-// per-member self-action. Mirrors the server-side gate.
+// Group role ranks — status changes and delete need sidekick+; creation
+// and RSVP are per-member self-actions. Mirrors the server-side gate.
 const ROLE_RANK: Record<GroupRole, number> = { owner: 3, sidekick: 2, member: 1 }
 const canWrite = (role: GroupRole | null): boolean => (role ? ROLE_RANK[role] >= 2 : false)
 
@@ -41,18 +43,23 @@ export function RalliesPage() {
   const { groupId } = useParams<{ groupId: string }>()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
 
+  const run = useAsyncTask()
   const load = useCallback(() => {
     if (!groupId) return
-    getGroup(groupId)
-      .then(async (group) => {
+    void run(async (ctx) => {
+      try {
+        const group = await getGroup(groupId)
         const [rallies, days, pois] = await Promise.all([
           listRallies(group.id),
           listDays(group.event_id).catch(() => [] as DayDto[]),
-          listPois(group.event_id).catch(() => [] as PoiDto[]),
+          // Group-scoped read: code-joined members have no event_members
+          // row, so the event-scoped listPois 404s for them.
+          listGroupPois(group.id).catch(() => [] as PoiDto[]),
         ])
+        if (ctx.stale()) return
         setState({ status: 'ready', group, rallies, days, pois })
-      })
-      .catch((err: unknown) => {
+      } catch (err) {
+        if (ctx.stale()) return
         if (err instanceof ApiError && err.status === 404) {
           setState({ status: 'error', code: 'not_found', message: 'Group not found.' })
         } else {
@@ -62,8 +69,9 @@ export function RalliesPage() {
             message: err instanceof Error ? err.message : 'Unknown error.',
           })
         }
-      })
-  }, [groupId])
+      }
+    })
+  }, [groupId, run])
 
   useEffect(() => {
     load()
@@ -87,8 +95,9 @@ export function RalliesPage() {
         <div
           className="max-w-md w-full p-4"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            color: 'var(--hot-text)',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           <h1 className="text-lg font-semibold text-[color:var(--ink)]">
@@ -124,7 +133,9 @@ export function RalliesPage() {
           <p className="text-[color:var(--ink-dim)] text-sm">Planned meet-ups for your group.</p>
         </header>
 
-        {writer && <CreateRallyForm groupId={group.id} days={days} pois={pois} onCreated={load} />}
+        {/* Creation is any member's action (relaxed from sidekick+ with the
+            attendee Map tab); status changes and delete stay writer-gated. */}
+        <CreateRallyForm groupId={group.id} days={days} pois={pois} onCreated={load} />
 
         {rallies.length === 0 ? (
           <p className="text-sm text-[color:var(--ink-dim)]">No rallies yet.</p>
@@ -201,8 +212,7 @@ function CreateRallyForm({
   return (
     <form
       onSubmit={submit}
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <h2 className="text-xs font-medium text-[color:var(--ink-mute)]">
         New rally
@@ -276,10 +286,14 @@ function CreateRallyForm({
   )
 }
 
-const RSVP_OPTIONS: { value: RallyRsvpStatus; label: string }[] = [
+// `activeBg` keeps the pre-Soft-Ink at-a-glance color signal: the .seg
+// recipe's uniform accent fill would make Maybe/Out read identical to
+// Going. Text on those fills uses var(--bg) (contextual, as before the
+// .seg conversion) — dark-navy-on-amber/red in dark mode keeps AA.
+const RSVP_OPTIONS: { value: RallyRsvpStatus; label: string; activeBg?: string }[] = [
   { value: 'going', label: 'Going' },
-  { value: 'maybe', label: 'Maybe' },
-  { value: 'out', label: 'Out' },
+  { value: 'maybe', label: 'Maybe', activeBg: 'var(--ev-warn)' },
+  { value: 'out', label: 'Out', activeBg: 'var(--hot)' },
 ]
 
 // Visual mapping for festival-planner-style rally cards. The status
@@ -322,6 +336,7 @@ function RallyCard({
   onChanged: () => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const dayLabel = rally.day_id ? days.find((d) => d.id === rally.day_id)?.day_label : null
   const poiName = rally.poi_id ? pois.find((p) => p.id === rally.poi_id)?.name : null
   const location = poiName ?? rally.location_label
@@ -337,7 +352,7 @@ function RallyCard({
   }
 
   const onDelete = () => {
-    if (!confirm(`Delete rally "${rally.title}"?`)) return
+    setConfirmingDelete(false)
     setBusy(true)
     deleteRally(groupId, rally.id)
       .then(() => onChanged())
@@ -348,8 +363,9 @@ function RallyCard({
     <li
       className="p-4 space-y-3"
       style={{
-        border: '1.5px solid var(--line)',
         borderLeft: `4px solid ${visual.accent}`,
+        borderRadius: 'var(--radius-lg)',
+        boxShadow: 'var(--shadow-card)',
         background: visual.tint,
         opacity: isCancelled ? 0.7 : 1,
       }}
@@ -372,13 +388,31 @@ function RallyCard({
                 fontSize: 9,
                 letterSpacing: '0.12em',
                 color: visual.accent,
-                border: `1px solid ${visual.accent}`,
+                background: `color-mix(in srgb, ${visual.accent} 16%, transparent)`,
+                borderRadius: 'var(--radius-round)',
                 padding: '0 5px',
                 lineHeight: '14px',
               }}
             >
               {visual.chipLabel}
             </span>
+            {rally.pin && (
+              <span
+                className="mono"
+                title={`Pinned on the map (${rally.pin.x_pct}%, ${rally.pin.y_pct}%)`}
+                style={{
+                  fontSize: 9,
+                  letterSpacing: '0.12em',
+                  color: 'var(--acid)',
+                  background: 'color-mix(in srgb, var(--acid) 16%, transparent)',
+                  borderRadius: 'var(--radius-round)',
+                  padding: '0 5px',
+                  lineHeight: '14px',
+                }}
+              >
+                MAP PIN
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap items-baseline gap-2 text-xs text-[color:var(--ink-dim)]">
             {rally.start_time && (
@@ -393,7 +427,7 @@ function RallyCard({
         </div>
         {writer && (
           <button
-            onClick={onDelete}
+            onClick={() => setConfirmingDelete(true)}
             disabled={busy}
             className="btn-hot disabled:opacity-50"
             style={{ width: 'auto' }}
@@ -401,6 +435,16 @@ function RallyCard({
             Delete
           </button>
         )}
+        <ConfirmDialog
+          open={confirmingDelete}
+          title="Delete rally?"
+          body={`Remove “${rally.title}” for everyone in the group.`}
+          confirmLabel="Delete"
+          confirmVariant="hot"
+          busy={busy}
+          onConfirm={onDelete}
+          onCancel={() => setConfirmingDelete(false)}
+        />
       </div>
 
       {rally.description && (
@@ -443,9 +487,9 @@ function RallyCard({
   )
 }
 
-// Segmented pill bar — three buttons joined into one control. The
-// active option fills with a status-appropriate accent; the others
-// stay outlined. Mirrors festival-planner's RSVP pattern.
+// Segmented pill bar — three buttons joined into one control via the
+// shared `.seg` recipe; the active option gets the accent fill + glow,
+// the others stay muted. Mirrors festival-planner's RSVP pattern.
 function RsvpPills({
   viewerRsvp,
   busy,
@@ -455,18 +499,9 @@ function RsvpPills({
   busy: boolean
   onPick: (s: RallyRsvpStatus) => void
 }) {
-  const accent: Record<RallyRsvpStatus, string> = {
-    going: 'var(--acid)',
-    maybe: 'var(--accent, #f59e0b)',
-    out: 'var(--hot)',
-  }
   return (
-    <div
-      role="radiogroup"
-      aria-label="RSVP"
-      style={{ display: 'inline-flex', border: '1.5px solid var(--line)' }}
-    >
-      {RSVP_OPTIONS.map((opt, i) => {
+    <div role="radiogroup" aria-label="RSVP" className="seg">
+      {RSVP_OPTIONS.map((opt) => {
         const active = viewerRsvp === opt.value
         return (
           <button
@@ -476,15 +511,11 @@ function RsvpPills({
             aria-checked={active}
             onClick={() => onPick(opt.value)}
             disabled={busy}
+            className={active ? 'on' : undefined}
             style={{
-              all: 'unset',
               cursor: busy ? 'progress' : 'pointer',
-              padding: '6px 12px',
-              fontSize: 12,
-              borderLeft: i === 0 ? 'none' : '1px solid var(--line)',
-              background: active ? accent[opt.value] : 'transparent',
-              color: active ? 'var(--bg)' : 'var(--ink-dim)',
               opacity: busy ? 0.5 : 1,
+              ...(active && opt.activeBg ? { background: opt.activeBg, color: 'var(--bg)' } : {}),
             }}
           >
             {opt.label}

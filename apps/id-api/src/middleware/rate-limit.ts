@@ -1,72 +1,63 @@
 import type { Context, MiddlewareHandler } from 'hono'
+import {
+  createRateLimit,
+  createApplyPerUserRateLimit,
+  createRateLimitBucket,
+} from '@rallypoint/api-kit'
+import type { RateLimitPolicy } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
-import { dailySalt, hashIp } from '../crypto/ip-hash.js'
+import { hashIp } from '../crypto/ip-hash.js'
+import { normalizeEmail } from '../lib/normalize-email.js'
 import { errors } from '../errors.js'
-import { extractIpFromContext } from '../http/extract-ip.js'
 
-// Per-route rate-limit middleware. The middleware figures out the
-// IP-based bucket key and (optionally) a per-user bucket key,
-// calls into the rate-limit repo for each, and 429s if any
-// bucket is exhausted. The repo handles atomic increments.
-//
-// V1 default policy (slice 2.5 documentation):
-//   - per-IP buckets are the default
-//   - per-user buckets only kick in when the handler upstream has
-//     already authenticated the user (slice 3a)
-//   - we don't apply rate-limit to GET /health or /api/v1/version
+// Per-route rate-limit. Shared implementation lives in @rallypoint/api-kit;
+// this app supplies its daily-salt env key + error factory. id-api's salt is
+// ARGON2_PEPPER (it has no <APP>_SESSION_KEY_V1).
+//   - Per-IP buckets are the default (this middleware).
+//   - Per-user buckets (applyPerUserRateLimit) kick in inside handlers that
+//     have already authenticated the user via requireSession.
+//   - Per-email buckets (applyPerEmailRateLimit) kick in inside the pre-auth
+//     handlers (signin/start, password-reset/request, signup) that carry an
+//     email but no session.
 
-export interface RateLimitPolicy {
-  route: string // short slug for the bucket key
-  perIp?: { limit: number; windowSeconds: number }
-  // perUser entries are applied by middleware in routes that have
-  // session-authenticated users (Slice 3a-onwards)
-  perUser?: { limit: number; windowSeconds: number }
+export type { RateLimitPolicy }
+
+const config = {
+  saltEnvKey: 'ARGON2_PEPPER',
+  errors: { rateLimited: errors.rateLimited },
 }
 
 export function rateLimit(policy: RateLimitPolicy): MiddlewareHandler<HonoApp> {
-  return async (c, next) => {
-    const ipPolicy = policy.perIp
-    if (ipPolicy) {
-      const ip = extractIpFromContext(c)
-      const salt = dailySalt(c.var.env.ARGON2_PEPPER)
-      const ipHash = hashIp(ip, salt)
-      const bucketKey = `ip:${ipHash}:${policy.route}`
-      const decision = await c.var.repos.rateLimit.takeToken({
-        tenantId: tenant(c),
-        bucketKey,
-        limit: ipPolicy.limit,
-        windowSeconds: ipPolicy.windowSeconds,
-      })
-      if (!decision.allowed) {
-        c.header('Retry-After', String(decision.retryAfterSeconds))
-        throw errors.rateLimited(decision.retryAfterSeconds, `ip:${policy.route}`)
-      }
-    }
-    // perUser is applied in the handler once session is attached;
-    // V1 routes that need it call applyPerUserRateLimit() directly.
-    await next()
-  }
+  return createRateLimit(config)(policy) as MiddlewareHandler<HonoApp>
 }
 
-export async function applyPerUserRateLimit(
+const applyPerUser = createApplyPerUserRateLimit(config)
+
+export function applyPerUserRateLimit(
   c: Context<HonoApp>,
   args: { userId: string; route: string; limit: number; windowSeconds: number },
 ): Promise<void> {
-  const bucketKey = `user:${args.userId}:${args.route}`
-  const decision = await c.var.repos.rateLimit.takeToken({
-    tenantId: tenant(c),
-    bucketKey,
+  return applyPerUser(c, args)
+}
+
+// Per-EMAIL rate limit for pre-auth endpoints. The bucket key hashes the
+// *normalized* email with the server pepper — NOT dailySalt(), which rotates
+// at UTC midnight and would reset the window mid-attack. sha256(pepper|email)
+// keeps raw email out of the rate_limits.bucket_key column while collapsing
+// casing/whitespace variants of one address onto one bucket. Hashing stays
+// local (id-specific pepper + normalization); only the take-token/429 tail is
+// shared via createRateLimitBucket.
+const emailBucket = createRateLimitBucket(config)
+
+export async function applyPerEmailRateLimit(
+  c: Context<HonoApp>,
+  args: { email: string; route: string; limit: number; windowSeconds: number },
+): Promise<void> {
+  const emailHash = hashIp(normalizeEmail(args.email), c.var.env.ARGON2_PEPPER)
+  await emailBucket(c, {
+    bucketKey: `email:${emailHash}:${args.route}`,
+    tag: `email:${args.route}`,
     limit: args.limit,
     windowSeconds: args.windowSeconds,
   })
-  if (!decision.allowed) {
-    c.header('Retry-After', String(decision.retryAfterSeconds))
-    throw errors.rateLimited(decision.retryAfterSeconds, `user:${args.route}`)
-  }
-}
-
-function tenant(_c: Context<HonoApp>): string {
-  // V1 single-tenant default. Phase C resolves tenant from
-  // sub-domain / OIDC claim / etc.
-  return 'rallypoint'
 }

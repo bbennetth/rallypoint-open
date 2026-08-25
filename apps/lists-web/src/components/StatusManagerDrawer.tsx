@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button, Drawer, useToast } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { STATUS_CATEGORIES, type StatusCategory } from '@rallypoint/lists-shared'
 import {
   ApiError,
@@ -50,24 +51,34 @@ export function StatusManagerDrawer({ open, onClose, listId, listName }: StatusM
   const [color, setColor] = useState<StatusColorKey>('slate')
   const [submitting, setSubmitting] = useState(false)
 
-  async function load() {
-    setState({ status: STATUS_LOADING })
-    try {
-      const page = await listStatuses(listId)
-      setState({ status: STATUS_READY, statuses: page.items })
-    } catch (err) {
-      setState({
-        status: STATUS_ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load statuses.',
-      })
-    }
-  }
+  // useAsyncTask (#675 R5): reopening the drawer against a different list
+  // re-fires this effect before the previous list's load settles — stale()
+  // drops that superseded commit instead of racing it against the new one.
+  const run = useAsyncTask()
+  const load = useCallback(
+    () =>
+      run(async (ctx) => {
+        setState({ status: STATUS_LOADING })
+        try {
+          const page = await listStatuses(listId)
+          if (ctx.stale()) return
+          setState({ status: STATUS_READY, statuses: page.items })
+        } catch (err) {
+          if (ctx.stale()) return
+          setState({
+            status: STATUS_ERROR,
+            message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load statuses.',
+          })
+        }
+      }),
+    [run, listId],
+  )
 
   useEffect(() => {
     if (!open) return
     void load()
     resetForm()
-  }, [open, listId])
+  }, [open, listId, load])
 
   function resetForm() {
     setName('')

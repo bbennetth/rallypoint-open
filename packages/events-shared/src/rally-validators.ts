@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { eventLatField, eventLngField, setTimeField } from './validators.js'
+import { eventLatField, eventLngField, setTimeField, MAP_LAYERS } from './validators.js'
 
 // Cross-target validators for the rally layer (Slice 9b). Same
 // field-builder style as group-validators.ts / validators.ts:
@@ -99,6 +99,49 @@ function refineCoords(
   }
 }
 
+// Map pin: a percentage position on one event map layer (attendee map
+// long-press creation). All three fields travel together — a partial
+// pin is meaningless, exactly like a lone lat or lng.
+export const rallyPinLayerField = z.enum(MAP_LAYERS, {
+  errorMap: () => ({ message: 'Pin layer must be site, camp, or full.' }),
+})
+const rallyPinPctField = (label: string) =>
+  z
+    .number()
+    .min(0, `${label} must be between 0 and 100.`)
+    .max(100, `${label} must be between 0 and 100.`)
+const mapPin = {
+  pinLayer: rallyPinLayerField.nullable().optional(),
+  pinXPct: rallyPinPctField('Pin X').nullable().optional(),
+  pinYPct: rallyPinPctField('Pin Y').nullable().optional(),
+}
+function refinePin(
+  v: {
+    pinLayer?: string | null | undefined
+    pinXPct?: number | null | undefined
+    pinYPct?: number | null | undefined
+  },
+  ctx: z.RefinementCtx,
+): void {
+  // Same travel-together contract as refineCoords: all three keys
+  // supplied together (so a PATCH can't half-clear a pin), and when
+  // supplied they agree on null-ness (all set = pinned, all null =
+  // cleared).
+  const keys = [v.pinLayer !== undefined, v.pinXPct !== undefined, v.pinYPct !== undefined]
+  const values = [
+    v.pinLayer !== undefined && v.pinLayer !== null,
+    v.pinXPct !== undefined && v.pinXPct !== null,
+    v.pinYPct !== undefined && v.pinYPct !== null,
+  ]
+  if (new Set(keys).size > 1 || new Set(values).size > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['pinLayer'],
+      message: 'Pin layer, x, and y must be provided together.',
+    })
+  }
+}
+
 // --- Request schemas -----------------------------------------------
 
 // Create a rally. title required; everything else optional. Location
@@ -116,8 +159,12 @@ export const CreateRallySchema = z
     locationLabel: rallyLocationLabelField,
     status: rallyStatusField.optional(),
     ...offMapCoords,
+    ...mapPin,
   })
-  .superRefine((v, ctx) => refineCoords(v, ctx))
+  .superRefine((v, ctx) => {
+    refineCoords(v, ctx)
+    refinePin(v, ctx)
+  })
 export type CreateRallyBody = z.infer<typeof CreateRallySchema>
 
 // Patch a rally. Every field optional; at least one must be present.
@@ -132,6 +179,7 @@ export const PatchRallySchema = z
     locationLabel: rallyLocationLabelField,
     status: rallyStatusField.optional(),
     ...offMapCoords,
+    ...mapPin,
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {
@@ -142,6 +190,7 @@ export const PatchRallySchema = z
       })
     }
     refineCoords(v, ctx)
+    refinePin(v, ctx)
   })
 export type PatchRallyBody = z.infer<typeof PatchRallySchema>
 

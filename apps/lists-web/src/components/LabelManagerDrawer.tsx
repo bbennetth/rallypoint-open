@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button, Drawer, useToast } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   createLabel,
@@ -38,25 +39,35 @@ export function LabelManagerDrawer({ open, onClose, listId, listName }: LabelMan
   const [color, setColor] = useState<StatusColorKey>('sky')
   const [submitting, setSubmitting] = useState(false)
 
-  async function load() {
-    setState({ status: LOADING })
-    try {
-      const page = await listLabels(listId)
-      setState({ status: READY, labels: page.items })
-    } catch (err) {
-      setState({
-        status: ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load labels.',
-      })
-    }
-  }
+  // useAsyncTask (#675 R5): reopening against a different list can
+  // supersede a still-in-flight load — stale() drops it instead of
+  // racing the newer commit.
+  const run = useAsyncTask()
+  const load = useCallback(
+    () =>
+      run(async (ctx) => {
+        setState({ status: LOADING })
+        try {
+          const page = await listLabels(listId)
+          if (ctx.stale()) return
+          setState({ status: READY, labels: page.items })
+        } catch (err) {
+          if (ctx.stale()) return
+          setState({
+            status: ERROR,
+            message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load labels.',
+          })
+        }
+      }),
+    [run, listId],
+  )
 
   useEffect(() => {
     if (!open) return
     void load()
     setName('')
     setColor('sky')
-  }, [open, listId])
+  }, [open, listId, load])
 
   function reportError(err: unknown, fallback: string) {
     toast({ tone: 'error', body: err instanceof ApiError ? err.message : fallback })

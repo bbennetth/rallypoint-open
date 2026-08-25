@@ -4,6 +4,7 @@ import { buildMemoryRepos } from '../repos/memory.js'
 import type { WebPushService } from '../services/types.js'
 import {
   cancelEventNotification,
+  deliverNotification,
   deliverToUser,
   notificationForChoreSeries,
   notificationForEvent,
@@ -12,8 +13,21 @@ import {
   syncChoreSeriesNotification,
   syncEventNotification,
   syncTaskNotification,
+  parseIanaTimezone,
   type NotifiableChoreSeries,
 } from './notifications.js'
+
+describe('parseIanaTimezone', () => {
+  it('accepts valid IANA names', () => {
+    expect(parseIanaTimezone('America/New_York')).toBe('America/New_York')
+    expect(parseIanaTimezone('UTC')).toBe('UTC')
+  })
+  it('rejects bogus / injected values', () => {
+    expect(parseIanaTimezone('Not/AZone')).toBeNull()
+    expect(parseIanaTimezone('')).toBeNull()
+    expect(parseIanaTimezone("'; DROP TABLE")).toBeNull()
+  })
+})
 
 const APP_URL = 'https://planner.rallypt.dev'
 const NOW = new Date('2026-06-17T12:00:00.000Z')
@@ -347,6 +361,189 @@ describe('runNotificationTick', () => {
     expect(result.due).toBe(1)
     expect(result.retired).toBe(1)
     expect(await repos.scheduledNotifications.listDue(drainAt, 10)).toHaveLength(0)
+  })
+
+  // ── PostHog semantic events (returned pure; the Worker ships them) ──
+
+  it('emits a per-user push_delivered event on success', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    await syncEventNotification(repos, 'user_a', { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false }, enqueue)
+
+    const result = await runNotificationTick(repos, fakeWebPush(ok), drainAt)
+
+    expect(result.events).toEqual([
+      {
+        name: 'push_delivered',
+        userId: 'user_a',
+        properties: {
+          source: 'event',
+          dedupeKey: 'event:event_1',
+          deviceCount: 1,
+          okCount: 1,
+          recurring: false,
+        },
+      },
+    ])
+  })
+
+  it('emits push_delivered with recurring:true for an advanced chore', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    const series: NotifiableChoreSeries = {
+      id: 'lse_1', title: 'Dishes', freq: 'daily', interval: 1, byDay: null,
+      dtstart: '2026-06-01', until: null, count: null, timeOfDay: '09:00',
+    }
+    await syncChoreSeriesNotification(repos, 'user_a', series, {
+      now: NOW, tz: 'UTC', appUrl: APP_URL, newId: () => 'psn_c',
+    })
+    const firstFire = new Date('2026-06-18T09:00:00.000Z')
+
+    const result = await runNotificationTick(repos, fakeWebPush(ok), firstFire)
+
+    expect(result.events).toHaveLength(1)
+    expect(result.events[0]).toMatchObject({ name: 'push_delivered', userId: 'user_a' })
+    expect(result.events[0]!.properties.recurring).toBe(true)
+  })
+
+  it('emits a push_subscription_reaped event on an expired subscription', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    await syncEventNotification(repos, 'user_a', { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false }, enqueue)
+
+    const result = await runNotificationTick(repos, fakeWebPush(expired), drainAt)
+
+    expect(result.events).toEqual([
+      {
+        name: 'push_subscription_reaped',
+        userId: 'user_a',
+        properties: { source: 'event', dedupeKey: 'event:event_1' },
+      },
+    ])
+  })
+
+  it('emits a push_failed event (with attempt count) on a transient failure', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    await syncEventNotification(repos, 'user_a', { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false }, enqueue)
+
+    const result = await runNotificationTick(repos, fakeWebPush(transient), drainAt)
+
+    expect(result.events).toEqual([
+      {
+        name: 'push_failed',
+        userId: 'user_a',
+        properties: { source: 'event', dedupeKey: 'event:event_1', attempts: 1, transientErrors: 1 },
+      },
+    ])
+  })
+
+  it('emits a push_gave_up event on the final (MAX_ATTEMPTS) transient failure', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    await syncEventNotification(repos, 'user_a', { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false }, enqueue)
+
+    let last
+    for (let i = 0; i < 5; i++) {
+      last = await runNotificationTick(repos, fakeWebPush(transient), drainAt)
+    }
+    expect(last!.events).toEqual([
+      {
+        name: 'push_gave_up',
+        userId: 'user_a',
+        properties: { source: 'event', dedupeKey: 'event:event_1', attempts: 5, transientErrors: 1 },
+      },
+    ])
+  })
+
+  it('emits no events when the user has no subscriptions (retire is not a delivery outcome)', async () => {
+    const repos = buildMemoryRepos()
+    await syncEventNotification(repos, 'user_a', { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false }, enqueue)
+
+    const result = await runNotificationTick(repos, fakeWebPush(ok), drainAt)
+
+    expect(result.events).toEqual([])
+  })
+})
+
+describe('deliverNotification (claim-before-send)', () => {
+  const enqueue = { now: NOW, appUrl: APP_URL, newId: () => 'psn_test' }
+  const drainAt = new Date(FUTURE)
+
+  async function seedDueEvent(repos: ReturnType<typeof buildMemoryRepos>) {
+    await seedSubscription(repos, 'user_a')
+    await syncEventNotification(
+      repos,
+      'user_a',
+      { id: 'event_1', name: 'Run', startAt: FUTURE, allDay: false },
+      enqueue,
+    )
+    const [record] = await repos.scheduledNotifications.listDue(drainAt, 10)
+    return record!
+  }
+
+  it('claims first: two concurrent deliveries of one row send exactly once', async () => {
+    const repos = buildMemoryRepos()
+    const record = await seedDueEvent(repos)
+    const webPush = fakeWebPush(ok)
+
+    // Both hold the same pre-send snapshot — the exact shape of two cron ticks
+    // overlapping. The atomic claim lets only one through.
+    const [a, b] = await Promise.all([
+      deliverNotification(repos, webPush, record, drainAt),
+      deliverNotification(repos, webPush, record, drainAt),
+    ])
+
+    expect([a.outcome, b.outcome].sort()).toEqual(['delivered', 'lost'])
+    expect(webPush.calls).toHaveLength(1)
+    expect(await repos.scheduledNotifications.listDue(drainAt, 10)).toHaveLength(0)
+  })
+
+  it('a reschedule that revives the row mid-send is not stomped by the stale failure', async () => {
+    const repos = buildMemoryRepos()
+    const record = await seedDueEvent(repos)
+    const newFireAt = new Date('2026-06-20T09:00:00.000Z')
+    // The (failing) send edits the event mid-flight → the upsert revives the
+    // same row (sentAt→null, attempts→0) at a new deadline.
+    const webPush = fakeWebPush(async () => {
+      await syncEventNotification(
+        repos,
+        'user_a',
+        { id: 'event_1', name: 'Run', startAt: newFireAt.toISOString(), allDay: false },
+        enqueue,
+      )
+      return transient()
+    })
+
+    const result = await deliverNotification(repos, webPush, record, drainAt)
+
+    // The stale failure misses its claim guard: the revived schedule survives.
+    expect(result.outcome).toBe('lost')
+    const due = await repos.scheduledNotifications.listDue(newFireAt, 10)
+    expect(due).toHaveLength(1)
+    expect(due[0]!.attempts).toBe(0)
+    expect(due[0]!.fireAt.toISOString()).toBe(newFireAt.toISOString())
+  })
+
+  it('advances a recurring row to its next occurrence after the claimed send', async () => {
+    const repos = buildMemoryRepos()
+    await seedSubscription(repos, 'user_a')
+    const series: NotifiableChoreSeries = {
+      id: 'lse_1', title: 'Dishes', freq: 'daily', interval: 1, byDay: null,
+      dtstart: '2026-06-01', until: null, count: null, timeOfDay: '09:00',
+    }
+    await syncChoreSeriesNotification(repos, 'user_a', series, {
+      now: NOW, tz: 'UTC', appUrl: APP_URL, newId: () => 'psn_c',
+    })
+    const firstFire = new Date('2026-06-18T09:00:00.000Z')
+    const [record] = await repos.scheduledNotifications.listDue(firstFire, 10)
+
+    const result = await deliverNotification(repos, fakeWebPush(ok), record!, firstFire)
+
+    expect(result).toMatchObject({ outcome: 'delivered', recurring: true, advanced: true })
+    const next = await repos.scheduledNotifications.listDue(new Date('2026-06-19T09:00:00.000Z'), 10)
+    expect(next).toHaveLength(1)
+    expect(next[0]!.fireAt.toISOString()).toBe('2026-06-19T09:00:00.000Z')
   })
 })
 

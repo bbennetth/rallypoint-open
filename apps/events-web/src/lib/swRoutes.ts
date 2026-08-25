@@ -22,3 +22,19 @@
 export function isCacheableImage(destination: string, pathname: string): boolean {
   return destination === 'image' && !pathname.startsWith('/api/')
 }
+
+// Public event pages (`/e/:slug`) are served by events-api, which
+// templates per-event og:* tags and the per-event PWA manifest link into
+// the SPA shell. That templating is why these navigations must not be
+// satisfied from the generic precached index.html.
+//
+// They are NOT, however, network-ONLY. Crawlers never execute service
+// workers and a first-ever visit has no worker registered, so neither
+// case can be served from cache anyway — meaning a cache fallback costs
+// the templating nothing. What it buys is a repeat/installed visitor on
+// no signal (a festival field) getting the last-seen page instead of the
+// browser's offline error. Hence NetworkFirst: always try the network,
+// fall back to cache only when it fails.
+export function isTemplatedNavigation(pathname: string): boolean {
+  return pathname === '/e' || pathname.startsWith('/e/')
+}

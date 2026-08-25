@@ -25,7 +25,7 @@ export function SeriesList({
     )
   }
   return (
-    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 7 }}>
+    <ul className="tk-rows">
       {series.map((sr) => (
         <li
           key={sr.id}

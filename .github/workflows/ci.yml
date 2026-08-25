@@ -9,9 +9,27 @@ on:
   # workflow), and `cf-deploy.yml` handles main pushes by deploying
   # the Workers to qa. Re-running the test suite on main would
   # just duplicate work and slow the merge-to-deploy hop.
+  # Deliberately NO paths-ignore. A PR whose changes all fall under
+  # paths-ignore counts as "no trigger fired" — the required status
+  # check never reports, and branch protection treats the missing
+  # result as a blocked merge. Instead, the `changes` job runs
+  # scripts/detect-affected.mjs (the same dependency-graph change
+  # detection cf-deploy.yml uses) and the `check` job gates its steps
+  # on the outputs: the job always runs and reports, but a docs-only
+  # PR skips everything past the migration lint, and code PRs skip
+  # the D1/workers suites of apps outside the change's reverse-
+  # dependency closure.
   pull_request:
     branches: [main, dev, feat/cf-migration]
   workflow_dispatch:
+
+# Cancel the in-flight CI run when the same PR gets a new commit.
+# Without this, every push to a PR queues another full run on top of
+# the previous one — burning minutes for a result we don't care about
+# anymore. The merge gate only needs the LATEST commit to be green.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   GITLEAKS_VERSION: 8.18.4
@@ -46,8 +64,56 @@ jobs:
             --redact \
             --verbose
 
+  # Compute which test suites this diff actually needs (see the header
+  # comment). Emits code_changed / docs_only plus one flag per workerd
+  # suite (d1_* / workers_tests / objstore_tests), derived from the
+  # workspace dependency graph in TEST mode: app→app edges are followed
+  # (a producer's exported types feed its consumers' compiles and
+  # stubs), unlike cf-deploy.yml's deploy mode which prunes them.
+  changes:
+    name: detect affected
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      code_changed: ${{ steps.f.outputs.code_changed }}
+      docs_only: ${{ steps.f.outputs.docs_only }}
+      d1_id: ${{ steps.f.outputs.d1_id }}
+      d1_lists: ${{ steps.f.outputs.d1_lists }}
+      d1_events: ${{ steps.f.outputs.d1_events }}
+      d1_money: ${{ steps.f.outputs.d1_money }}
+      d1_planner: ${{ steps.f.outputs.d1_planner }}
+      d1_fitness: ${{ steps.f.outputs.d1_fitness }}
+      d1_admin: ${{ steps.f.outputs.d1_admin }}
+      d1_ai: ${{ steps.f.outputs.d1_ai }}
+      workers_tests: ${{ steps.f.outputs.workers_tests }}
+      objstore_tests: ${{ steps.f.outputs.objstore_tests }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Full history so origin/<base> is available to diff against.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      - id: f
+        name: Detect affected suites
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          if [ -n "$BASE_REF" ]; then
+            # PR: the checkout is the merge ref (base + PR merged), so a
+            # two-dot diff against the base tip is exactly the PR's changes.
+            node scripts/detect-affected.mjs --mode ci --base "origin/$BASE_REF" --github-output
+          else
+            # workflow_dispatch: no base to diff against — run everything.
+            node scripts/detect-affected.mjs --mode ci --all --github-output
+          fi
+
   check:
     name: lint + typecheck + test
+    needs: changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,46 +136,122 @@ jobs:
           BASE_REF="${{ github.base_ref }}"
           bash scripts/check-migrations.sh "${BASE_REF:+origin/$BASE_REF}"
 
+      # Everything past the migration lint is gated on code_changed —
+      # a docs-only PR ends here (the job itself still runs, so the
+      # required status check reports green; see the header comment).
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: needs.changes.outputs.code_changed == 'true'
         with:
           node-version: 22
+          # `cache: npm` caches ~/.npm (the download cache) — separate from
+          # the `**/node_modules` cache step below. Both layers help: the
+          # download cache skips network round-trips, the node_modules
+          # cache skips extraction entirely on a hit.
           cache: npm
 
       # Match CI's npm major to the one that authors package-lock.json (npm 11).
       # node 22 bundles npm 10, which idealizes the workspace tree differently
       # and rejects the npm-11 lockfile as out of sync, breaking `npm ci` (#426).
-      - run: npm install -g npm@11
+      - if: needs.changes.outputs.code_changed == 'true'
+        run: npm install -g npm@11
+
+      # node_modules cache — `npm ci` takes ~30-60s without it (the tarball
+      # extraction is most of the cost). Keyed on the lockfile + the runner
+      # OS + node major; bump the prefix to bust the cache if extraction
+      # behavior drifts. Workspace `node_modules/` directories are captured
+      # by the `**/node_modules` glob.
+      - name: Cache node_modules
+        id: cache-node-modules
+        if: needs.changes.outputs.code_changed == 'true'
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-v1-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
       # Use `npm ci` (not `npm install`) so a package.json/lock drift fails
       # CI here rather than slipping through to the `npm ci` in cf-deploy.yml
       # and breaking the qa deploy (a green CI must guarantee a deployable tree).
-      - run: npm ci --no-audit --no-fund
+      # Skipped entirely on a node_modules cache hit — saves ~30-60s.
+      - name: Install dependencies
+        if: needs.changes.outputs.code_changed == 'true' && steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit --no-fund
 
-      - run: npm run lint
+      # tsc --build incremental cache. `tsc --build` writes a per-project
+      # .tsbuildinfo manifest of source-file fingerprints; on the next run
+      # it skips re-emitting projects whose inputs are unchanged. Caching
+      # those files means a no-op typecheck completes in ~1-2s instead of
+      # ~10-15s. Keyed on the workspace tree to invalidate when sources change.
+      - name: Cache tsc build outputs
+        if: needs.changes.outputs.code_changed == 'true'
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            **/.tsbuildinfo
+            packages/*/dist
+          key: tsbuildinfo-v1-${{ runner.os }}-${{ hashFiles('**/tsconfig.json', 'apps/**/*.ts', 'apps/**/*.tsx', 'packages/**/*.ts', 'packages/**/*.tsx') }}
+          # Restore from any tsbuildinfo cache on partial-match — incremental
+          # builds tolerate stale dist; tsc re-emits only what's changed.
+          restore-keys: |
+            tsbuildinfo-v1-${{ runner.os }}-
 
-      - run: npm run typecheck
+      # Lint, typecheck, and the flat node-pool vitest suite run on ANY
+      # code change — they're whole-repo tools (eslint config, tsc
+      # project references) and the fast tier; per-directory scoping
+      # would create a new silent-miss class for little saving.
+      - if: needs.changes.outputs.code_changed == 'true'
+        run: npm run lint
 
-      - run: npm run test
+      - if: needs.changes.outputs.code_changed == 'true'
+        run: npm run typecheck
+
+      - if: needs.changes.outputs.code_changed == 'true'
+        run: npm run test
 
       # Cloudflare-runtime tests run in a workerd isolate (Miniflare), a
-      # separate pool from the node-pool `npm run test` above:
+      # separate pool from the node-pool `npm run test` above. Each suite
+      # is gated on its app being in the diff's reverse-dependency
+      # closure (TEST mode: app→app type edges followed) — the expensive
+      # per-suite Miniflare bootstrap is where selective running pays.
       #   test:d1      — id-api D1 repo contract tests (#313 Phase 2)
       #   test:workers — RealtimeHub Durable Object tests (#313 Phase 3)
-      - run: npm run test:d1
+      - if: needs.changes.outputs.d1_id == 'true'
+        run: npm run test:d1
 
       # lists-api D1 integration tests (route-level, Miniflare D1 pool)
-      - run: npm run test:d1:lists
+      - if: needs.changes.outputs.d1_lists == 'true'
+        run: npm run test:d1:lists
 
       # events-api D1 integration tests (route-level, Miniflare D1 pool)
-      - run: npm run test:d1:events
+      - if: needs.changes.outputs.d1_events == 'true'
+        run: npm run test:d1:events
 
       # money-api D1 integration tests (route-level, Miniflare D1 pool)
-      - run: npm run test:d1:money
+      - if: needs.changes.outputs.d1_money == 'true'
+        run: npm run test:d1:money
 
       # planner-api D1 integration tests (route-level, Miniflare D1 pool)
-      - run: npm run test:d1:planner
+      - if: needs.changes.outputs.d1_planner == 'true'
+        run: npm run test:d1:planner
 
-      - run: npm run test:workers
+      # fitness-api D1 integration tests (route-level, Miniflare D1 pool)
+      - if: needs.changes.outputs.d1_fitness == 'true'
+        run: npm run test:d1:fitness
+
+      # admin-api D1 integration tests (route-level, Miniflare D1 pool)
+      - if: needs.changes.outputs.d1_admin == 'true'
+        run: npm run test:d1:admin
+
+      # ai-api D1 integration tests (was missing from CI entirely before
+      # the selective-running change — the script existed unused)
+      - if: needs.changes.outputs.d1_ai == 'true'
+        run: npm run test:d1:ai
+
+      - if: needs.changes.outputs.workers_tests == 'true'
+        run: npm run test:workers
 
       # object-store R2 binding tests (real Miniflare R2 bucket, #409)
-      - run: npm run test:objstore
+      - if: needs.changes.outputs.objstore_tests == 'true'
+        run: npm run test:objstore

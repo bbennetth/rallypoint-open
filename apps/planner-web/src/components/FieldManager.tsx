@@ -143,7 +143,7 @@ export function FieldManager({ listId, defs, onChanged }: FieldManagerProps) {
       <h2 style={{ fontSize: 14, margin: 0, color: 'var(--ink)' }}>Custom fields</h2>
 
       {error && (
-        <div role="alert" style={{ color: 'var(--danger, #c0392b)', fontSize: 13 }}>
+        <div role="alert" style={{ color: 'var(--hot-text)', fontSize: 13 }}>
           {error}
         </div>
       )}
@@ -227,7 +227,7 @@ export function FieldManager({ listId, defs, onChanged }: FieldManagerProps) {
               </option>
             ))}
           </select>
-          <button type="submit" className="btn-brutal" style={{ width: 'auto' }} disabled={busy}>
+          <button type="submit" className="btn-brutal fit" disabled={busy}>
             Add field
           </button>
         </div>

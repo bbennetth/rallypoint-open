@@ -17,8 +17,9 @@ import { PLANNER_SESSION_BEARER_PREFIX } from '../middleware/session.js'
 // stubbed at the services layer: rpidSso.exchange returns a canned user
 // record; idClient.verifyRpidBearer echoes the decrypted bearer as the
 // user id, so a session row sealed with plaintext=<userId> resolves to
-// that user. CSRF is satisfied with a matched cookie+header pair; no
-// Origin header is sent (allowed — same as a same-origin GET).
+// that user. CSRF is satisfied with a matched cookie+header pair; an
+// Origin header matching PLANNER_UI_ORIGIN is sent on all state-changing
+// requests (E1 #19 — require-Origin gate).
 
 const CSRF = 'csrf_token_value_aaaaaaaaaaaaaaaaaaaaaaaaaa'
 
@@ -108,6 +109,7 @@ describe('D1 integration — planner SSO + session surface', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${csrfCookiePair()}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
     }
   }
 
@@ -146,6 +148,7 @@ describe('D1 integration — planner SSO + session surface', () => {
         'content-type': 'application/json',
         cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
+        origin: env.PLANNER_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'test-code-123', state: stateNonce }),
     })
@@ -182,6 +185,7 @@ describe('D1 integration — planner SSO + session surface', () => {
         cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
         'x-forwarded-for': knownIp,
+        origin: env.PLANNER_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'test-code-iphash', state: stateNonce }),
     })
@@ -213,6 +217,7 @@ describe('D1 integration — planner SSO + session surface', () => {
         'content-type': 'application/json',
         cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=correct-state; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
+        origin: env.PLANNER_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'any-code', state: 'wrong-state' }),
     })
@@ -234,6 +239,7 @@ describe('D1 integration — planner SSO + session surface', () => {
         'content-type': 'application/json',
         cookie: `${env.PLANNER_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
+        origin: env.PLANNER_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'consumed-code', state: stateNonce }),
     })
@@ -502,7 +508,7 @@ describe('D1 integration — planner SSO + session surface', () => {
     signoutRpidBearer.mockClear()
     const res = await app.request('http://localhost/api/v1/ui/signout', {
       method: 'POST',
-      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF },
+      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF, origin: env.PLANNER_UI_ORIGIN },
     })
     expect(res.status).toBe(204)
     expect(signoutRpidBearer).not.toHaveBeenCalled()

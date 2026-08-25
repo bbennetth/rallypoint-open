@@ -3,37 +3,51 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- Pre-hydration theme boot: set the Ink dual-axis (data-mode/data-color)
-         + legacy data-theme + meta theme-color from the persisted
-         `rallypt-theme` blob before first paint (#287, #379). Script body
-         is the single source of truth exported as THEME_BOOT_SOURCE from
-         @rallypoint/ui — the parity test asserts this matches exactly (#380).
-         DO NOT edit this script here; change THEME_BOOT_SOURCE instead. -->
-    <script>
-      ;(function () {
-        try {
-          var s = JSON.parse(localStorage.getItem('rallypt-theme') || '{}').state || {}
-          var m = s.mode || s.theme
-          m = m === 'light' || m === 'dark' ? m : 'dark'
-          var c =
-            ['blue', 'orange', 'purple', 'pink', 'red', 'green'].indexOf(s.color) >= 0
-              ? s.color
-              : 'blue'
-          var el = document.documentElement
-          el.dataset.mode = m
-          el.dataset.color = c
-          el.dataset.theme = m
-          var meta = document.getElementById('theme-color')
-          if (meta) meta.setAttribute('content', m === 'light' ? '#ffffff' : '#0b1b2b')
-        } catch (e) {}
-      })()
+    <!-- The marketing site is dark-only (Soft Ink design handoff) — no
+         theme toggle, no pre-hydration theme boot. -->
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b1b2b" />
+    <title>Rallypoint — Planner, Health & Events in One Account</title>
+    <!-- Site-level SEO defaults. Per-route title/description/canonical/OG
+         are swapped at runtime by src/ui/Seo.tsx; keep the copy here in
+         sync with ROUTE_META['/'] in src/seo.ts. Crawlers and unfurlers
+         that don't run JS see these defaults. -->
+    <meta
+      name="description"
+      content="Rallypoint is an offline-ready, open-source suite that shares one account: a fast daily Planner, a Health training log, and an Events workspace for your crew — plus Cmd."
+    />
+    <link rel="canonical" href="https://rallypt.app/" />
+    <link rel="icon" href="/icons/rallypt.svg" type="image/svg+xml" />
+    <link rel="icon" href="/icons/rallypt-192.png" sizes="192x192" type="image/png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Rallypoint" />
+    <meta property="og:title" content="Rallypoint — Planner, Health & Events in One Account" />
+    <meta
+      property="og:description"
+      content="Plan your day, log your training, run your events — offline-ready, open source, one Rallypoint ID."
+    />
+    <meta property="og:url" content="https://rallypt.app/" />
+    <meta property="og:image" content="https://rallypt.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Rallypoint — Planner, Health & Events in One Account" />
+    <meta
+      name="twitter:description"
+      content="Plan your day, log your training, run your events — offline-ready, open source, one Rallypoint ID."
+    />
+    <meta name="twitter:image" content="https://rallypt.app/og.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Rallypoint",
+        "url": "https://rallypt.app",
+        "logo": "https://rallypt.app/icons/rallypt-512.png",
+        "sameAs": ["https://github.com/bbennetth/rallypoint-open"]
+      }
     </script>
-    <meta name="color-scheme" content="dark light" />
-    <!-- theme-color id lets the boot script and applyThemeToDom update the
-         Android Chrome address-bar tint to match the active chassis (#379).
-         Default is the dark chassis bg; the boot script overrides for light. -->
-    <meta name="theme-color" id="theme-color" content="#0b1b2b" />
-    <title>Rallypoint</title>
   </head>
   <body>
     <div id="root"></div>

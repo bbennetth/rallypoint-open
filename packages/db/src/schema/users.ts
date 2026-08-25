@@ -25,6 +25,13 @@ export const users = sqliteTable(
     // The publicly exposed picture URL is computed from this (a stable id-api
     // route that 302-redirects to a short-lived presigned GET), never stored.
     avatarKey: text('avatar_key'),
+    // Account-lockout bookkeeping. failed_signin_count is the number of
+    // consecutive wrong-password /signin/start attempts; locked_until (ms
+    // epoch, nullable) is set once the count crosses the threshold and the
+    // account is refused — with a generic failure, so lockout stays
+    // enumeration-safe. Both reset on a correct password.
+    failedSigninCount: integer('failed_signin_count').notNull().default(0),
+    lockedUntil: integer('locked_until', { mode: 'timestamp_ms' }),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -37,6 +44,3 @@ export const users = sqliteTable(
     tenantEmailIdx: uniqueIndex('users_tenant_email_idx').on(t.tenantId, t.email),
   }),
 )
-
-export type DbUser = typeof users.$inferSelect
-export type DbUserInsert = typeof users.$inferInsert

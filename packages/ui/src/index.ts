@@ -21,6 +21,14 @@ export { Button } from './components/Button.js'
 export type { ButtonProps, ButtonVariant } from './components/Button.js'
 export { Field } from './components/Field.js'
 export type { FieldProps } from './components/Field.js'
+export { CheckboxField } from './components/CheckboxField.js'
+export type { CheckboxFieldProps } from './components/CheckboxField.js'
+export { ImagePickerField } from './components/ImagePickerField.js'
+export type {
+  ImagePickerFieldProps,
+  ImagePickerStatus,
+  ImagePickerVariant,
+} from './components/ImagePickerField.js'
 export { Banner } from './components/Banner.js'
 export type { BannerProps, BannerTone } from './components/Banner.js'
 export { BrandLockup } from './components/BrandLockup.js'
@@ -31,6 +39,21 @@ export { initials, avatarBackground } from './lib/initials.js'
 export type { InitialsInput } from './lib/initials.js'
 export { PullToRefresh } from './components/PullToRefresh.js'
 export type { PullToRefreshProps } from './components/PullToRefresh.js'
+export { SwUpdateBanner } from './components/SwUpdateBanner.js'
+export type { SwUpdateBannerProps } from './components/SwUpdateBanner.js'
+
+// Ink MVP-handoff primitives (shared mobile sub-bar + small accent FAB)
+// — single source of truth for the kit's `.rp-subbar` / `.rp-fab` chrome.
+// Pair `<SubBar><SubBarSeg/><SubBarSeg/><Fab anchor="subbar" /></SubBar>`
+// for tab-internal section switching, or `<Fab anchor="float" />` solo.
+export { SubBar } from './components/SubBar.js'
+export type { SubBarProps } from './components/SubBar.js'
+export { SubBarSeg } from './components/SubBarSeg.js'
+export type { SubBarSegProps } from './components/SubBarSeg.js'
+export { Fab } from './components/Fab.js'
+export type { FabProps } from './components/Fab.js'
+export { pickFabAnchor } from './lib/fab-anchor.js'
+export type { FabAnchor } from './lib/fab-anchor.js'
 
 // Phase 5 primitives (platform/v-1.1 events redesign)
 export { EmptyState } from './components/EmptyState.js'
@@ -52,6 +75,12 @@ export {
 export type { Toast, ToastInput } from './store/toast.js'
 export { ConfirmDialog } from './components/ConfirmDialog.js'
 export type { ConfirmDialogProps } from './components/ConfirmDialog.js'
+
+// Soft Ink swipe-action rows (#762 PR3) — touch swipe / desktop hover /
+// keyboard focus reveal of row edit+delete actions. Pure gesture math in
+// lib/swipe-actions.ts (kept unexported, like swipe-nav).
+export { SwipeActions } from './components/SwipeActions.js'
+export type { SwipeActionsProps, SwipeAction } from './components/SwipeActions.js'
 
 // Phase 5 pure-logic helpers (exposed so apps can drive controlled
 // table sort state or build custom toast-like surfaces).
@@ -123,9 +152,17 @@ export type {
   ScrollWakeupContainer,
   ScrollWakeupTrigger,
 } from './hooks/useViewportHeight.js'
+export { useFilePicker } from './hooks/useFilePicker.js'
+export type { FilePicker, UseFilePickerOptions } from './hooks/useFilePicker.js'
+export { useMobileViewport } from './hooks/useMobileViewport.js'
 
 // Lib
 export { detectStandalone } from './lib/standalone.js'
+export {
+  MOBILE_VIEWPORT_MAX,
+  MOBILE_VIEWPORT_QUERY,
+  isMobileViewport,
+} from './lib/breakpoints.js'
 export {
   captureEmbeddedShell,
   isEmbeddedShell,

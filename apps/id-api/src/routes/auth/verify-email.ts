@@ -2,6 +2,7 @@ import { VerifyEmailRequestSchema } from '@rallypoint/shared'
 import { errors, ApiError } from '../../errors.js'
 import { hashToken, tokenHasPrefix } from '@rallypoint/crypto'
 import { dailySalt, hashIp, hashUserAgent } from '../../crypto/ip-hash.js'
+import { emailDomain } from '../../lib/email-domain.js'
 import { TOKEN_PREFIXES } from '@rallypoint/shared'
 import type { Repos } from '../../repos/types.js'
 
@@ -144,15 +145,20 @@ export async function handleVerifyEmail(
     })
   }
 
-  await ctx.repos.users.setEmailVerified(user.id, true)
-  await ctx.repos.emailVerifications.markConsumed(tokenHash, now())
+  // Flip emailVerified AND consume the token in one db.batch() so a crash
+  // can't leave the account verified with a replayable token (or vice versa).
+  await ctx.repos.userAuth.confirmEmailVerification({
+    userId: user.id,
+    tokenHash,
+    when: now(),
+  })
   await ctx.repos.audit.write({
     tenantId: user.tenantId,
     eventType: 'email_verification.consumed',
     userId: user.id,
     ipHash,
     uaHash,
-    meta: { email: user.email },
+    meta: { email_domain: emailDomain(user.email) },
   })
 
   return { ok: true, email: user.email }

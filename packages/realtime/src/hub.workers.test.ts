@@ -116,6 +116,26 @@ describe('RealtimeHub', () => {
     expect(sock.closeCode).toBe(1008)
   })
 
+  it('drops an oversized inbound message before parsing it', async () => {
+    const channel = 'lists:list:lst_oversized'
+    const sock = await openSocket(channel, mintChannelToken({ channel, key: KEY }))
+
+    // Shape that WOULD close the socket (invalid refresh token, cf. the
+    // test above), padded past the 4 KB inbound cap. If the size guard
+    // fires first the message is dropped unparsed, so the socket is not
+    // closed — proving the guard runs before JSON.parse / verify.
+    const oversized = JSON.stringify({
+      type: 'token',
+      token: 'not-valid',
+      pad: 'x'.repeat(5000),
+    })
+    expect(oversized.length).toBeGreaterThan(4096)
+    sock.ws.send(oversized)
+    await tick()
+
+    expect(sock.closeCode).toBeNull()
+  })
+
   it('the alarm sweep closes a socket whose token has lapsed', async () => {
     const channel = 'lists:list:lst_sweep'
     // Valid at connect (exp ~1.2s out) but not refreshed; lapses shortly.

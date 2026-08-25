@@ -7,6 +7,12 @@
 import type { RateLimitRepo } from '@rallypoint/rate-limit'
 export type { RateLimitRepo }
 
+// Defensive upper bound on ExpenseRepo.listForLedger. Both consumer views
+// (ledger detail + balances) read the whole list, so the D1 and in-memory
+// impls both cap here until real pagination lands — shared so the doubles
+// can't drift.
+export const EXPENSE_LIST_FOR_LEDGER_CAP = 500
+
 // --- ledgers ---------------------------------------------------------
 
 // owner_user_id holds a Rallypoint ID `user_<ulid>`; scope_id holds an
@@ -62,10 +68,24 @@ export interface LedgerRepo {
   // Soft-delete: stamp deletedAt. Idempotent — re-soft-deleting a
   // tombstone is a no-op. Returns true when the row was found.
   softDelete(id: string, when: Date): Promise<boolean>
-  // Hand owner_user_id over to a new user.
+  // Hand owner_user_id over to a new user. UPDATE-only — callers must
+  // coordinate the ledger_members swap themselves. Prefer
+  // transferOwnershipAtomic for the full owner-swap dance.
   transferOwnership(input: {
     ledgerId: string
     newOwnerUserId: string
+  }): Promise<LedgerRecord | null>
+  // Atomic owner swap (audit E2 #6): demote the new owner's existing
+  // member row, hand the role over on the ledger, and add the old
+  // owner back as a member — all in one D1 batch so a mid-flow crash
+  // can't leave the old owner without access AND without a member row.
+  // Returns the updated ledger row; null when the ledger is missing /
+  // soft-deleted.
+  transferOwnershipAtomic(input: {
+    ledgerId: string
+    newOwnerUserId: string
+    oldOwnerUserId: string
+    oldOwnerMemberId: string
   }): Promise<LedgerRecord | null>
 }
 
@@ -225,13 +245,18 @@ export interface RecordLedgerActivityInput {
   meta?: Record<string, unknown>
 }
 
+export interface LedgerActivityPage {
+  items: LedgerActivityRecord[]
+  nextCursor: string | null
+}
+
 export interface LedgerActivityRepo {
   record(input: RecordLedgerActivityInput): Promise<void>
-  // Newest first. Used by the owner-facing audit view.
+  // Newest first, cursor-paged. Used by the owner-facing audit view.
   listForLedger(
     ledgerId: string,
-    opts?: { limit?: number },
-  ): Promise<LedgerActivityRecord[]>
+    opts?: { limit?: number; cursor?: string | null },
+  ): Promise<LedgerActivityPage>
 }
 
 // --- expenses + expense_splits --------------------------------------
@@ -386,6 +411,9 @@ export interface SettlementRecord {
   settledAt: string // YYYY-MM-DD
   createdBy: string
   createdAt: Date
+  // Optional client-supplied idempotency key (audit E2 #7). Null for
+  // un-keyed settlements (legacy + opted-out callers).
+  ref: string | null
 }
 
 export interface CreateSettlementInput {
@@ -397,11 +425,19 @@ export interface CreateSettlementInput {
   note?: string | null
   settledAt: string
   createdBy: string
+  // Optional idempotency key (audit E2 #7). When set, repo enforces
+  // uniqueness on (ledgerId, ref) — a retried create with the same
+  // tuple returns the existing row instead of creating a duplicate.
+  ref?: string | null
 }
 
 export interface SettlementRepo {
   create(input: CreateSettlementInput): Promise<SettlementRecord>
   findById(id: string): Promise<SettlementRecord | null>
+  // Idempotent lookup by client-supplied ref (audit E2 #7). Returns
+  // the existing settlement when (ledgerId, ref) already has a row;
+  // null when nothing matches.
+  findByRef(ledgerId: string, ref: string): Promise<SettlementRecord | null>
   // All settlements for a ledger, newest settled_at first.
   listForLedger(ledgerId: string): Promise<SettlementRecord[]>
   // Hard delete — settlements have no soft-delete column. The

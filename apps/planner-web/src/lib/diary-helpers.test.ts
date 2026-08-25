@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   choiceLabel,
   dataPointFields,
+  entryTimeLabel,
   findMoodField,
   formatEntryDate,
   formatFieldValue,
+  isDayOnlyDueDate,
   sortDiaryEntries,
   ymdFromDueDate,
 } from './diary-helpers.js'
@@ -102,6 +104,29 @@ describe('sortDiaryEntries', () => {
     sortDiaryEntries(input)
     expect(input.map((e) => e.id)).toEqual(['a', 'b'])
   })
+
+  it('orders by the LOCAL day for timed entries, matching the day heading', () => {
+    // A late-evening timed entry on local Jun 13: west of UTC its instant
+    // crosses into Jun 14 UTC, so a raw-string sort would rank it above the
+    // Jun 14 day-only entry it displays below. Local-parts construction keeps
+    // the assertion deterministic in any runner timezone.
+    const lateJun13 = entry({ id: 'late13', dueDate: new Date(2026, 5, 13, 23, 30).toISOString() })
+    const dayOnly14 = entry({ id: 'day14', dueDate: '2026-06-14T00:00:00.000Z' })
+    expect(sortDiaryEntries([lateJun13, dayOnly14]).map((e) => e.id)).toEqual(['day14', 'late13'])
+  })
+
+  it('within one day: day-only first, then timed newest-first', () => {
+    const dayOnly = entry({ id: 'dayOnly', dueDate: '2026-06-13T00:00:00.000Z' })
+    const morning = entry({ id: 'morning', dueDate: new Date(2026, 5, 13, 9, 0).toISOString() })
+    const evening = entry({ id: 'evening', dueDate: new Date(2026, 5, 13, 20, 0).toISOString() })
+    // The timed entries' local day must match the day-only entry's UTC-slice
+    // day for this scenario; both derivations yield 2026-06-13 here.
+    expect(sortDiaryEntries([morning, dayOnly, evening]).map((e) => e.id)).toEqual([
+      'dayOnly',
+      'evening',
+      'morning',
+    ])
+  })
 })
 
 describe('choiceLabel', () => {
@@ -150,13 +175,68 @@ describe('formatFieldValue', () => {
   })
 })
 
+describe('isDayOnlyDueDate', () => {
+  it('treats null as day-only', () => {
+    expect(isDayOnlyDueDate(null)).toBe(true)
+  })
+
+  it('treats a raw date string (optimistic outbox row) as day-only', () => {
+    expect(isDayOnlyDueDate('2026-06-13')).toBe(true)
+  })
+
+  it('treats exactly midnight-UTC as day-only (legacy stored shape)', () => {
+    expect(isDayOnlyDueDate('2026-06-13T00:00:00.000Z')).toBe(true)
+    expect(isDayOnlyDueDate('2026-06-13T00:00:00Z')).toBe(true)
+  })
+
+  it('treats any other instant as timed', () => {
+    expect(isDayOnlyDueDate('2026-06-13T20:30:00.000Z')).toBe(false)
+    expect(isDayOnlyDueDate('2026-06-13T00:15:00.000Z')).toBe(false)
+  })
+})
+
 describe('ymdFromDueDate', () => {
-  it('slices the UTC date part', () => {
+  it('slices the UTC date part for day-only entries', () => {
     expect(ymdFromDueDate('2026-06-13T00:00:00.000Z')).toBe('2026-06-13')
+  })
+
+  it('round-trips a raw date string (optimistic outbox row)', () => {
+    expect(ymdFromDueDate('2026-06-13')).toBe('2026-06-13')
   })
 
   it('returns empty string for null', () => {
     expect(ymdFromDueDate(null)).toBe('')
+  })
+
+  it('resolves timed entries to the LOCAL calendar day', () => {
+    // Construct the instant from local wall-clock parts so the assertion is
+    // deterministic in any runner timezone: an entry written at local
+    // 2026-06-13 20:30 must always render on 2026-06-13, even when its UTC
+    // date part differs (the west-of-UTC evening-entry day-shift bug).
+    const instant = new Date(2026, 5, 13, 20, 30).toISOString()
+    expect(ymdFromDueDate(instant)).toBe('2026-06-13')
+  })
+})
+
+describe('entryTimeLabel', () => {
+  it('is null for day-only and missing dues (never a fake "12:00 AM")', () => {
+    expect(entryTimeLabel(null)).toBeNull()
+    expect(entryTimeLabel('2026-06-13')).toBeNull()
+    expect(entryTimeLabel('2026-06-13T00:00:00.000Z')).toBeNull()
+  })
+
+  it('formats a timed entry as a local 12-hour label', () => {
+    // Local-parts construction keeps this deterministic across runner tzs.
+    expect(entryTimeLabel(new Date(2026, 5, 13, 20, 30).toISOString())).toBe('8:30 PM')
+    expect(entryTimeLabel(new Date(2026, 5, 13, 9, 5).toISOString())).toBe('9:05 AM')
+  })
+
+  it('degrades gracefully on a malformed instant', () => {
+    // Has a 'T' so it misses the day-only sentinel, but doesn't parse: the
+    // label suppresses rather than rendering "Invalid Date"; the day falls
+    // back to the raw slice.
+    expect(entryTimeLabel('2026-06-13Tgarbage')).toBeNull()
+    expect(ymdFromDueDate('2026-06-13Tgarbage')).toBe('2026-06-13')
   })
 })
 

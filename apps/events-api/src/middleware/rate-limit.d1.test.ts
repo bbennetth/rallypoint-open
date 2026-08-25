@@ -35,6 +35,8 @@ function exchangeHeaders(state: string, ip?: string): Record<string, string> {
     ].join('; '),
     'x-rp-csrf': CSRF,
     'content-type': 'application/json',
+    // Default EVENTS_UI_ORIGIN in test mode (parseEnv default).
+    origin: 'http://localhost:5174',
   }
   if (ip) h['x-forwarded-for'] = ip
   return h
@@ -200,6 +202,7 @@ describe('D1 integration — rate limiting', () => {
     return {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 

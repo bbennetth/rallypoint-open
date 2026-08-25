@@ -35,7 +35,7 @@ export const recurringRoutes = new Hono<HonoApp>()
       const lists = await listPersonalTaskLists(listsClient, actor)
       const perList = await Promise.all(
         lists.map(async (list) => {
-          const seriesRows = await listsClient.listSeries(list.id)
+          const seriesRows = await listsClient.listSeries(list.id, actor)
           return seriesRows.map((s) => {
             const next = materializeOccurrences(
               {

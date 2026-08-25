@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto'
 
 // Authenticated encryption-at-rest for an SSO session bearer that a
 // peer app must replay to RPID's verifySession() (design doc §3.13).
@@ -6,9 +6,13 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 // hash — this secret has to come back out in plaintext, so it cannot
 // be hashed. We seal it with AES-256-GCM:
 //
-//   - Key: SHA-256(<keyEnvPrefix><n>) → exactly 32 bytes. Deriving via
-//     SHA-256 means we don't trust the env var to be exactly 32 bytes
-//     wide; any sufficiently-random secret works.
+//   - Key: derived from the `<keyEnvPrefix><n>` env secret. keyVersion 1
+//     is legacy raw SHA-256(secret) (kept so existing V1 rows still
+//     decrypt); keyVersion >= 2 uses HKDF-SHA256 with a fixed salt and
+//     `<keyEnvPrefix><n>` as the info string, giving per-app/per-version
+//     domain separation (two apps sharing a secret no longer share a
+//     key). Rotating an app to _V2 opts it into HKDF with no data
+//     migration — sealed bearers are short-lived and re-issued.
 //   - Nonce: 12 fresh random bytes per encryption (GCM's standard IV
 //     width). Stored per row; never reused under a given key.
 //   - AAD: the row's id_hash. Binds the ciphertext to its row so a
@@ -23,6 +27,11 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 // The key env prefix is the only per-app difference (events-api uses
 // EVENTS_SESSION_KEY_V, lists-api LISTS_SESSION_KEY_V, …), so each app
 // binds its prefix once via createBearerCipher().
+
+// HKDF salt for keyVersion >= 2 derivations. A fixed, public salt is
+// fine for HKDF (it's a domain separator, not a secret); changing it
+// would invalidate every >= V2 key, so treat it as frozen.
+const HKDF_SALT = 'rallypoint/bearer-cipher/hkdf-v1'
 
 const NONCE_BYTES = 12
 const TAG_BYTES = 16
@@ -58,7 +67,13 @@ export function createBearerCipher(keyEnvPrefix: string): BearerCipher {
     if (!secret) {
       throw new Error(`Missing encryption key ${keyEnvPrefix}${keyVersion}`)
     }
-    return createHash('sha256').update(secret, 'utf8').digest()
+    if (keyVersion <= 1) {
+      // Legacy derivation — V1 rows in every app are keyed this way.
+      return createHash('sha256').update(secret, 'utf8').digest()
+    }
+    return Buffer.from(
+      hkdfSync('sha256', Buffer.from(secret, 'utf8'), HKDF_SALT, `${keyEnvPrefix}${keyVersion}`, 32),
+    )
   }
 
   return {

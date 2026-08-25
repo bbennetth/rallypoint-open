@@ -95,9 +95,14 @@ describe('planLineupImport', () => {
     expect(p.errors[0]).toMatchObject({ line: 2, message: 'Artist is required.' })
   })
 
-  it('flags a missing required column', () => {
-    const p = plan('artist,stage\nA,Main')
-    expect(p.errors[0]!.message).toMatch(/Missing required column "day"/)
+  it('flags a missing artist column; a missing day column imports as TBA', () => {
+    const noArtist = plan('day,stage\nDay 1,Main')
+    expect(noArtist.errors[0]!.message).toMatch(/Missing required column "artist"/)
+
+    const noDay = plan('artist,stage\nA,Main')
+    expect(noDay.errors).toEqual([])
+    expect(noDay.rows).toHaveLength(1)
+    expect(noDay.rows[0]).toMatchObject({ dayId: null, dayLabel: 'TBA' })
   })
 
   it('rejects duplicate artist+day rows', () => {

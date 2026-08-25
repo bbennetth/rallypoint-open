@@ -112,6 +112,7 @@ export const eventsRoutes = new Hono<HonoApp>()
         ...(body.ticketPlatform != null ? { ticketPlatform: body.ticketPlatform } : {}),
         ...(body.ticketAccountEmail != null ? { ticketAccountEmail: body.ticketAccountEmail } : {}),
         ...(body.allDay !== undefined ? { allDay: body.allDay } : {}),
+        ...(body.ref != null ? { ref: body.ref } : {}),
       }),
     )
     await syncEventNotificationSafe(c, actor, created)
@@ -179,7 +180,11 @@ export const eventsRoutes = new Hono<HonoApp>()
     const events = c.var.services.eventsClient
 
     const formData = await c.req.formData()
-    const file = formData.get('file')
+    // `@cloudflare/workers-types` and `@types/node` both declare a global
+    // FormData; their merge drops File from FormData.get()'s return type (it
+    // resolves to `string | null`). The runtime value is a real File for
+    // uploads, so widen the type back before the instanceof guard below.
+    const file = formData.get('file') as File | string | null
     const fileNameRaw = formData.get('fileName')
 
     if (!(file instanceof File)) {

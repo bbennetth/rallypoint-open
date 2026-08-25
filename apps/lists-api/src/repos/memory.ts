@@ -60,7 +60,7 @@ import type {
   ListItemCommentRepo,
   UpdateListItemCommentInput,
 } from './types.js'
-import { UniqueConstraintError } from './errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 
 // In-memory repo impls for unit tests and local stubbing. They mirror
 // the Postgres impls' observable behaviour (soft-delete filtering,
@@ -272,6 +272,18 @@ export class MemoryListItemRepo implements ListItemRepo {
   private byId = new Map<string, ListItemRecord>()
 
   async create(input: CreateListItemInput): Promise<ListItemRecord> {
+    const ref = input.ref ?? null
+    // Mirror the D1 partial-unique index (lists_items_list_ref_uq): a
+    // second create with the same (listId, ref) — live OR soft-deleted —
+    // is a constraint violation, not a silent duplicate. Keeps the
+    // contract tests honest across both backends.
+    if (ref !== null) {
+      const clash = [...this.byId.values()].some(
+        (i) => i.listId === input.listId && i.ref === ref,
+      )
+      if (clash) throw new UniqueConstraintError('lists_items_list_ref_uq')
+    }
+
     const now = new Date()
     const position =
       input.position ??
@@ -299,6 +311,7 @@ export class MemoryListItemRepo implements ListItemRepo {
       customFields: input.customFields ?? {},
       position,
       seriesId: null,
+      ref,
       createdBy: input.createdBy,
       createdAt: now,
       updatedAt: now,
@@ -310,6 +323,13 @@ export class MemoryListItemRepo implements ListItemRepo {
 
   async findById(id: string): Promise<ListItemRecord | null> {
     const r = this.byId.get(id)
+    return r ? { ...r } : null
+  }
+
+  // Idempotent-create lookup (offline create-retry dedup). Spans
+  // soft-deleted rows — matches the D1 partial-unique index semantics.
+  async findByListAndRef(listId: string, ref: string): Promise<ListItemRecord | null> {
+    const r = [...this.byId.values()].find((i) => i.listId === listId && i.ref === ref)
     return r ? { ...r } : null
   }
 
@@ -337,6 +357,32 @@ export class MemoryListItemRepo implements ListItemRepo {
     const sorted = applyItemSort(filtered, opts.sort ?? [])
     const capped = opts.limit !== undefined ? sorted.slice(0, opts.limit) : sorted
     return capped.map((i) => ({ ...i }))
+  }
+
+  async listPageForList(
+    listId: string,
+    opts: { limit: number; cursor: { position: number; createdAt: Date; id: string } | null },
+  ): Promise<ListItemRecord[]> {
+    const ordered = [...this.byId.values()]
+      .filter((i) => i.listId === listId && i.deletedAt === null)
+      .sort((a, b) => {
+        if (a.position !== b.position) return a.position - b.position
+        const at = a.createdAt.toISOString()
+        const bt = b.createdAt.toISOString()
+        if (at !== bt) return at < bt ? -1 : 1
+        return a.id < b.id ? -1 : 1
+      })
+    const after = opts.cursor
+      ? ordered.filter((i) => {
+          const c = opts.cursor!
+          if (i.position !== c.position) return i.position > c.position
+          const it = i.createdAt.getTime()
+          const ct = c.createdAt.getTime()
+          if (it !== ct) return it > ct
+          return i.id > c.id
+        })
+      : ordered
+    return after.slice(0, opts.limit).map((i) => ({ ...i }))
   }
 
   // Apply a sparse patch to an in-place record. Shared by update() and
@@ -763,6 +809,17 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
     actor: string,
     tenantId: string,
   ): Promise<ListItemSeriesRecord> {
+    const ref = input.ref ?? null
+    // Mirror the D1 partial-unique index (lists_series_list_ref_uq): a
+    // second create with the same (listId, ref) — live OR soft-deleted —
+    // is a constraint violation, not a silent duplicate.
+    if (ref !== null) {
+      const clash = [...this.bySeries.values()].some(
+        (s) => s.listId === listId && s.ref === ref,
+      )
+      if (clash) throw new UniqueConstraintError('lists_series_list_ref_uq')
+    }
+
     const now = new Date()
     const seriesId = `lse_${ulid()}`
     const todayISO = new Date().toISOString().slice(0, 10)
@@ -782,6 +839,7 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
       until: input.until ?? null,
       count: input.count ?? null,
       timeOfDay: input.timeOfDay ?? null,
+      ref,
       createdBy: actor,
       createdAt: now,
       updatedAt: now,
@@ -825,6 +883,9 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
           dueDate,
           customFields: {} as Record<string, unknown>,
           position,
+          // Occurrence items are generated, not directly created by a
+          // caller-supplied ref — only the series row itself carries one.
+          ref: null,
           createdBy: actor,
           createdAt: now,
           updatedAt: now,
@@ -849,6 +910,13 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
 
   async findById(id: string): Promise<ListItemSeriesRecord | null> {
     const r = this.bySeries.get(id)
+    return r ? { ...r } : null
+  }
+
+  // Idempotent-create lookup (offline create-retry dedup). Spans
+  // soft-deleted rows — matches the D1 partial-unique index semantics.
+  async findByListAndRef(listId: string, ref: string): Promise<ListItemSeriesRecord | null> {
+    const r = [...this.bySeries.values()].find((s) => s.listId === listId && s.ref === ref)
     return r ? { ...r } : null
   }
 
@@ -945,6 +1013,7 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
           dueDate,
           customFields: {} as Record<string, unknown>,
           position,
+          ref: null,
           createdBy: r.createdBy,
           createdAt: now,
           updatedAt: now,
@@ -1048,23 +1117,24 @@ export class MemoryListStatusRepo implements ListStatusRepo {
     createdBy: string,
     seeds: { id: string; name: string; color: string; category: StatusCategory }[],
   ): Promise<ListStatusRecord[]> {
-    const out: ListStatusRecord[] = []
+    // Audit E2 #11: matches the D1 INSERT OR IGNORE semantics — a row
+    // whose id is already present in the map is a no-op (the prior
+    // create() would have overwritten it; now we skip on collision).
     for (let i = 0; i < seeds.length; i++) {
       const s = seeds[i]!
-      out.push(
-        await this.create({
-          id: s.id,
-          tenantId,
-          listId,
-          name: s.name,
-          color: s.color,
-          category: s.category,
-          position: i,
-          createdBy,
-        }),
-      )
+      if (this.byId.has(s.id)) continue
+      await this.create({
+        id: s.id,
+        tenantId,
+        listId,
+        name: s.name,
+        color: s.color,
+        category: s.category,
+        position: i,
+        createdBy,
+      })
     }
-    return out
+    return this.listForList(listId)
   }
 
   async update(id: string, fields: UpdateListStatusInput): Promise<ListStatusRecord | null> {
@@ -1103,6 +1173,17 @@ export class MemoryListStatusRepo implements ListStatusRepo {
       })
       count++
     }
+    return count
+  }
+
+  async reassignItemsAndSoftDelete(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+    when: Date,
+  ): Promise<number> {
+    const count = await this.reassignItems(listId, fromStatusId, to)
+    await this.softDelete(fromStatusId, when)
     return count
   }
 }

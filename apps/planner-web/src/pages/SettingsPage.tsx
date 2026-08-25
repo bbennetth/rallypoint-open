@@ -1,20 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ACCENT_HEX, COLORS_ORDER, useThemeStore, type Theme } from '@rallypoint/ui'
 import { NAV } from '../ui/nav.js'
 import { useTabOrder, setTabOrder, orderNav } from '../lib/tab-order.js'
 import {
-  getSettings,
+  settingsQuery,
   updateSettings,
   sendTestPush,
   SHOW_CHORES_IN_FEEDS_KEY,
   WEATHER_UNIT_KEY,
   PUSH_NOTIFICATIONS_KEY,
 } from '../lib/api.js'
-import { enablePush, disablePush, pushSupported } from '../lib/push.js'
+import { useCachedQuery } from '../lib/offline/use-cached-query.js'
+import { enablePush, disablePush, pushSupported, testPushStatusMessage } from '../lib/push.js'
 import { choresInFeedsEnabled } from '../lib/chores-helpers.js'
 import { weatherUnitFromSettings, type WeatherUnit } from '../lib/weather-helpers.js'
 import { holidaysEnabled, hiddenHolidays as readHiddenHolidays } from '../lib/holidays-helpers.js'
 import { getHolidayDefs } from '@rallypoint/events-shared'
+import { QuickAdd } from '../ui/QuickAdd.js'
+import { ApiError, exportPlannerData, importPlannerData } from '../lib/api.js'
+import { exportFileName, formatImportSummary } from '../lib/import-summary-text.js'
 
 // Settings surface — the first dedicated settings page. Theme (mode + accent)
 // is the first user setting; changes drive the shared store actions, which the
@@ -26,6 +30,36 @@ const MODE_OPTIONS: ReadonlyArray<{ value: Theme; label: string }> = [
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ]
+
+/**
+ * Ink kit's pill toggle (`.set-toggle` + `.knob`). Replaces the native
+ * `<input type="checkbox" role="switch">` used previously — same
+ * semantics (a labelled `aria-pressed` toggle), kit visual.
+ */
+function SetToggle({
+  on,
+  onChange,
+  disabled,
+  label,
+}: {
+  on: boolean
+  onChange: () => void
+  disabled?: boolean
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      className={'set-toggle' + (on ? ' on' : '')}
+      aria-pressed={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onChange}
+    >
+      <span className="knob" aria-hidden />
+    </button>
+  )
+}
 
 export function SettingsPage() {
   const mode = useThemeStore((s) => s.mode)
@@ -52,28 +86,64 @@ export function SettingsPage() {
   // surfaces a hint when the browser blocks or can't do Web Push.
   const [notificationsOn, setNotificationsOn] = useState<boolean>(false)
   const [pushStatus, setPushStatus] = useState<string | null>(null)
+  // Export/import (backup–restore) status line, shared by both buttons.
+  const [dataStatus, setDataStatus] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const importInput = useRef<HTMLInputElement>(null)
+
+  async function runExport() {
+    setExporting(true)
+    setDataStatus(null)
+    try {
+      const blob = await exportPlannerData()
+      // Object-URL download: the export is session-gated, so it cannot be a
+      // plain <a href> the browser fetches without credentials.
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = exportFileName(new Date())
+      a.click()
+      URL.revokeObjectURL(url)
+      setDataStatus('Your data has been downloaded.')
+    } catch (err) {
+      setDataStatus(err instanceof ApiError ? err.message : 'Export failed — try again.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function runImport(file: File) {
+    setImporting(true)
+    setDataStatus(null)
+    try {
+      setDataStatus(formatImportSummary(await importPlannerData(file)))
+    } catch (err) {
+      setDataStatus(err instanceof ApiError ? err.message : 'Import failed — try again.')
+    } finally {
+      setImporting(false)
+    }
+  }
   // "Send a test notification" action state.
   const [testBusy, setTestBusy] = useState(false)
   const [testStatus, setTestStatus] = useState<string | null>(null)
-  const [settingsLoading, setSettingsLoading] = useState(true)
+
+  // Render-from-cache: read-only settings load (mutations below still write
+  // straight through updateSettings + local optimistic state, unchanged).
+  const settingsQ = useCachedQuery(useMemo(() => settingsQuery('planner'), []))
+  const settingsLoading = settingsQ.status === 'loading'
 
   useEffect(() => {
-    let cancelled = false
-    void getSettings('planner').then((s) => {
-      if (cancelled) return
-      // If the key is missing (new user) keep the default (true = on).
-      if (s.shoppingAutoCategorize === false) setAutoCategorize(false)
-      setShowChoresInFeeds(choresInFeedsEnabled(s))
-      setHolidaysOn(holidaysEnabled(s))
-      setHiddenIds(readHiddenHolidays(s))
-      setWeatherUnit(weatherUnitFromSettings(s))
-      setNotificationsOn(s[PUSH_NOTIFICATIONS_KEY] === true)
-      setSettingsLoading(false)
-    }).catch(() => {
-      if (!cancelled) setSettingsLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [])
+    const s = settingsQ.data
+    if (!s) return
+    // If the key is missing (new user) keep the default (true = on).
+    setAutoCategorize(s.shoppingAutoCategorize !== false)
+    setShowChoresInFeeds(choresInFeedsEnabled(s))
+    setHolidaysOn(holidaysEnabled(s))
+    setHiddenIds(readHiddenHolidays(s))
+    setWeatherUnit(weatherUnitFromSettings(s))
+    setNotificationsOn(s[PUSH_NOTIFICATIONS_KEY] === true)
+  }, [settingsQ.data])
 
   function onToggleAutoCategorize() {
     const next = !autoCategorize
@@ -119,13 +189,7 @@ export function SettingsPage() {
     setTestStatus(null)
     try {
       const result = await sendTestPush()
-      if (result.subscriptions === 0) {
-        setTestStatus('No devices registered yet — turn notifications on first.')
-      } else if (result.sent > 0) {
-        setTestStatus(`Sent to ${result.sent} device${result.sent === 1 ? '' : 's'} — check for the notification.`)
-      } else {
-        setTestStatus('Couldn’t reach any device. Try turning notifications off and on again.')
-      }
+      setTestStatus(testPushStatusMessage(result))
     } catch {
       setTestStatus('Test failed — please try again.')
     } finally {
@@ -149,7 +213,8 @@ export function SettingsPage() {
     const next = [...orderedNav]
     const swap = index + dir
     if (swap < 0 || swap >= next.length) return
-    ;[next[index], next[swap]] = [next[swap], next[index]]
+    // Bounds already checked above, so both indices are in range.
+    ;[next[index], next[swap]] = [next[swap]!, next[index]!]
     setTabOrder(next.map((n) => n.to))
   }
 
@@ -157,15 +222,19 @@ export function SettingsPage() {
     <>
       <div className="pg-head">
         <div>
-          <div className="eyebrow">Settings</div>
-          <h1>Theme</h1>
+          <div className="eyebrow">Planner</div>
+          <h1>Settings</h1>
           <div className="sub">Saved to your account — it follows you across Rallypoint apps and devices.</div>
         </div>
       </div>
 
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 22, maxWidth: 560 }}>
-        <div style={{ display: 'grid', gap: 10 }}>
-          <div className="eyebrow">Mode</div>
+      <h2 className="eyebrow" style={{ margin: '18px 0 10px', fontWeight: 400 }}>Appearance</h2>
+      <div className="set-section" style={{ maxWidth: 560 }}>
+        <div className="set-row">
+          <div>
+            <div className="set-label">Theme</div>
+            <div className="set-sub">Dark is the Ink default.</div>
+          </div>
           <div className="seg" role="group" aria-label="Color mode">
             {MODE_OPTIONS.map((m) => (
               <button
@@ -181,135 +250,96 @@ export function SettingsPage() {
           </div>
         </div>
 
-        <div style={{ display: 'grid', gap: 10 }}>
-          <div className="eyebrow">Accent</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }} role="group" aria-label="Accent color">
+        <div className="set-row">
+          <div>
+            <div className="set-label">Accent</div>
+            <div className="set-sub">Re-tints the whole app from one variable.</div>
+          </div>
+          {/* Kit's accent picker: six color circles. Replaces the prior
+              `.tt-chip` text buttons; the selected swatch carries an --ink
+              border ring. */}
+          <div className="swatch-row" role="group" aria-label="Accent color">
             {COLORS_ORDER.map((c) => (
               <button
                 key={c}
                 type="button"
-                className="tt-chip"
+                className={'swatch' + (color === c ? ' on' : '')}
                 aria-pressed={color === c}
                 aria-label={c}
                 title={c}
                 onClick={() => setColor(c)}
-                style={{
-                  textTransform: 'capitalize',
-                  outline: color === c ? '1.5px solid var(--ink)' : undefined,
-                }}
-              >
-                <span
-                  className="dot"
-                  aria-hidden
-                  style={{ background: ACCENT_HEX[c] }}
-                />
-                {c}
-              </button>
+                style={{ background: ACCENT_HEX[c] }}
+              />
             ))}
           </div>
         </div>
       </div>
 
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div style={{ display: 'grid', gap: 4 }}>
-          <div className="eyebrow">Shopping</div>
-        </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: settingsLoading ? 'default' : 'pointer',
-            gap: 12,
-          }}
-        >
-          <span style={{ display: 'grid', gap: 2 }}>
-            <span style={{ fontSize: 14, color: 'var(--ink)' }}>Auto-categorize items</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
+      <h2 className="eyebrow" style={{ margin: '24px 0 10px', fontWeight: 400 }}>Preferences</h2>
+      <div className="set-section" style={{ maxWidth: 560 }}>
+        <div className="set-row">
+          <div>
+            <div className="set-label">Auto-categorize shopping items</div>
+            <div className="set-sub">
               Automatically assign a category (Produce, Dairy, etc.) when you add an item.
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            role="switch"
-            aria-label="Auto-categorize shopping items"
-            checked={autoCategorize}
+            </div>
+          </div>
+          <SetToggle
+            on={autoCategorize}
             disabled={settingsLoading}
             onChange={onToggleAutoCategorize}
-            style={{ width: 18, height: 18, cursor: 'pointer', accentColor: 'var(--accent)' }}
+            label="Auto-categorize shopping items"
           />
-        </label>
-      </div>
-
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div style={{ display: 'grid', gap: 4 }}>
-          <div className="eyebrow">Chores</div>
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: settingsLoading ? 'default' : 'pointer',
-            gap: 12,
-          }}
-        >
-          <span style={{ display: 'grid', gap: 2 }}>
-            <span style={{ fontSize: 14, color: 'var(--ink)' }}>Show chores in My Day &amp; Upcoming</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-              When on, due chores appear alongside your tasks in the My Day and Upcoming feeds.
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            role="switch"
-            aria-label="Show chores in My Day and Upcoming"
-            checked={showChoresInFeeds}
+
+        <div className="set-row">
+          <div>
+            <div className="set-label">Show chores in Upcoming &amp; calendar</div>
+            <div className="set-sub">
+              When on, recurring chores appear in the Coming up feed and the Week / Month
+              views. Today’s chores always show in their dedicated My Day section.
+            </div>
+          </div>
+          <SetToggle
+            on={showChoresInFeeds}
             disabled={settingsLoading}
             onChange={onToggleChoresInFeeds}
-            style={{ width: 18, height: 18, cursor: 'pointer', accentColor: 'var(--accent)' }}
+            label="Show chores in Upcoming and calendar"
           />
-        </label>
-      </div>
-
-      {/* Notifications card */}
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div style={{ display: 'grid', gap: 4 }}>
-          <div className="eyebrow">Notifications</div>
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: settingsLoading || !pushSupported() ? 'default' : 'pointer',
-            gap: 12,
-          }}
-        >
-          <span style={{ display: 'grid', gap: 2 }}>
-            <span style={{ fontSize: 14, color: 'var(--ink)' }}>Push notifications</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-              Get a reminder at the due time for events, tasks &amp; chores that have a date and time.
-              All-day items don’t notify.
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            role="switch"
-            aria-label="Enable push notifications"
-            checked={notificationsOn}
+
+        <div className="set-row">
+          <div>
+            <div className="set-label">Push notifications</div>
+            <div className="set-sub">
+              Get a reminder at the due time for events, tasks &amp; chores that
+              have a date and time. All-day items don’t notify.
+            </div>
+          </div>
+          <SetToggle
+            on={notificationsOn}
             disabled={settingsLoading || !pushSupported()}
             onChange={() => {
               void onToggleNotifications()
             }}
-            style={{ width: 18, height: 18, cursor: 'pointer', accentColor: 'var(--accent)' }}
+            label="Enable push notifications"
           />
-        </label>
+        </div>
         {pushStatus && (
-          <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>{pushStatus}</span>
+          <div className="set-sub" style={{ paddingTop: 10 }}>{pushStatus}</div>
         )}
         {notificationsOn && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              flexWrap: 'wrap',
+              paddingTop: 10,
+              borderTop: '1px solid var(--line)',
+              marginTop: 6,
+            }}
+          >
             <button
               type="button"
               className="pl-btn ghost sm"
@@ -327,24 +357,12 @@ export function SettingsPage() {
         )}
       </div>
 
-      {/* Weather card */}
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div className="eyebrow">Weather</div>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            flexWrap: 'wrap',
-          }}
-        >
-          <span style={{ display: 'grid', gap: 2 }}>
-            <span style={{ fontSize: 14, color: 'var(--ink)' }}>Temperature unit</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-              Used for the weather shown on My Day.
-            </span>
-          </span>
+      <div className="set-section" style={{ maxWidth: 560 }}>
+        <div className="set-row">
+          <div>
+            <div className="set-label">Temperature unit</div>
+            <div className="set-sub">Used for the weather shown on My Day.</div>
+          </div>
           <div className="seg" role="group" aria-label="Temperature unit">
             <button
               type="button"
@@ -366,48 +384,47 @@ export function SettingsPage() {
             </button>
           </div>
         </div>
-      </div>
 
-      {/* Holidays card (#548) */}
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div style={{ display: 'grid', gap: 4 }}>
-          <div className="eyebrow">Holidays</div>
-        </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: settingsLoading ? 'default' : 'pointer',
-            gap: 12,
-          }}
-        >
-          <span style={{ display: 'grid', gap: 2 }}>
-            <span style={{ fontSize: 14, color: 'var(--ink)' }}>Show US federal holidays</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
+        <div className="set-row">
+          <div>
+            <div className="set-label">Show US federal holidays</div>
+            <div className="set-sub">
               When on, US federal holidays appear in the Events calendar and list view.
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            role="switch"
-            aria-label="Show US federal holidays"
-            checked={holidaysOn}
+            </div>
+          </div>
+          <SetToggle
+            on={holidaysOn}
             disabled={settingsLoading}
             onChange={onToggleHolidays}
-            style={{ width: 18, height: 18, cursor: 'pointer', accentColor: 'var(--accent)' }}
+            label="Show US federal holidays"
           />
-        </label>
+        </div>
         {hiddenIds.length > 0 && (
-          <div style={{ display: 'grid', gap: 6 }}>
-            <div style={{ fontSize: 12, color: 'var(--ink-dim)' }}>Hidden holidays — click Restore to show again:</div>
+          <div
+            style={{
+              display: 'grid',
+              gap: 6,
+              paddingTop: 10,
+              borderTop: '1px solid var(--line)',
+              marginTop: 6,
+            }}
+          >
+            <div className="set-sub">
+              Hidden holidays — click Restore to show again:
+            </div>
             {hiddenIds.map((id) => {
               const def = getHolidayDefs().find((d) => d.id === id)
               if (!def) return null
               return (
                 <div
                   key={id}
-                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, color: 'var(--ink-dim)' }}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: 13,
+                    color: 'var(--ink-dim)',
+                  }}
                 >
                   <span>{def.name}</span>
                   <button
@@ -424,12 +441,13 @@ export function SettingsPage() {
         )}
       </div>
 
-      <div className="pl-card" style={{ padding: 18, display: 'grid', gap: 16, maxWidth: 560, marginTop: 24 }}>
-        <div style={{ display: 'grid', gap: 4 }}>
-          <div className="eyebrow">Tabs</div>
-          <div className="sub" style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
-            Tab order applies to this device.
-          </div>
+      {/* Tab order — planner-web addition not in the kit's Settings spec.
+          Kept as its own .set-section because the per-tab rows aren't a
+          natural fit for the .set-row label/sub/control pattern. */}
+      <div className="set-section" style={{ maxWidth: 560 }}>
+        <div style={{ display: 'grid', gap: 4, marginBottom: 12 }}>
+          <div className="set-label">Tabs</div>
+          <div className="set-sub">Tab order applies to this device.</div>
         </div>
         <div style={{ display: 'grid', gap: 6 }}>
           {orderedNav.map((n, i) => (
@@ -440,8 +458,8 @@ export function SettingsPage() {
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 padding: '8px 10px',
-                border: '1.5px solid var(--line)',
-                background: 'var(--surface)',
+                border: 'var(--border-width) solid var(--line)',
+                background: 'var(--bg)',
               }}
             >
               <span
@@ -478,6 +496,70 @@ export function SettingsPage() {
           ))}
         </div>
       </div>
+      <h2 className="eyebrow" style={{ margin: '24px 0 10px', fontWeight: 400 }}>Your data</h2>
+      <div className="set-section" style={{ maxWidth: 560 }}>
+        <div className="set-row">
+          <div>
+            <div className="set-label">Export</div>
+            <div className="set-sub">
+              Downloads your tasks, lists, notes, chores and events — with any ticket attachments —
+              as a single ZIP you can keep as a backup.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={exporting}
+            onClick={() => void runExport()}
+          >
+            {exporting ? 'Preparing…' : 'Export data'}
+          </button>
+        </div>
+
+        <div className="set-row">
+          <div>
+            <div className="set-label">Import</div>
+            <div className="set-sub">
+              Restores a ZIP exported from Planner into this account. Anything already here is kept,
+              and importing the same file twice is safe — it will not duplicate.
+            </div>
+          </div>
+          <div style={{ display: 'grid', gap: 6, justifyItems: 'end' }}>
+            <input
+              ref={importInput}
+              type="file"
+              accept=".zip,application/zip"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                // Clear the input so re-picking the SAME file fires change again.
+                e.target.value = ''
+                if (file) void runImport(file)
+              }}
+            />
+            <button
+              type="button"
+              className="btn-ghost"
+              style={{ whiteSpace: 'nowrap' }}
+              disabled={importing}
+              onClick={() => importInput.current?.click()}
+            >
+              {importing ? 'Importing…' : 'Import data'}
+            </button>
+          </div>
+        </div>
+
+        {dataStatus && (
+          <div className="set-row">
+            <div className="set-sub" role="status" style={{ whiteSpace: 'pre-line' }}>
+              {dataStatus}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <QuickAdd anchor="float" />
     </>
   )
 }

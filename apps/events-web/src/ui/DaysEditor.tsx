@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { dayTimesIssue } from '@rallypoint/events-shared'
+import { ConfirmDialog, SwipeActions } from '@rallypoint/ui'
+import { useAsync } from '@rallypoint/web-kit'
 import {
   ApiError,
   createDay,
@@ -46,20 +48,19 @@ export function DaysEditor({
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [genSaving, setGenSaving] = useState(false)
+  // Swipe/hover Delete stages the row here; the ConfirmDialog commits it.
+  const [confirmDelete, setConfirmDelete] = useState<DayDto | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
+  const daysLoad = useAsync<DayDto[]>(() => listDays(eventId), [eventId])
   useEffect(() => {
-    let cancelled = false
-    listDays(eventId)
-      .then((d) => {
-        if (!cancelled) setDays(d)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : 'Failed to load days.')
-      })
-    return () => {
-      cancelled = true
+    if (daysLoad.data) setDays(daysLoad.data)
+  }, [daysLoad.data])
+  useEffect(() => {
+    if (daysLoad.error) {
+      setError(daysLoad.error instanceof ApiError ? daysLoad.error.message : 'Failed to load days.')
     }
-  }, [eventId])
+  }, [daysLoad.error])
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault()
@@ -151,9 +152,9 @@ export function DaysEditor({
         </button>
       </div>
       {days.length > 0 && (
-        <ul className="space-y-1">
+        <ul className="space-y-2">
           {days.map((d) => (
-            <DayRow key={d.id} day={d} onSaveTimes={handleSaveTimes} onDelete={handleDelete} />
+            <DayRow key={d.id} day={d} onSaveTimes={handleSaveTimes} onRequestDelete={setConfirmDelete} />
           ))}
         </ul>
       )}
@@ -201,12 +202,31 @@ export function DaysEditor({
       {error && (
         <div
           role="alert"
-          className="p-3 text-sm text-[color:var(--ink)]"
-          style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+          className="p-3 text-sm"
+          style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
         >
           {error}
         </div>
       )}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete day?"
+        body={confirmDelete ? `Remove “${confirmDelete.day_label}” (${confirmDelete.date}) from this event.` : undefined}
+        confirmLabel="Delete"
+        confirmVariant="hot"
+        busy={deleting}
+        onConfirm={async () => {
+          if (!confirmDelete) return
+          setDeleting(true)
+          try {
+            await handleDelete(confirmDelete.id)
+          } finally {
+            setDeleting(false)
+            setConfirmDelete(null)
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </section>
   )
 }
@@ -214,11 +234,11 @@ export function DaysEditor({
 function DayRow({
   day,
   onSaveTimes,
-  onDelete,
+  onRequestDelete,
 }: {
   day: DayDto
   onSaveTimes: (dayId: string, start: string, end: string) => Promise<void>
-  onDelete: (dayId: string) => Promise<void>
+  onRequestDelete: (day: DayDto) => void
 }) {
   const [start, setStart] = useState(day.start_time ?? '')
   const [end, setEnd] = useState(day.end_time ?? '')
@@ -237,7 +257,18 @@ function DayRow({
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-2 text-sm">
+    <SwipeActions
+      as="li"
+      contentClassName="ev-editrow text-sm"
+      actions={[
+        {
+          key: 'delete',
+          label: `Delete day ${day.day_label}`,
+          icon: <>✕</>,
+          onAction: () => onRequestDelete(day),
+        },
+      ]}
+    >
       <span className="flex-1 min-w-0">
         {day.day_label} <span className="text-xs text-[color:var(--ink-dim)]">{day.date}</span>
       </span>
@@ -266,15 +297,6 @@ function DayRow({
       >
         {saving ? 'Saving…' : 'Save'}
       </button>
-      <button
-        type="button"
-        onClick={() => void onDelete(day.id)}
-        className="btn-hot"
-        style={{ width: 'auto' }}
-        aria-label={`Delete day ${day.day_label}`}
-      >
-        ×
-      </button>
-    </li>
+    </SwipeActions>
   )
 }

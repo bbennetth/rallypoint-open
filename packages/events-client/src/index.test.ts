@@ -271,6 +271,20 @@ describe('createEventsClient — personal events', () => {
     expect(result.scopeType).toBe('personal')
   })
 
+  it('createPersonalEvent forwards ref in the JSON body for offline-create dedup', async () => {
+    const fakeFetch = makeFakeFetch(async (req) => {
+      const body = (await req.json()) as { ref?: string }
+      expect(body.ref).toBe('tmp_abc123')
+      return new Response(JSON.stringify(SAMPLE_PERSONAL), { status: 201 })
+    })
+    const client = createEventsClient({
+      baseUrl: 'https://events.example',
+      apiKey: API_KEY,
+      fetch: fakeFetch as unknown as typeof fetch,
+    })
+    await client.createPersonalEvent({ actor: ACTOR, name: 'Morning run', ref: 'tmp_abc123' })
+  })
+
   it('listPersonalEvents GETs with Authorization + x-actor (no query when no window)', async () => {
     const fakeFetch = makeFakeFetch((req) => {
       expect(req.method).toBe('GET')

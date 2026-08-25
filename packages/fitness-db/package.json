@@ -1,0 +1,35 @@
+{
+  "name": "@rallypoint/fitness-db",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/schema/index.js",
+  "types": "dist/schema/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "fitness:db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "fitness:db:migrate": "tsx src/migrate.ts",
+    "fitness:db:seed:gen": "tsx seed/generate.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "@rallypoint/fitness-shared": "*",
+    "drizzle-kit": "^0.31.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

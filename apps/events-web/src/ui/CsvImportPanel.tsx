@@ -98,8 +98,9 @@ export function CsvImportPanel({
     !applying
 
   const alertStyle = {
-    border: '1.5px solid var(--hot)',
-    background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+    background: 'var(--hot-soft)',
+    color: 'var(--hot-text)',
+    borderRadius: 'var(--radius-lg)',
   }
 
   return (
@@ -161,7 +162,7 @@ export function CsvImportPanel({
               </div>
 
               {preview.summary.error > 0 && (
-                <ul role="alert" className="space-y-1 p-3 text-xs text-[color:var(--ink)]" style={alertStyle}>
+                <ul role="alert" className="space-y-1 p-3 text-xs" style={alertStyle}>
                   {preview.errors.slice(0, 20).map((er, i) => (
                     <li key={i}>
                       Line {er.line}: {er.message}
@@ -197,7 +198,7 @@ export function CsvImportPanel({
           )}
 
           {error && (
-            <div role="alert" className="p-3 text-sm text-[color:var(--ink)]" style={alertStyle}>
+            <div role="alert" className="p-3 text-sm" style={alertStyle}>
               {error}
             </div>
           )}

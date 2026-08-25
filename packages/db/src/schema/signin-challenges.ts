@@ -37,6 +37,3 @@ export const signinChallenges = sqliteTable(
     expiresIdx: index('signin_challenges_expires_idx').on(t.expiresAt),
   }),
 )
-
-export type DbSigninChallenge = typeof signinChallenges.$inferSelect
-export type DbSigninChallengeInsert = typeof signinChallenges.$inferInsert

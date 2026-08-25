@@ -103,6 +103,7 @@ describe('D1 integration — lineup (stages/days/artists/event_artists)', () => 
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -338,21 +339,12 @@ describe('D1 integration — lineup (stages/days/artists/event_artists)', () => 
       await req(bearer, 'GET', `/api/v1/ui/artists?q=${encodeURIComponent('aphex')}`)
     ).json()) as { items: Array<{ id: string }> }
     expect(search.items.map((a) => a.id)).toContain(artist.id)
-
-    // Patch a link.
-    const patched = await req(bearer, 'PATCH', `/api/v1/ui/artists/${artist.id}`, {
-      spotify: 'https://open.spotify.com/artist/x',
-    })
-    expect(patched.status).toBe(200)
-    expect(((await patched.json()) as { spotify: string | null }).spotify).toBe(
-      'https://open.spotify.com/artist/x',
-    )
   })
 
-  it('lets any signed-in user edit the global catalog (no event scope)', async () => {
-    // The artist catalog is global by design (§5.2): catalog edits are
-    // gated by session only, not by event membership. This test locks
-    // that intent in so a future change can't silently event-scope it.
+  it('exposes no artist-edit endpoint (epic #675 P1)', async () => {
+    // Catalog rows carry no provenance, so an open PATCH would let any
+    // signed-in user overwrite another event's artist. The endpoint was
+    // removed; this pins the 404 until an ownership model exists.
     const creator = await loginAs(`user_${Date.now()}_artist_creator`)
     const stranger = await loginAs(`user_${Date.now()}_artist_stranger`)
 
@@ -360,14 +352,10 @@ describe('D1 integration — lineup (stages/days/artists/event_artists)', () => 
       name: `Four Tet ${Date.now()}`,
     })).json()) as { id: string }
 
-    // A different user with no events at all can still patch it.
     const patched = await req(stranger, 'PATCH', `/api/v1/ui/artists/${artist.id}`, {
       instagram: 'https://instagram.com/fourtet',
     })
-    expect(patched.status).toBe(200)
-    expect(((await patched.json()) as { instagram: string | null }).instagram).toBe(
-      'https://instagram.com/fourtet',
-    )
+    expect(patched.status).toBe(404)
   })
 
   it('creates a lineup slot, lists it, and removes it', async () => {
@@ -444,6 +432,52 @@ describe('D1 integration — lineup (stages/days/artists/event_artists)', () => 
       items: unknown[]
     }
     expect(after.items).toHaveLength(0)
+  })
+
+  it('folds catalog artist genre + profile links into serialized slots', async () => {
+    const owner = `user_${Date.now()}_meta`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Meta Fest')
+
+    const day = (await (await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/days`, {
+      dayLabel: 'Day 1',
+      date: '2026-08-01',
+    })).json()) as { id: string }
+    const artist = (await (await req(bearer, 'POST', '/api/v1/ui/artists', {
+      name: `Overmono ${Date.now()}`,
+      soundcloud: 'https://soundcloud.com/overmono',
+      spotify: 'https://open.spotify.com/artist/overmono',
+    })).json()) as { id: string }
+
+    const created = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/lineup`, {
+      artistId: artist.id,
+      dayId: day.id,
+      genre: 'techno',
+    })
+    expect(created.status).toBe(200)
+
+    const list = (await (await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/lineup`)).json()) as {
+      items: Array<{
+        genre: string | null
+        artist_genre: string | null
+        soundcloud: string | null
+        spotify: string | null
+        apple_music: string | null
+        youtube_music: string | null
+        instagram: string | null
+      }>
+    }
+    expect(list.items).toHaveLength(1)
+    const slot = list.items[0]!
+    // Per-slot genre is the event override; artist_genre mirrors the
+    // catalog row (unset here — enrichment fills it later).
+    expect(slot.genre).toBe('techno')
+    expect(slot.artist_genre).toBeNull()
+    expect(slot.soundcloud).toBe('https://soundcloud.com/overmono')
+    expect(slot.spotify).toBe('https://open.spotify.com/artist/overmono')
+    expect(slot.apple_music).toBeNull()
+    expect(slot.youtube_music).toBeNull()
+    expect(slot.instagram).toBeNull()
   })
 
   it('bulk-upserts multiple slots atomically', async () => {
@@ -559,6 +593,50 @@ describe('D1 integration — lineup (stages/days/artists/event_artists)', () => 
       items: unknown[]
     }
     expect(list.items).toHaveLength(0)
+  })
+
+  it('supports unscheduled (TBA) slots over HTTP: POST without a day, bulk null-day deletes, DELETE via the none sentinel', async () => {
+    const owner = `user_${Date.now()}_tba`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'TBA Fest')
+
+    const a1 = ((await (
+      await req(bearer, 'POST', '/api/v1/ui/artists', { name: `TBA One ${Date.now()}` })
+    ).json()) as { id: string }).id
+    const a2 = ((await (
+      await req(bearer, 'POST', '/api/v1/ui/artists', { name: `TBA Two ${Date.now()}` })
+    ).json()) as { id: string }).id
+
+    // POST a slot with no dayId at all → unscheduled booking.
+    const posted = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/lineup`, {
+      artistId: a1,
+      tier: 'headliner',
+    })
+    expect(posted.status).toBe(200)
+    expect(((await posted.json()) as { day_id: string | null }).day_id).toBeNull()
+
+    // Bulk: add a second TBA slot and delete the first via a null-day ref.
+    const bulk = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/lineup/bulk`, {
+      slots: [{ artistId: a2, dayId: null }],
+      deletes: [{ artistId: a1, dayId: null }],
+    })
+    expect(bulk.status).toBe(200)
+    const listed = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/lineup`)
+    ).json()) as { items: { artist_id: string; day_id: string | null }[] }
+    expect(listed.items).toHaveLength(1)
+    expect(listed.items[0]).toMatchObject({ artist_id: a2, day_id: null })
+
+    // DELETE the TBA slot via the literal `none` day segment.
+    const del = await req(bearer, 'DELETE', `/api/v1/ui/events/${eventId}/lineup/${a2}/none`)
+    expect(del.status).toBe(204)
+    const empty = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/lineup`)
+    ).json()) as { items: unknown[] }
+    expect(empty.items).toHaveLength(0)
+    // Deleting it again 404s (nothing left at the sentinel address).
+    const again = await req(bearer, 'DELETE', `/api/v1/ui/events/${eventId}/lineup/${a2}/none`)
+    expect(again.status).toBe(404)
   })
 
   it('cascades stages/days/lineup when the event is hard-deleted', async () => {

@@ -139,6 +139,11 @@ export interface ListItemRecord {
   // Non-null when this item is an occurrence materialized from a recurring
   // series (`lse_…`); null for one-off items.
   seriesId: string | null
+  // Opaque idempotency key for offline-retry-safe creates. Non-null when
+  // the creator supplied one; a create retried with the same (listId,
+  // ref) returns this row instead of inserting a duplicate — see
+  // ListItemRepo.findByListAndRef.
+  ref: string | null
   createdBy: string
   createdAt: Date
   updatedAt: Date
@@ -165,6 +170,11 @@ export interface CreateListItemInput {
   customFields?: Record<string, unknown> | undefined
   // Omit to append at max(position)+1 within the list.
   position?: number | undefined
+  // Opaque idempotency key (offline create-retry dedup). When set, a
+  // create with the same (listId, ref) returns the original row instead
+  // of inserting a duplicate. Omit/null for un-keyed (unconstrained)
+  // creates — the pre-existing behavior.
+  ref?: string | null | undefined
   createdBy: string
 }
 
@@ -196,6 +206,11 @@ export interface UpdateListItemInput {
 
 export interface ListItemRepo {
   create(input: CreateListItemInput): Promise<ListItemRecord>
+  // Idempotent-create lookup: the item pinned to this (listId, ref), or
+  // null if no row has claimed that ref yet. Spans soft-deleted rows so
+  // a tombstoned ref isn't silently reusable (mirrors money-api's
+  // ExpenseRepo.findByLedgerAndRef).
+  findByListAndRef(listId: string, ref: string): Promise<ListItemRecord | null>
   // Returns the item regardless of deletedAt (callers gate on it).
   findById(id: string): Promise<ListItemRecord | null>
   // Items for a list. Default order is (position, createdAt, id);
@@ -215,6 +230,13 @@ export interface ListItemRepo {
       sort?: ValidatedSort[]
       limit?: number
     },
+  ): Promise<ListItemRecord[]>
+  // Keyset page in the default (position, createdAt, id) order. `limit` rows
+  // (callers over-fetch by one to detect a further page); `cursor` is the last
+  // row of the previous page. Default-order only — no custom filters/sort.
+  listPageForList(
+    listId: string,
+    opts: { limit: number; cursor: { position: number; createdAt: Date; id: string } | null },
   ): Promise<ListItemRecord[]>
   update(id: string, fields: UpdateListItemInput): Promise<ListItemRecord | null>
   softDelete(id: string, when: Date): Promise<void>
@@ -373,6 +395,17 @@ export interface ListStatusRepo {
     listId: string,
     fromStatusId: string,
     to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+  ): Promise<number>
+  // Atomic combination of reassignItems + softDelete (single db.batch on
+  // D1) — used by the status-delete route so items are never left
+  // pointing at a status that's already gone, and the status row is
+  // never soft-deleted while items still reference it. Returns the
+  // count reassigned.
+  reassignItemsAndSoftDelete(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+    when: Date,
   ): Promise<number>
 }
 
@@ -598,6 +631,9 @@ export interface ListItemSeriesRecord {
   until: string | null
   count: number | null
   timeOfDay: string | null
+  // Opaque idempotency key for offline-retry-safe creates (mirrors
+  // ListItemRecord.ref). Non-null when the creator supplied one.
+  ref: string | null
   createdBy: string
   createdAt: Date
   updatedAt: Date
@@ -618,6 +654,10 @@ export interface CreateListItemSeriesInput {
   until?: string | null | undefined
   count?: number | null | undefined
   timeOfDay?: string | null | undefined
+  // Opaque idempotency key (offline create-retry dedup). When set, a
+  // create with the same (listId, ref) returns the original series
+  // instead of inserting a duplicate.
+  ref?: string | null | undefined
 }
 
 // Sparse patch. Only defined keys are written. The repo re-projects
@@ -647,6 +687,11 @@ export interface ListItemSeriesRepo {
     actor: string,
     tenantId: string,
   ): Promise<ListItemSeriesRecord>
+  // Idempotent-create lookup: the series pinned to this (listId, ref), or
+  // null if no row has claimed that ref yet. Spans soft-deleted rows so a
+  // tombstoned ref isn't silently reusable (mirrors
+  // ListItemRepo.findByListAndRef).
+  findByListAndRef(listId: string, ref: string): Promise<ListItemSeriesRecord | null>
   // Look up a single series row (deleted or not) by id. Returns null when the
   // id does not exist. Used by routes that need the listId for access checks
   // before calling update() or softDelete().

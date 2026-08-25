@@ -7,7 +7,7 @@
 // State-changing requests bootstrap a CSRF token (GET /csrf) and echo
 // it in X-RP-CSRF — the double-submit half the server checks.
 
-import { ApiError, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
+import { ApiError, captureEvent, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
 import type { SessionProfile } from '@rallypoint/web-kit'
 import { hydrateThemeFromServer } from '@rallypoint/ui'
 
@@ -52,6 +52,10 @@ export interface EventDto {
   // #440: the caller's group in this event (first joined), or null.
   // Drives viewer-role routing into the group attendee shell.
   my_group_id: string | null
+  // Whether the caller has an active attendance row. Present on the
+  // detail response only (owners can self-join via the attendance
+  // endpoint, so owner role no longer implies not-attending).
+  viewer_attending?: boolean
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -89,6 +93,10 @@ export interface PublicPageConfigInput {
   theme?: {
     accent_color?: string
     background_image_key?: string
+    // Square PNG used as the home-screen icon for a per-event PWA
+    // install. Written by the app-icon upload route, not by the
+    // public-page save.
+    icon_image_key?: string
   }
   sections?: Array<
     | { kind: 'description' }
@@ -182,6 +190,78 @@ export async function getEvent(slug: string): Promise<EventDto> {
   return request<EventDto>('GET', `/api/v1/ui/events/${encodeURIComponent(slug)}`)
 }
 
+// --- browse (#browse-tab) -------------------------------------------
+// Discovery surface: system-owned + public events, no membership
+// required. viewer_role is null for events the caller hasn't joined
+// (unlike EventDto, where a row without a role is never returned).
+
+export interface BrowseEventDto extends Omit<EventDto, 'viewer_role' | 'my_group_id' | 'viewer_attending'> {
+  viewer_role: MemberRole | null
+  viewer_attending: boolean
+}
+
+export interface BrowseEventListPage {
+  items: BrowseEventDto[]
+  next_cursor: string | null
+}
+
+// Pre-join preview payload. `lineup` is null when the event's lineup
+// feature is toggled off.
+export interface EventPreviewLineupDto {
+  stages: StageDto[]
+  days: DayDto[]
+  slots: LineupSlotDto[]
+}
+
+export interface EventPreviewDto {
+  event: BrowseEventDto
+  lineup: EventPreviewLineupDto | null
+}
+
+export async function listBrowsableEvents(opts?: {
+  cursor?: string
+  limit?: number
+}): Promise<BrowseEventListPage> {
+  const q = new URLSearchParams()
+  if (opts?.cursor) q.set('cursor', opts.cursor)
+  if (opts?.limit) q.set('limit', String(opts.limit))
+  const qs = q.toString()
+  return request<BrowseEventListPage>('GET', `/api/v1/ui/events/browse${qs ? `?${qs}` : ''}`)
+}
+
+export async function getEventPreview(slug: string): Promise<EventPreviewDto> {
+  return request<EventPreviewDto>(
+    'GET',
+    `/api/v1/ui/events/browse/${encodeURIComponent(slug)}`,
+  )
+}
+
+// Invite-free self-join for a browsable event; always lands as viewer.
+export async function joinEvent(eventId: string): Promise<{ event_slug: string; role: 'viewer' }> {
+  return request<{ event_slug: string; role: 'viewer' }>(
+    'POST',
+    `/api/v1/ui/events/${encodeURIComponent(eventId)}/join`,
+    {},
+  )
+}
+
+// Self-service attendance: the owner (or an allowlisted admin on a
+// system event) joins/leaves the event as a real attendee.
+export async function joinAttendance(eventId: string): Promise<{ attending: boolean }> {
+  return request<{ attending: boolean }>(
+    'POST',
+    `/api/v1/ui/events/${encodeURIComponent(eventId)}/attendance`,
+    {},
+  )
+}
+
+export async function leaveAttendance(eventId: string): Promise<{ attending: boolean }> {
+  return request<{ attending: boolean }>(
+    'DELETE',
+    `/api/v1/ui/events/${encodeURIComponent(eventId)}/attendance`,
+  )
+}
+
 export async function patchEvent(id: string, fields: PatchEventInput): Promise<EventDto> {
   return request<EventDto>('PATCH', `/api/v1/ui/events/${encodeURIComponent(id)}`, fields)
 }
@@ -205,15 +285,23 @@ export async function createInvite(
   id: string,
   input: { role: AssignableRole; invitedEmail?: string },
 ): Promise<InviteDto> {
-  return request<InviteDto>('POST', `/api/v1/ui/events/${encodeURIComponent(id)}/invites`, input)
+  const invite = await request<InviteDto>(
+    'POST',
+    `/api/v1/ui/events/${encodeURIComponent(id)}/invites`,
+    input,
+  )
+  captureEvent('invite_created', { role: input.role })
+  return invite
 }
 
 export async function acceptInvite(code: string): Promise<{ event_slug: string; role: MemberRole }> {
-  return request<{ event_slug: string; role: MemberRole }>(
+  const res = await request<{ event_slug: string; role: MemberRole }>(
     'POST',
     '/api/v1/ui/invites/accept',
     { code },
   )
+  captureEvent('invite_accepted', { role: res.role })
+  return res
 }
 
 // --- attendees + pending invites (Phase 0) ---------------------------
@@ -424,12 +512,22 @@ export interface GroupMemberDto {
   id: string
   user_id: string
   role: GroupRole
+  // RPID display name, null when the identity lookup has no record.
+  // Render `display_name ?? user_id`.
+  display_name: string | null
   joined_at: string
 }
 
 export interface GroupDetailDto extends GroupDto {
   // #440: 6-char re-showable join code (lazily backfilled server-side).
   short_code: string | null
+  // Parent-event display bits, so the attendee shell can label itself
+  // and drive the per-event PWA head tags without a second round-trip.
+  event_name: string | null
+  // Lets the group shell link back to the event's Group tab (the
+  // viewer's other groups here). Null if the parent event is gone.
+  event_slug: string | null
+  event_has_app_icon: boolean
   members: GroupMemberDto[]
 }
 
@@ -460,7 +558,9 @@ export async function listGroups(eventId: string): Promise<GroupDto[]> {
   return (await request<{ items: GroupDto[] }>('GET', `/api/v1/ui/events/${ev(eventId)}/groups`)).items
 }
 export async function createGroup(eventId: string, input: CreateGroupInput): Promise<CreateGroupResult> {
-  return request<CreateGroupResult>('POST', `/api/v1/ui/events/${ev(eventId)}/groups`, input)
+  const res = await request<CreateGroupResult>('POST', `/api/v1/ui/events/${ev(eventId)}/groups`, input)
+  captureEvent('group_created')
+  return res
 }
 export async function getGroup(groupId: string): Promise<GroupDetailDto> {
   return request<GroupDetailDto>('GET', `/api/v1/ui/groups/${ev(groupId)}`)
@@ -475,7 +575,13 @@ export async function createGroupInvite(
   groupId: string,
   input: { invitedEmail?: string },
 ): Promise<GroupInviteResult> {
-  return request<GroupInviteResult>('POST', `/api/v1/ui/groups/${ev(groupId)}/invites`, input)
+  const res = await request<GroupInviteResult>(
+    'POST',
+    `/api/v1/ui/groups/${ev(groupId)}/invites`,
+    input,
+  )
+  captureEvent('group_invite_created')
+  return res
 }
 export interface GroupJoinPreviewDto {
   group_id: string
@@ -494,7 +600,11 @@ export async function previewGroupJoin(code: string): Promise<GroupJoinPreviewDt
 }
 
 export async function joinGroup(code: string): Promise<{ group_id: string; role: GroupRole }> {
-  return request<{ group_id: string; role: GroupRole }>('POST', '/api/v1/ui/groups/join', { code })
+  const res = await request<{ group_id: string; role: GroupRole }>('POST', '/api/v1/ui/groups/join', {
+    code,
+  })
+  captureEvent('group_joined', { role: res.role })
+  return res
 }
 export async function transferGroup(groupId: string, newOwnerUserId: string): Promise<GroupDto> {
   return request<GroupDto>('POST', `/api/v1/ui/groups/${ev(groupId)}/transfer`, { newOwnerUserId })
@@ -679,6 +789,8 @@ export interface RallyDto {
   location_label: string | null
   lat: string | null
   lng: string | null
+  // Map pin (% position on an event map layer), null when unpinned.
+  pin: { layer: MapLayer; x_pct: number; y_pct: number } | null
   status: RallyStatus
   created_by: string
   created_at: string
@@ -697,6 +809,9 @@ export interface CreateRallyInput {
   locationLabel?: string | null
   lat?: number | null
   lng?: number | null
+  pinLayer?: MapLayer | null
+  pinXPct?: number | null
+  pinYPct?: number | null
   status?: RallyStatus
 }
 
@@ -726,9 +841,13 @@ export async function rsvpRally(
   rallyId: string,
   status: RallyRsvpStatus,
 ): Promise<RallyDto> {
-  return request<RallyDto>('PUT', `/api/v1/ui/groups/${ev(groupId)}/rallies/${ev(rallyId)}/rsvp`, {
-    status,
-  })
+  const rally = await request<RallyDto>(
+    'PUT',
+    `/api/v1/ui/groups/${ev(groupId)}/rallies/${ev(rallyId)}/rsvp`,
+    { status },
+  )
+  captureEvent('rsvp_submitted', { status })
+  return rally
 }
 
 // --- My Day aggregator (slice 9b) -----------------------------------
@@ -750,6 +869,11 @@ export interface MyDaySet {
   stage_id: string | null
   start_time: string | null
   end_time: string | null
+  // Whether the requesting user favorited this set's artist. Optional so
+  // cached payloads from older API deployments still parse.
+  favorited?: boolean
+  // Other group members who favorited this set's artist.
+  favorited_by?: { user_id: string; display_name: string | null }[]
 }
 
 export interface MyDayTask {
@@ -780,37 +904,6 @@ export interface GroupDayDto {
 
 export async function getGroupDay(groupId: string, date: string): Promise<GroupDayDto> {
   return request<GroupDayDto>('GET', `/api/v1/ui/groups/${ev(groupId)}/day?date=${ev(date)}`)
-}
-
-// --- group chat (slice 10) -------------------------------------------
-// Newest-first, cursor-paged backwards via `before`. `next_before` is the
-// oldest returned id when the page was full (more may exist), else null.
-export interface ChatMessageDto {
-  id: string
-  group_id: string
-  user_id: string
-  body: string
-  created_at: string
-}
-
-export interface ChatPage {
-  items: ChatMessageDto[]
-  next_before: string | null
-}
-
-export async function listChatMessages(
-  groupId: string,
-  opts: { before?: string; limit?: number } = {},
-): Promise<ChatPage> {
-  const qs = new URLSearchParams()
-  if (opts.before) qs.set('before', opts.before)
-  if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
-  const suffix = qs.toString() ? `?${qs.toString()}` : ''
-  return request<ChatPage>('GET', `/api/v1/ui/groups/${ev(groupId)}/chat${suffix}`)
-}
-
-export async function sendChatMessage(groupId: string, body: string): Promise<ChatMessageDto> {
-  return request<ChatMessageDto>('POST', `/api/v1/ui/groups/${ev(groupId)}/chat`, { body })
 }
 
 // --- lineup: stages / days / artists / slots (slice 3b) -------------
@@ -850,10 +943,19 @@ export interface LineupSlotDto {
   event_id: string
   artist_id: string
   artist_name: string | null
-  day_id: string
+  // null = unscheduled (TBA) slot.
+  day_id: string | null
   stage_id: string | null
   tier: LineupTier | null
   genre: string | null
+  // Catalog-level artist metadata folded into the slot by the API.
+  // Optional: older events-api deployments omit these during rollout.
+  artist_genre?: string | null
+  soundcloud?: string | null
+  spotify?: string | null
+  apple_music?: string | null
+  youtube_music?: string | null
+  instagram?: string | null
   start_time: string | null
   end_time: string | null
   display_name: string | null
@@ -861,7 +963,8 @@ export interface LineupSlotDto {
 
 export interface LineupSlotInput {
   artistId: string
-  dayId: string
+  // null/absent = unscheduled (TBA) slot.
+  dayId?: string | null
   stageId?: string | null
   tier?: LineupTier | null
   genre?: string | null
@@ -952,17 +1055,18 @@ export async function upsertLineupSlot(
 export async function deleteLineupSlot(
   eventId: string,
   artistId: string,
-  dayId: string,
+  dayId: string | null,
 ): Promise<void> {
+  // Literal `none` addresses the artist's unscheduled (TBA) slot.
   await request<void>(
     'DELETE',
-    `/api/v1/ui/events/${ev(eventId)}/lineup/${ev(artistId)}/${ev(dayId)}`,
+    `/api/v1/ui/events/${ev(eventId)}/lineup/${ev(artistId)}/${ev(dayId ?? 'none')}`,
   )
 }
 
 export interface LineupDeleteRef {
   artistId: string
-  dayId: string
+  dayId: string | null
 }
 // Atomic bulk apply for the lineup grid: upsert `slots` and remove
 // `deletes` in one transaction. Returns the upserted rows.
@@ -1025,6 +1129,71 @@ export async function unstarSet(
     `/api/v1/ui/events/${ev(eventId)}/lineup/stars`,
     { artistId, dayId },
   )
+}
+
+// --- artist favorites: day-agnostic per-artist favorites -------------
+
+export interface ArtistFavoriteKeyDto {
+  event_id: string
+  artist_id: string
+}
+
+export interface ArtistFavoriteResultDto extends ArtistFavoriteKeyDto {
+  favorited: boolean
+}
+
+// One group member's favorite of one artist on the group's event.
+export interface GroupArtistFavoriteDto {
+  artist_id: string
+  user_id: string
+  display_name: string | null
+}
+
+// Return the user's favorited artist keys for the given event.
+export async function listFavoriteArtists(eventId: string): Promise<ArtistFavoriteKeyDto[]> {
+  return (
+    await request<{ items: ArtistFavoriteKeyDto[] }>(
+      'GET',
+      `/api/v1/ui/events/${ev(eventId)}/lineup/favorites`,
+    )
+  ).items
+}
+
+// Idempotent favorite. Returns the result with favorited=true.
+export async function favoriteArtist(
+  eventId: string,
+  artistId: string,
+): Promise<ArtistFavoriteResultDto> {
+  return request<ArtistFavoriteResultDto>(
+    'POST',
+    `/api/v1/ui/events/${ev(eventId)}/lineup/favorites`,
+    { artistId },
+  )
+}
+
+// Unfavorite. Returns the result with favorited=false.
+export async function unfavoriteArtist(
+  eventId: string,
+  artistId: string,
+): Promise<ArtistFavoriteResultDto> {
+  return request<ArtistFavoriteResultDto>(
+    'DELETE',
+    `/api/v1/ui/events/${ev(eventId)}/lineup/favorites`,
+    { artistId },
+  )
+}
+
+// All group members' favorites for the group's event (includes the
+// requesting user's own rows; callers separate self vs. others).
+export async function listGroupArtistFavorites(
+  groupId: string,
+): Promise<GroupArtistFavoriteDto[]> {
+  return (
+    await request<{ items: GroupArtistFavoriteDto[] }>(
+      'GET',
+      `/api/v1/ui/groups/${ev(groupId)}/artist-favorites`,
+    )
+  ).items
 }
 
 // --- sessions (activities) + approval workflow (slice 3c) -----------
@@ -1233,7 +1402,7 @@ export interface PoiDto {
 // the app sees a consistent numeric surface for all coordinate fields.
 function normalizePoiDto(raw: Record<string, unknown>): PoiDto {
   return {
-    ...(raw as PoiDto),
+    ...(raw as unknown as PoiDto),
     x_pct: Number(raw['x_pct']),
     y_pct: Number(raw['y_pct']),
   }
@@ -1295,8 +1464,107 @@ export async function uploadMap(
   return (await res.json()) as MapDto
 }
 
+// Per-event PWA app icon. Same single-request multipart shape as
+// uploadMap above; the Worker validates PNG type/size + magic bytes and
+// stores the object key on public_page_config.theme.icon_image_key.
+export async function uploadEventAppIcon(
+  eventId: string,
+  file: File,
+): Promise<{ icon_url: string }> {
+  const csrfToken = await client.fetchCsrf()
+
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const res = await fetch(`/api/v1/ui/events/${ev(eventId)}/app-icon`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'X-RP-CSRF': csrfToken },
+    credentials: 'include',
+    body: formData,
+  })
+
+  if (!res.ok) {
+    let errCode = 'upload_failed'
+    let errMsg = `Upload failed (${res.status}).`
+    try {
+      const err = (await res.json()) as { error?: { code?: string; message?: string } }
+      if (err.error?.code) errCode = err.error.code
+      if (err.error?.message) errMsg = err.error.message
+    } catch {
+      // ignore JSON parse failure
+    }
+    throw new ApiError(errCode, errMsg, res.status)
+  }
+
+  return (await res.json()) as { icon_url: string }
+}
+
+export async function deleteEventAppIcon(eventId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/events/${ev(eventId)}/app-icon`)
+}
+
 export async function listMaps(eventId: string): Promise<MapDto[]> {
   return (await request<{ items: MapDto[] }>('GET', `/api/v1/ui/events/${ev(eventId)}/maps`)).items
+}
+
+// --- group-scoped map reads (attendee Map tab) ----------------------
+// Mirror of the event map GETs gated on group membership: code-joined
+// group members have no event_members row, so the viewer-gated event
+// routes 404 for them. Reads only — mutations stay on the event routes.
+
+export async function listGroupMaps(groupId: string): Promise<MapDto[]> {
+  return (await request<{ items: MapDto[] }>('GET', `/api/v1/ui/groups/${ev(groupId)}/maps`)).items
+}
+
+export function groupMapImageUrl(groupId: string, mapId: string): string {
+  return `/api/v1/ui/groups/${ev(groupId)}/maps/${ev(mapId)}/image`
+}
+
+export async function listGroupPois(groupId: string): Promise<PoiDto[]> {
+  const { items } = await request<{ items: Record<string, unknown>[] }>(
+    'GET',
+    `/api/v1/ui/groups/${ev(groupId)}/pois`,
+  )
+  return items.map(normalizePoiDto)
+}
+
+export async function listGroupZones(groupId: string): Promise<ZoneDto[]> {
+  return (await request<{ items: ZoneDto[] }>('GET', `/api/v1/ui/groups/${ev(groupId)}/zones`))
+    .items
+}
+
+// --- crew map pins (attendee Map tab) -------------------------------
+// A member's self-placed pin on the event's image map (not GPS),
+// visible to the whole group. One pin per member; PUT moves it,
+// DELETE removes it.
+
+export interface MemberLocationDto {
+  user_id: string
+  display_name: string | null
+  layer: MapLayer
+  x_pct: number
+  y_pct: number
+  updated_at: string
+}
+
+export async function listMemberLocations(groupId: string): Promise<MemberLocationDto[]> {
+  return (
+    await request<{ items: MemberLocationDto[] }>(
+      'GET',
+      `/api/v1/ui/groups/${ev(groupId)}/locations`,
+    )
+  ).items
+}
+
+export async function putMyMapPin(
+  groupId: string,
+  input: { layer: MapLayer; xPct: number; yPct: number },
+): Promise<MemberLocationDto> {
+  return request<MemberLocationDto>('PUT', `/api/v1/ui/groups/${ev(groupId)}/locations/me`, input)
+}
+
+export async function deleteMyMapPin(groupId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/ui/groups/${ev(groupId)}/locations/me`)
 }
 
 export async function deleteMap(eventId: string, mapId: string): Promise<void> {
@@ -1400,6 +1668,8 @@ export interface PublicLineupArtistDto {
   appleMusic: string | null
   youtubeMusic: string | null
   instagram: string | null
+  // Optional: older events-api deployments omit it during rollout.
+  genre?: string | null
 }
 
 export interface PublicLineupStageDto {

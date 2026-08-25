@@ -101,6 +101,7 @@ describe('D1 integration — lists SSO + session surface', () => {
     return {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${csrfCookiePair()}`,
       'x-rp-csrf': CSRF,
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -322,6 +323,7 @@ describe('D1 integration — lists SSO + session surface', () => {
         cookie: `${envVars.LISTS_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
         'x-forwarded-for': knownIp,
+        origin: envVars.LISTS_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'test-code-iphash', state: stateNonce }),
     })
@@ -389,7 +391,7 @@ describe('D1 integration — lists SSO + session surface', () => {
     signoutRpidBearer.mockClear()
     const res = await app.request('http://localhost/api/v1/ui/signout', {
       method: 'POST',
-      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF },
+      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF, origin: envVars.LISTS_UI_ORIGIN },
     })
     expect(res.status).toBe(204)
     expect(signoutRpidBearer).not.toHaveBeenCalled()

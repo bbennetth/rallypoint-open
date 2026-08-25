@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createLedger, listLedgers, type LedgerDto } from '../lib/api.js'
 import { SUPPORTED_CURRENCIES } from '@rallypoint/money-shared'
+import { isStaleGeneration } from '../lib/loadGeneration.js'
+import { formatLedgerScope } from '../lib/scopeLabel.js'
 
 // Minimal slice-1 ledgers page. Lists the caller's own ledgers and
 // provides a create-ledger form (name + currency). Full CRUD and
@@ -18,16 +20,24 @@ export function LedgersPage({ selfUserId: _selfUserId }: { selfUserId: string })
     scopeId: _selfUserId,
   })
 
+  // Generation counter (issue #675): guards against a stale load()
+  // resolving after a newer load() or an optimistic create() has
+  // already updated state — see lib/loadGeneration.ts for the rationale.
+  const generationRef = useRef(0)
+
   async function load() {
+    const generation = ++generationRef.current
     setLoading(true)
     setError(null)
     try {
       const page = await listLedgers()
+      if (isStaleGeneration(generation, generationRef.current)) return
       setLedgers(page.items)
     } catch (err) {
+      if (isStaleGeneration(generation, generationRef.current)) return
       setError(err instanceof Error ? err.message : 'Failed to load ledgers.')
     } finally {
-      setLoading(false)
+      if (!isStaleGeneration(generation, generationRef.current)) setLoading(false)
     }
   }
 
@@ -47,6 +57,10 @@ export function LedgersPage({ selfUserId: _selfUserId }: { selfUserId: string })
         scopeType: form.scopeType as 'personal' | 'group' | 'ledger_group',
         scopeId: form.scopeId || _selfUserId,
       })
+      // Bump the generation so any in-flight load() that resolves after
+      // this point is treated as stale and dropped instead of clobbering
+      // this optimistic prepend.
+      generationRef.current++
       setLedgers((prev) => [created, ...prev])
       setForm({ name: '', currency: 'USD', scopeType: 'personal', scopeId: _selfUserId })
     } catch (err) {
@@ -163,7 +177,7 @@ export function LedgersPage({ selfUserId: _selfUserId }: { selfUserId: string })
               <div>
                 <div style={{ fontWeight: 600 }}>{l.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--ink-dim)', marginTop: 2 }}>
-                  {l.currency} · {l.scope_type}:{l.scope_id}
+                  {l.currency} · {formatLedgerScope(l.scope_type, l.scope_id)}
                 </div>
               </div>
               <span className="chip" style={{ fontSize: 10 }}>

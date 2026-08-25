@@ -32,7 +32,11 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // 'hidden' emits .map files locally but DOES NOT append the
+    // sourceMappingURL footer to the bundle, so Cloudflare Workers
+    // Assets won't serve a publicly-discoverable map URL. DevTools can
+    // still load the map manually for debugging. Audit E1 #10.
+    sourcemap: 'hidden',
   },
   test: {
     environment: 'jsdom',

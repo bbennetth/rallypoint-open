@@ -1,0 +1,93 @@
+# ai-api as a Cloudflare Worker — owner of the AI trace corpus (prompt/
+# response traces + user feedback + retention archive). NOT in the
+# model-call path: consumer apps (fitness today, planner soon) call
+# Workers AI directly and report traces fire-and-forget over the AiRPC
+# service binding. HTTP surface is /api/v1/health only — no SPA, no
+# routes/custom domain; consumers reach this Worker exclusively through
+# [[services]] bindings, so no [assets] block and workers_dev stays off.
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked
+# by the cf-deploy bootstrap (`wrangler d1 create rp-ai-{qa,prod}` if
+# absent). R2 buckets are created by the same bootstrap step
+# (`wrangler r2 bucket create rallypoint-ai-{qa,prod}`). No secrets: the
+# trust boundary for ingest is the service binding itself.
+
+name = "rallypoint-ai"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[vars]
+NODE_ENV = "development"
+
+# Daily at 04:00 UTC: deletion sweep (purge soft-deleted accounts' data)
+# + retention drain (archive old rows to JSONL in R2). Restated per env
+# below (crons do not inherit into named envs).
+[triggers]
+crons = ["0 4 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-ai-local"
+# Ignored by `wrangler dev --local`; a real id is only needed for the
+# per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/ai-db/migrations"
+
+[[r2_buckets]]
+binding = "AI_STORE"
+bucket_name = "rallypoint-ai-dev"
+
+# Deletion sweep asks id-api which users are soft-deleted.
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+# ---- QA --------------------------------------------------------------
+[env.qa]
+vars = { NODE_ENV = "production", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
+
+[env.qa.triggers]
+crons = ["0 4 * * *"]
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-ai-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (bootstrap: `wrangler d1 create rp-ai-qa || true`).
+migrations_dir = "../../packages/ai-db/migrations"
+
+[[env.qa.r2_buckets]]
+binding = "AI_STORE"
+bucket_name = "rallypoint-ai-qa"
+
+[[env.qa.services]]
+binding = "RPID"
+service = "rallypoint-id-qa"
+entrypoint = "IdRPC"
+
+# ---- Prod ------------------------------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
+
+[env.prod.triggers]
+crons = ["0 4 * * *"]
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-ai-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+# (bootstrap: `wrangler d1 create rp-ai-prod || true`).
+migrations_dir = "../../packages/ai-db/migrations"
+
+[[env.prod.r2_buckets]]
+binding = "AI_STORE"
+bucket_name = "rallypoint-ai-prod"
+
+[[env.prod.services]]
+binding = "RPID"
+service = "rallypoint-id-prod"
+entrypoint = "IdRPC"

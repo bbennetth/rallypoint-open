@@ -41,6 +41,13 @@ export const rallies = sqliteTable(
     lat: real('lat'),
     // numeric(9,6) → real: GPS longitude, coordinate precision only.
     lng: real('lng'),
+    // Map pin (attendee map long-press creation): percentage position on
+    // an event map layer. No FK to event_maps — the pin keys by layer,
+    // which is unique per event and survives a map delete/re-upload. All
+    // three travel together (validator-enforced), all NULL when unpinned.
+    pinLayer: text('pin_layer'),
+    pinXPct: real('pin_x_pct'),
+    pinYPct: real('pin_y_pct'),
     status: text('status').notNull().default('proposed'),
     createdBy: text('created_by').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })

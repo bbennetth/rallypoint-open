@@ -16,6 +16,12 @@
   ],
   "references": [
     {
+      "path": "../../apps/id-api"
+    },
+    {
+      "path": "../../packages/api-kit"
+    },
+    {
       "path": "../../packages/crypto"
     },
     {

@@ -84,10 +84,11 @@ export function SnapshotHistory({
           {error && (
             <div
               role="alert"
-              className="p-3 text-sm text-[color:var(--ink)]"
+              className="p-3 text-sm"
               style={{
-                border: '1.5px solid var(--hot)',
-                background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+                background: 'var(--hot-soft)',
+                color: 'var(--hot-text)',
+                borderRadius: 'var(--radius-lg)',
               }}
             >
               {error}
@@ -102,7 +103,7 @@ export function SnapshotHistory({
                 <li
                   key={s.id}
                   className="flex items-center gap-2 text-sm px-2 py-1.5 flex-wrap"
-                  style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+                  style={{ background: 'var(--surface)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-card)' }}
                 >
                   <span className="flex-1 min-w-40">
                     {s.reason}

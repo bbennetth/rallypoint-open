@@ -2,44 +2,65 @@ import { Hono } from 'hono'
 import { NONCE, secureHeaders } from 'hono/secure-headers'
 import { ANTI_FINGERPRINT_NOT_FOUND } from '@rallypoint/shared'
 import type { Env } from './env.js'
-import { buildLogger, type Logger } from './logger.js'
+import { buildLoggerWithFlush, type Logger } from './logger.js'
 import type { HonoApp } from './context.js'
 import { requestId } from './middleware/request-id.js'
 import { accessLog } from './middleware/access-log.js'
+import { logFlush } from './middleware/log-flush.js'
 import { errorHandler } from './middleware/error-handler.js'
 import { csrfIssueHandler, requireCsrf } from './middleware/csrf.js'
 import { requireAllowedOrigin } from './middleware/origin.js'
-import { sdkCors } from './middleware/sdk-cors.js'
 import { healthRoutes } from './routes/health.js'
 import { authUiRoutes, publicAuthRoutes } from './routes/auth/index.js'
+import { webauthnRoutes } from './routes/auth/webauthn-routes.js'
 import { sessionRoutes } from './routes/auth/session.js'
 import { adminRoutes } from './routes/admin.js'
 import { ssoRoutes } from './routes/sso.js'
 import { appsRoutes } from './routes/apps.js'
-import { sdkUsersRoutes } from './routes/sdk-users.js'
 import { settingsRoutes } from './routes/settings.js'
 import { avatarUiRoutes, avatarServeRoutes } from './routes/avatar.js'
+import { oauthRoutes } from './routes/oauth.js'
+import { oauthIdentityRoutes } from './routes/auth/oauth-identities.js'
 import type { Repos } from './repos/types.js'
 import type { Services } from './services/types.js'
 import { createPasswordHasher, type PasswordHasher } from './crypto/password.js'
 import { SessionCache } from './session/cache.js'
 import { attachSessionCache } from './middleware/session.js'
+import { buildOAuthProviders, type OAuthProviders } from './services/oauth/index.js'
 
 export interface BuildAppDeps {
   env: Env
   logger?: Logger
+  // Drains the PostHog log-sink buffer. Passed alongside `logger` by the
+  // Worker entrypoint (paired via buildLoggerWithFlush). Defaults to a
+  // no-op when a bare logger is injected without one (tests).
+  flushLogs?: () => Promise<void>
   repos: Repos
   services: Services
   passwordHasher?: PasswordHasher
   sessionCache?: SessionCache
+  oauthProviders?: OAuthProviders
 }
 
 export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
-  const logger = deps.logger ?? buildLogger(deps.env)
+  let logger: Logger
+  let flushLogs: () => Promise<void>
+  if (deps.logger) {
+    logger = deps.logger
+    flushLogs = deps.flushLogs ?? (async () => {})
+  } else {
+    ;({ logger, flushLogs } = buildLoggerWithFlush(deps.env))
+  }
   const passwordHasher =
     deps.passwordHasher ?? createPasswordHasher({ pepper: deps.env.ARGON2_PEPPER })
   const sessionCache = deps.sessionCache ?? new SessionCache()
+  const oauthProviders = deps.oauthProviders ?? buildOAuthProviders(deps.env)
   const app = new Hono<HonoApp>()
+
+  // Outermost middleware: after every request (success or throw) drain the
+  // PostHog log-sink buffer via executionCtx.waitUntil. Registered first so
+  // its post-next flush runs last, after all logging including onError.
+  app.use('*', logFlush(flushLogs))
 
   // The public avatar serve route is embedded cross-origin as an <img>
   // by every Rallypoint web app (planner/events/money/id-web), each on
@@ -106,6 +127,7 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
     c.set('repos', deps.repos)
     c.set('services', deps.services)
     c.set('passwordHasher', passwordHasher)
+    c.set('oauthProviders', oauthProviders)
     await next()
   })
   app.use('*', attachSessionCache(sessionCache))
@@ -127,19 +149,26 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   // request. GET/HEAD/OPTIONS pass through.
   app.use('/api/v1/ui/*', requireCsrf())
 
-  // Allowlist CORS (#19) for the bearer-token SDK namespace. Runs
-  // ahead of the SDK route mounts so OPTIONS preflight is answered
-  // before per-route bearer auth.
-  app.use('/api/v1/sdk/*', sdkCors())
+  // The `/api/v1/sdk/*` bearer-token namespace was retired in PR 3 of
+  // feat/rpc-bindings; the consumers now reach id-api through the
+  // `IdRPC` `WorkerEntrypoint` binding instead. No CORS preflight needed
+  // because there are no `/api/v1/sdk/*` routes left for browsers to
+  // call (the SSO mint flow lives under `/api/v1/ui/*`).
 
   app.route('/', healthRoutes)
   app.route('/', publicAuthRoutes)
+  // OAuth browser-redirect routes live under /api/v1/oauth/* — deliberately
+  // OUTSIDE the /api/v1/ui/* CSRF + Origin middleware (a top-level redirect
+  // can't carry an X-RP-CSRF header). The `state` param + browser-bind
+  // cookie are the CSRF defense there.
+  app.route('/', oauthRoutes)
   app.route('/', authUiRoutes)
+  app.route('/', webauthnRoutes)
+  app.route('/', oauthIdentityRoutes)
   app.route('/', sessionRoutes)
   app.route('/', adminRoutes)
   app.route('/', ssoRoutes)
   app.route('/', appsRoutes)
-  app.route('/', sdkUsersRoutes)
   app.route('/', settingsRoutes)
   app.route('/', avatarUiRoutes)
   app.route('/', avatarServeRoutes)

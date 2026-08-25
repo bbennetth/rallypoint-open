@@ -23,6 +23,7 @@ const APP_REGISTRY: ReadonlyArray<{ client: string; name: string; path: string }
   { client: 'lists', name: 'Lists', path: '/me/lists' },
   { client: 'money', name: 'Money', path: '/me/ledgers' },
   { client: 'planner', name: 'Planner', path: '/me' },
+  { client: 'fitness', name: 'Health', path: '/me/log' },
 ]
 
 // Derive the launch origin from a bare host (no protocol in env).
@@ -42,6 +43,9 @@ function hostForClient(
   if (client === 'lists') return env.SSO_LISTS_HOST ?? null
   if (client === 'money') return env.SSO_MONEY_HOST ?? null
   if (client === 'planner') return env.SSO_PLANNER_HOST ?? null
+  if (client === 'fitness') return env.SSO_FITNESS_HOST ?? null
+  // 'admin' is intentionally absent from APP_REGISTRY (internal tool, not a
+  // launcher surface), so no host lookup is needed here.
   return null
 }
 

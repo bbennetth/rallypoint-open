@@ -33,5 +33,3 @@ export const rateLimits = sqliteTable(
     }),
   }),
 )
-
-export type DbRateLimit = typeof rateLimits.$inferSelect

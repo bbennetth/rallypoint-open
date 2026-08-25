@@ -1,47 +1,54 @@
-import { randomBytes } from 'node:crypto'
 import { Hono } from 'hono'
 import { ulid } from 'ulid'
 import {
   CreateEventSchema,
   PatchEventSchema,
+  isEventScopedObjectKey,
   mergeEventFeatures,
   resolveEventFeatures,
   CreateInviteSchema,
   AcceptInviteSchema,
   TransferOwnershipSchema,
-  generateEventSlug,
 } from '@rallypoint/events-shared'
+import { paginationQuery, UniqueConstraintError } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { eventsCursorCodec } from '../lib/events-cursor.js'
+import { createEventWithSlugRetry } from '../lib/create-event.js'
 import type { EventRecord, MemberRole, PatchEventInput } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
-import { TENANT, actorRole, loadForAction, recordActivity } from './_access.js'
+import {
+  TENANT,
+  actorRole,
+  isEventsAdmin,
+  isSystemEvent,
+  loadForAction,
+  recordActivity,
+  viewerAttending,
+} from './_access.js'
 import { publish } from '../realtime/publish.js'
 import { eventChannel, envelope } from '../realtime/channels.js'
 
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000 // 14 days
 const RESTORE_GRACE_MS = 30 * 24 * 60 * 60 * 1000 // 30-day soft-delete window
-const DEFAULT_LIMIT = 20
-const MAX_LIMIT = 100
-
-// Default slug: <slugified-name, max 24>-<4 random chars>. Custom
-// slugs are deferred behind a future paid-tier gate, so we always
-// auto-generate at create time and ignore any client-supplied slug.
-// SLUG_CREATE_RETRY caps the collision-retry loop (the 30^4 namespace
-// per name-prefix makes a hit per attempt vanishingly small, but we
-// retry rather than 500 if one happens).
-const SLUG_CREATE_RETRY = 5
-function randomSlugByte(): number {
-  return randomBytes(1)[0]!
-}
+// clamp (not reject) preserves the pre-unification behavior: the old route
+// clamped `limit` into [1,100] and fell back to the default on a non-numeric
+// value rather than 400ing a read. (An undecodable cursor is still a 400 —
+// that guard is below.)
+const eventsPageQuery = paginationQuery({ defaultLimit: 20, maxLimit: 100, mode: 'clamp' })
 
 function num(s: string | null): number | null {
   return s === null ? null : Number(s)
 }
 
-function serializeEvent(e: EventRecord, viewerRole: MemberRole): Record<string, unknown> {
+// viewer_role is null on the browse surfaces (routes/browse.ts reuses
+// this serializer for strangers); every route in THIS file resolves a
+// concrete role before serializing.
+export function serializeEvent(
+  e: EventRecord,
+  viewerRole: MemberRole | null,
+): Record<string, unknown> {
   return {
     id: e.id,
     slug: e.slug,
@@ -73,45 +80,26 @@ export const eventsRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
 
-    // #16 follow-up: every event slug is auto-generated as
-    // `<slugified-name, max 24>-<4 random chars>`. The 30^4 namespace
-    // per name-prefix makes collisions vanishingly rare; we still
-    // retry up to SLUG_CREATE_RETRY times if one happens. Custom
-    // slugs come later as a paid-tier feature.
-    let event: EventRecord | null = null
-    let lastErr: unknown
-    for (let attempt = 0; attempt < SLUG_CREATE_RETRY; attempt += 1) {
-      const slug = generateEventSlug(body.name, randomSlugByte)
-      try {
-        event = await c.var.repos.events.create({
-          id: `event_${ulid()}`,
-          tenantId: TENANT,
-          ownerUserId: userId,
-          slug,
-          name: body.name,
-          description: body.description ?? null,
-          startDate: body.startDate ?? null,
-          endDate: body.endDate ?? null,
-          timezone: body.timezone,
-          locationLabel: body.locationLabel ?? null,
-          locationLat: body.locationLat ?? null,
-          locationLng: body.locationLng ?? null,
-          privacyMode: body.privacyMode ?? 'unlisted',
-        })
-        break
-      } catch (err) {
-        lastErr = err
-        if (err instanceof UniqueConstraintError) continue
-        throw err
-      }
-    }
-    if (!event) {
-      // Exhausted retries on slug collisions — should never happen
-      // outside an adversarial test. Surface as 409 so the client
-      // can prompt the user to retry.
-      throw lastErr instanceof UniqueConstraintError
-        ? errors.eventSlugTaken()
-        : lastErr ?? errors.eventSlugTaken()
+    // #16 follow-up: auto-slug + collision-retry live in
+    // lib/create-event.ts (shared with the admin RPC core). Exhausted
+    // retries surface as 409 so the client can prompt a retry.
+    let event: EventRecord
+    try {
+      event = await createEventWithSlugRetry(c.var.repos, {
+        tenantId: TENANT,
+        ownerUserId: userId,
+        name: body.name,
+        description: body.description ?? null,
+        startDate: body.startDate ?? null,
+        endDate: body.endDate ?? null,
+        timezone: body.timezone,
+        locationLabel: body.locationLabel ?? null,
+        locationLat: body.locationLat ?? null,
+        locationLng: body.locationLng ?? null,
+        privacyMode: body.privacyMode ?? 'unlisted',
+      })
+    } catch (err) {
+      throw err instanceof UniqueConstraintError ? errors.eventSlugTaken() : err
     }
     await recordActivity(c, event.id, 'event.created', { slug: event.slug })
     return c.json(serializeEvent(event, 'owner'), 201)
@@ -121,13 +109,31 @@ export const eventsRoutes = new Hono<HonoApp>()
   .get('/api/v1/ui/events', async (c) => {
     const userId = c.var.session!.userId
     const includeDeleted = c.req.query('include') === 'deleted'
-    const rawLimit = Number(c.req.query('limit') ?? DEFAULT_LIMIT)
-    const limit = Number.isFinite(rawLimit)
-      ? Math.min(MAX_LIMIT, Math.max(1, Math.floor(rawLimit)))
-      : DEFAULT_LIMIT
-    const cursor = c.req.query('cursor') ?? null
+    const parsed = eventsPageQuery.safeParse({
+      limit: c.req.query('limit'),
+      cursor: c.req.query('cursor'),
+    })
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const { limit, cursor } = parsed.data
+    // Reject an undecodable cursor (tampered / from another endpoint) rather
+    // than silently restarting at page 1 — the latter makes infinite-scroll
+    // bugs invisible. Legacy `<iso>|<id>` cursors still decode here.
+    if (cursor !== undefined && eventsCursorCodec.decode(cursor) === null) {
+      throw errors.validation({
+        issues: [{ code: 'custom', path: ['cursor'], message: 'Invalid cursor.' }],
+      })
+    }
 
-    const page = await c.var.repos.events.listForUser(userId, { includeDeleted, limit, cursor })
+    const page = await c.var.repos.events.listForUser(userId, {
+      includeDeleted,
+      limit,
+      cursor: cursor ?? null,
+      // Allowlisted admins resolve as 'owner' on system-owned events
+      // without an event_members row, so self-attending one has to be
+      // what makes it visible here (issue: joined system event missing
+      // from My Events). The env/allowlist read stays at the route.
+      includeAttendedSystemEvents: isEventsAdmin(c, userId),
+    })
     // Phase 0 (#16): a soft-removed event_attendees row revokes
     // listing visibility too — without this filter, removed attendees
     // would keep seeing the event in their /me/events list because
@@ -171,6 +177,7 @@ export const eventsRoutes = new Hono<HonoApp>()
     return c.json({
       ...serializeEvent(event, role),
       my_group_id: groupByEvent.get(event.id) ?? null,
+      viewer_attending: await viewerAttending(c, event.id, userId),
     })
   })
 
@@ -182,6 +189,18 @@ export const eventsRoutes = new Hono<HonoApp>()
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
     const parsed = PatchEventSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    // Theme image keys are client-supplied and later streamed by public
+    // serve routes, so they must stay inside this event's R2 namespace
+    // (audit 1.1). The zod schema can't check this — it has no event id
+    // at parse time — so it's enforced here where the event is loaded.
+    const theme = parsed.data.publicPageConfig?.theme
+    for (const key of [theme?.background_image_key, theme?.icon_image_key]) {
+      if (key !== undefined && !isEventScopedObjectKey(key, event.id)) {
+        throw errors.validation({
+          reason: `Theme image keys must start with events/${event.id}/.`,
+        })
+      }
+    }
     // Feature toggles are owner-only (#216); the rest of the patch
     // surface stays editor-level. Merge the partial patch over the
     // stored value so the column always holds the full object.
@@ -198,12 +217,7 @@ export const eventsRoutes = new Hono<HonoApp>()
       fields.features = mergeEventFeatures(event.features, featuresPatch)
     }
 
-    let updated: EventRecord | null
-    try {
-      updated = await c.var.repos.events.patch(event.id, fields)
-    } catch (err) {
-      throw err
-    }
+    const updated = await c.var.repos.events.patch(event.id, fields)
     if (!updated) throw errors.eventNotFound()
     await recordActivity(c, event.id, 'event.patched', { fields: Object.keys(fields) })
     publish(
@@ -245,6 +259,17 @@ export const eventsRoutes = new Hono<HonoApp>()
     const parsed = TransferOwnershipSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const { newOwnerUserId, currentPassword } = parsed.data
+
+    // System-owned events are permanently owned by the sentinel — the
+    // re-auth step below would try to verify a password the sentinel
+    // doesn't have (admins act as owner but aren't the owner row), so
+    // refuse up front with a clear 409 instead of a confusing 401.
+    if (isSystemEvent(event)) {
+      throw errors.conflict(
+        'system_event_not_transferable',
+        'System-owned events cannot change ownership.',
+      )
+    }
 
     if (newOwnerUserId === event.ownerUserId) {
       throw new ApiError({
@@ -378,5 +403,9 @@ export const eventsRoutes = new Hono<HonoApp>()
       invite_id: invite.id,
       ...(result.readmitted ? { readmitted: true } : {}),
     })
-    return c.json({ event_slug: event.slug, role: existing?.role ?? invite.role })
+    // E2 #8: invite.role is the authoritative role for THIS acceptance,
+    // including re-admissions where the previous member row had a
+    // different role. The repo's UPDATE in the skipMemberAdd path
+    // brings the DB into agreement; the response mirrors it.
+    return c.json({ event_slug: event.slug, role: invite.role })
   })

@@ -26,3 +26,19 @@ export function partitionByOrigin<T extends { list_type: ListType }>(
   }
   return { own, plannerManaged }
 }
+
+// Resolve the ListDetailPage readOnly flag for a `list_group`-scoped
+// list. `groupsLookup` is `null` when the /groups lookup threw (network
+// error, etc.) — fail CLOSED in that case (#675): a lookup failure must
+// not silently render mutating controls the server would 403 on anyway.
+// Non-`list_group` scopes (personal/direct lists) are never Planner-
+// managed via this path, so they're always writable here.
+export function resolvePlannerReadOnly(
+  scopeType: string,
+  scopeId: string,
+  groupsLookup: { items: { id: string; origin: string | null }[] } | null,
+): boolean {
+  if (scopeType !== 'list_group') return false
+  if (groupsLookup === null) return true
+  return groupsLookup.items.find((g) => g.id === scopeId)?.origin === 'planner'
+}

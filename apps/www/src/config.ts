@@ -11,5 +11,8 @@ export const EVENTS_WEB_URL =
   (env.VITE_EVENTS_WEB_URL as string | undefined) ?? 'http://localhost:5174'
 export const PLANNER_WEB_URL =
   (env.VITE_PLANNER_WEB_URL as string | undefined) ?? 'http://localhost:5177'
+export const FITNESS_WEB_URL =
+  (env.VITE_FITNESS_WEB_URL as string | undefined) ?? 'http://localhost:5178'
 
 export const OPEN_REPO_URL = 'https://github.com/bbennetth/rallypoint-open'
+export const CMD_REPO_URL = 'https://github.com/bbennetth/rallypoint-cmd'

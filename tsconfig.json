@@ -2,6 +2,9 @@
   "files": [],
   "references": [
     {
+      "path": "./packages/api-kit"
+    },
+    {
       "path": "./apps/id-api"
     },
     {
@@ -47,6 +50,9 @@
       "path": "./packages/lists-client"
     },
     {
+      "path": "./packages/lists-rpc-client"
+    },
+    {
       "path": "./apps/money-api"
     },
     {
@@ -62,13 +68,13 @@
       "path": "./packages/money-shared"
     },
     {
-      "path": "./packages/money-client"
-    },
-    {
       "path": "./packages/ui"
     },
     {
       "path": "./packages/web-kit"
+    },
+    {
+      "path": "./packages/offline-kit"
     },
     {
       "path": "./packages/logger"
@@ -81,6 +87,24 @@
     },
     {
       "path": "./apps/lists-mcp"
+    },
+    {
+      "path": "./apps/fitness-api"
+    },
+    {
+      "path": "./packages/fitness-db"
+    },
+    {
+      "path": "./packages/fitness-shared"
+    },
+    {
+      "path": "./packages/fitness-client"
+    },
+    {
+      "path": "./apps/admin-api"
+    },
+    {
+      "path": "./packages/admin-db"
     }
   ]
 }

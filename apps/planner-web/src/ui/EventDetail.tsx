@@ -4,8 +4,10 @@
 // ticket list + upload/download callbacks. Extracted from EventsPage so the two
 // surfaces render identical detail without forking.
 
+import { useCallback, useState } from 'react'
 import { EyeRow } from './bits.js'
 import { Icon, QR } from './icons.js'
+import { TicketViewer } from './TicketViewer.js'
 import { deriveStatus, formatWhen } from '../lib/events-helpers.js'
 import type { HolidayDto, PersonalEventDto, TicketDto } from '../lib/api.js'
 
@@ -44,6 +46,12 @@ export function EventDetail({
   onEdit: () => void
 }) {
   const status = deriveStatus(event.startAt)
+  // Which ticket the in-app viewer shows. Local state: the viewer is a pure
+  // UI overlay, so keeping it here spares every host page (Events, My Day,
+  // Calendar) from threading viewer props through.
+  const [viewing, setViewing] = useState<TicketDto | null>(null)
+  // Stable reference: it's a dep of the viewer's document-listener effect.
+  const closeViewer = useCallback(() => setViewing(null), [])
   return (
     <section style={{ display: 'grid', gap: 16, minWidth: 0 }}>
       <div className="pl-card" style={{ padding: 14 }}>
@@ -101,11 +109,19 @@ export function EventDetail({
           <div style={{ display: 'grid', gap: 9 }}>
             {tickets.map((t) => (
               <div key={t.id} className="pl-ticket">
-                <div className="stub">
-                  <QR size={42} />
-                </div>
-                <div className="body" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0 }}>
+                {/* Real <button> (not a role=button row) so keyboard
+                    activation and ARIA nesting stay valid — the sibling Get
+                    button is outside it, no stopPropagation games needed. */}
+                <button
+                  type="button"
+                  className="pl-ticket-open"
+                  aria-label={`View ${t.fileName ?? contentTypeLabel(t.contentType)}`}
+                  onClick={() => setViewing(t)}
+                >
+                  <span className="stub">
+                    <QR size={42} />
+                  </span>
+                  <span className="body" style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
                     <span style={{ fontSize: 13.5, color: 'var(--ink)', display: 'inline-flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
                       <Icon name="file" size={13} />
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -121,16 +137,27 @@ export function EventDetail({
                       </span>
                     </span>
                   </span>
+                </button>
+                <span style={{ display: 'flex', alignItems: 'center', padding: '0 13px 0 0' }}>
                   <button className="pl-btn ghost sm" onClick={() => onDownload(t)}>
                     <Icon name="download" size={13} />
                     Get
                   </button>
-                </div>
+                </span>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {viewing && (
+        <TicketViewer
+          eventId={event.id}
+          ticket={viewing}
+          onClose={closeViewer}
+          onDownload={onDownload}
+        />
+      )}
     </section>
   )
 }

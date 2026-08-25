@@ -108,6 +108,7 @@ async function signedInCookie(
     tenantId: 'rallypoint',
     ipHash: 'a'.repeat(64),
     uaHash: 'b'.repeat(64),
+    sessionHmacKey: env.SESSION_HMAC_KEY,
   })
   return `${env.SESSION_COOKIE_NAME}=${rawToken}`
 }

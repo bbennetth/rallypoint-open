@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
+import { SYSTEM_USER_ID } from '@rallypoint/shared'
 import {
   buildMemoryRepos,
   MemoryEventRepo,
@@ -6,11 +8,11 @@ import {
   MemoryEventStageRepo,
   MemoryEventDayRepo,
   MemoryArtistRepo,
+  MemoryArtistMbReviewRepo,
   MemoryEventArtistRepo,
   MemoryEventSetStarRepo,
   MemoryEventSessionRepo,
   MemoryEventSnapshotRepo,
-  UniqueConstraintError,
 } from './memory.js'
 import type { CreateEventInput, CreateSessionInput, EventArtistRecord } from './types.js'
 
@@ -58,6 +60,43 @@ describe('MemoryEventRepo listForUser', () => {
 
     const withDeleted = await repo.listForUser('user_me', { includeDeleted: true, limit: 50 })
     expect(withDeleted.items.map((e) => e.id)).toContain('event_deleted')
+  })
+
+  // D1 twin: apps/events-api/src/repos/d1/events.ts listForUser.
+  it('surfaces attended system events only under includeAttendedSystemEvents', async () => {
+    const repos = buildMemoryRepos()
+    await repos.events.create(
+      evt({ id: 'event_system', slug: 'sys', ownerUserId: SYSTEM_USER_ID }),
+    )
+    // A normal event attended without membership stays hidden either way.
+    await repos.events.create(
+      evt({ id: 'event_normal', slug: 'norm', ownerUserId: 'user_other' }),
+    )
+    await repos.attendees.upsert({ id: 'a1', eventId: 'event_system', userId: 'user_me' })
+    await repos.attendees.upsert({ id: 'a2', eventId: 'event_normal', userId: 'user_me' })
+
+    const off = await repos.events.listForUser('user_me', { includeDeleted: false, limit: 50 })
+    expect(off.items.map((e) => e.id)).toEqual([])
+
+    const on = await repos.events.listForUser('user_me', {
+      includeDeleted: false,
+      limit: 50,
+      includeAttendedSystemEvents: true,
+    })
+    expect(on.items.map((e) => e.id)).toEqual(['event_system'])
+  })
+
+  it('drops a system event once the attendee row is soft-removed', async () => {
+    const repos = buildMemoryRepos()
+    await repos.events.create(
+      evt({ id: 'event_system', slug: 'sys', ownerUserId: SYSTEM_USER_ID }),
+    )
+    await repos.attendees.upsert({ id: 'a1', eventId: 'event_system', userId: 'user_me' })
+    const opts = { includeDeleted: false, limit: 50, includeAttendedSystemEvents: true }
+    expect((await repos.events.listForUser('user_me', opts)).items).toHaveLength(1)
+
+    await repos.attendees.softRemove('event_system', 'user_me', new Date())
+    expect((await repos.events.listForUser('user_me', opts)).items).toEqual([])
   })
 
   it('paginates with a stable cursor', async () => {
@@ -209,6 +248,70 @@ describe('MemoryArtistRepo', () => {
     )
     expect((await repo.findByName('aphex twin'))?.id).toBe(created.id)
     expect((await repo.search('phex', 10)).map((a) => a.id)).toContain(created.id)
+  })
+
+  it('listPage orders by lower(name),id with tuple keyset + q filter', async () => {
+    const repo = new MemoryArtistRepo()
+    await repo.create({ id: 'art_3', name: 'charli xcx' })
+    await repo.create({ id: 'art_1', name: 'Aphex Twin' })
+    await repo.create({ id: 'art_2', name: 'Bicep' })
+    const page1 = await repo.listPage({ limit: 2 })
+    expect(page1.items.map((a) => a.name)).toEqual(['Aphex Twin', 'Bicep'])
+    expect(page1.nextCursor).toEqual({ name: 'Bicep', id: 'art_2' })
+    const page2 = await repo.listPage({ cursor: page1.nextCursor, limit: 2 })
+    expect(page2.items.map((a) => a.name)).toEqual(['charli xcx'])
+    expect(page2.nextCursor).toBeNull()
+    expect((await repo.listPage({ q: 'PHEX', limit: 10 })).items.map((a) => a.id)).toEqual([
+      'art_1',
+    ])
+  })
+
+  it('lists enrichment candidates: any-field-null only, keyset id order', async () => {
+    const repo = new MemoryArtistRepo()
+    const full = {
+      genre: 'g',
+      soundcloud: 's',
+      spotify: 'sp',
+      appleMusic: 'am',
+      youtubeMusic: 'ym',
+      instagram: 'ig',
+    }
+    await repo.create({ id: 'art_a', name: 'A', ...full, instagram: null })
+    await repo.create({ id: 'art_b', name: 'B', ...full }) // fully enriched → excluded
+    await repo.create({ id: 'art_c', name: 'C', ...full, mbid: 'mb-c' }) // enriched + pinned → excluded
+    await repo.create({ id: 'art_d', name: 'D' })
+    expect((await repo.listEnrichmentCandidates({ limit: 1 })).map((a) => a.id)).toEqual(['art_a'])
+    expect(
+      (await repo.listEnrichmentCandidates({ afterId: 'art_a', limit: 2 })).map((a) => a.id),
+    ).toEqual(['art_d'])
+  })
+})
+
+describe('MemoryArtistMbReviewRepo', () => {
+  it('mirrors the pending-unique index and one-shot setReviewed', async () => {
+    const repo = new MemoryArtistMbReviewRepo()
+    const created = await repo.create({
+      id: 'amr_1',
+      artistId: 'art_1',
+      mbid: 'mb-1',
+      matchKind: 'auto',
+      proposedFields: { genre: 'techno' },
+    })
+    expect(created.status).toBe('pending')
+    await expect(
+      repo.create({ id: 'amr_2', artistId: 'art_1', mbid: 'mb-1', matchKind: 'auto', proposedFields: {} }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError)
+    expect((await repo.getPendingByArtist('art_1'))?.id).toBe('amr_1')
+
+    const applied = await repo.setReviewed('amr_1', 'applied')
+    expect(applied?.status).toBe('applied')
+    expect(await repo.setReviewed('amr_1', 'dismissed')).toBeNull()
+    expect((await repo.listByStatus('applied')).map((r) => r.id)).toEqual(['amr_1'])
+    expect(await repo.getPendingByArtist('art_1')).toBeNull()
+
+    // Decided row frees the pending slot.
+    await repo.create({ id: 'amr_3', artistId: 'art_1', mbid: 'mb-1', matchKind: 'stored', proposedFields: {} })
+    expect((await repo.getPendingByArtist('art_1'))?.matchKind).toBe('stored')
   })
 })
 
@@ -425,6 +528,82 @@ describe('MemoryEventSnapshotRepo', () => {
   })
 })
 
+describe('MemoryGroupRepo listUserGroupsForEvent', () => {
+  // Mirrors the D1 impl: EVERY group the user is in for the event (not
+  // the single first-joined one listUserGroupIdsByEvent collapses to),
+  // scoped to that event, in join order, carrying each membership role.
+  async function seed() {
+    const repos = buildMemoryRepos()
+    const groups: Array<[string, string, string]> = [
+      ['grp_a', 'event_a', 'hash_a'],
+      ['grp_b', 'event_a', 'hash_b'],
+      ['grp_other', 'event_b', 'hash_other'],
+      ['grp_theirs', 'event_a', 'hash_theirs'],
+    ]
+    for (const [id, eventId, joinCodeHash] of groups) {
+      await repos.groups.create({
+        id,
+        eventId,
+        ownerUserId: 'user_owner',
+        name: id,
+        description: null,
+        joinCodeHash,
+        startDate: null,
+        endDate: null,
+      })
+    }
+    await repos.groupMembers.add({ id: 'grm_b', groupId: 'grp_b', userId: 'user_me', role: 'owner' })
+    await repos.groupMembers.add({ id: 'grm_a', groupId: 'grp_a', userId: 'user_me', role: 'member' })
+    await repos.groupMembers.add({
+      id: 'grm_o',
+      groupId: 'grp_other',
+      userId: 'user_me',
+      role: 'member',
+    })
+    await repos.groupMembers.add({
+      id: 'grm_t',
+      groupId: 'grp_theirs',
+      userId: 'user_them',
+      role: 'owner',
+    })
+    return repos
+  }
+
+  // Order is asserted as a set: these memberships land in the same
+  // millisecond, and neither impl breaks a joined_at tie deterministically
+  // (D1 leaves it to SQLite). What must hold is that BOTH come back, each
+  // carrying its own role — dropping either is the bug being fixed.
+  it('returns every group the user is in for that event, with its role', async () => {
+    const repos = await seed()
+    const mine = await repos.groups.listUserGroupsForEvent('user_me', 'event_a')
+    expect(
+      Object.fromEntries(mine.map((m) => [m.group.id, m.role])),
+    ).toEqual({ grp_a: 'member', grp_b: 'owner' })
+  })
+
+  it("omits other events' groups and groups the user hasn't joined", async () => {
+    const repos = await seed()
+    const mine = await repos.groups.listUserGroupsForEvent('user_me', 'event_a')
+    expect(mine.some((m) => m.group.id === 'grp_other')).toBe(false)
+    expect(mine.some((m) => m.group.id === 'grp_theirs')).toBe(false)
+  })
+
+  it('returns empty for a user with no groups in the event', async () => {
+    const repos = await seed()
+    expect(await repos.groups.listUserGroupsForEvent('user_nobody', 'event_a')).toEqual([])
+  })
+
+  // my_group_id (the routing signal) must be one of the groups the tab
+  // lists — otherwise an entry point can drop you into a group the tab
+  // then fails to show.
+  it('contains whatever listUserGroupIdsByEvent picked as my_group_id', async () => {
+    const repos = await seed()
+    const mine = await repos.groups.listUserGroupsForEvent('user_me', 'event_a')
+    const ids = await repos.groups.listUserGroupIdsByEvent('user_me', ['event_a'])
+    expect(mine.map((m) => m.group.id)).toContain(ids.get('event_a'))
+  })
+})
+
 describe('MemoryGroupRepo delete cascade', () => {
   it('mirrors the FK cascade: deleting a group removes its rallies + attendees', async () => {
     const repos = buildMemoryRepos()
@@ -504,13 +683,13 @@ describe('MemoryChatMessageRepo', () => {
 
     const second = await repos.chatMessages.listForGroup('group_1', {
       limit: 2,
-      before: first[first.length - 1]!.id,
+      cursor: { at: null, id: first[first.length - 1]!.id },
     })
     expect(second.map((m) => m.id)).toEqual(['msg_3', 'msg_2'])
 
     const third = await repos.chatMessages.listForGroup('group_1', {
       limit: 2,
-      before: second[second.length - 1]!.id,
+      cursor: { at: null, id: second[second.length - 1]!.id },
     })
     expect(third.map((m) => m.id)).toEqual(['msg_1'])
   })
@@ -800,6 +979,133 @@ describe('MemoryEventRepo.acceptInvite', () => {
       userId: 'user_race',
       role: 'editor',
       inviteId: invite.id,
+      skipMemberAdd: false,
+    })
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.reason).toBe('already_active_member')
+  })
+})
+
+describe('MemoryEventRepo listBrowsable', () => {
+  it('returns system-owned (any privacy) + public user events, never unlisted/private/deleted', async () => {
+    const repo = new MemoryEventRepo()
+    await repo.create(evt({ id: 'event_sys_u', slug: 'su', ownerUserId: SYSTEM_USER_ID }))
+    await repo.create(
+      evt({ id: 'event_sys_p', slug: 'sp', ownerUserId: SYSTEM_USER_ID, privacyMode: 'private' }),
+    )
+    await repo.create(evt({ id: 'event_pub', slug: 'pu', privacyMode: 'public' }))
+    await repo.create(evt({ id: 'event_unl', slug: 'un', privacyMode: 'unlisted' }))
+    await repo.create(evt({ id: 'event_prv', slug: 'pr', privacyMode: 'private' }))
+    await repo.create(
+      evt({ id: 'event_sys_del', slug: 'sd', ownerUserId: SYSTEM_USER_ID }),
+    )
+    await repo.softDelete('event_sys_del', new Date())
+
+    const page = await repo.listBrowsable({ includeDeleted: false, limit: 50 })
+    const ids = page.items.map((e) => e.id).sort()
+    expect(ids).toEqual(['event_pub', 'event_sys_p', 'event_sys_u'])
+  })
+
+  it('paginates with a stable cursor', async () => {
+    const repo = new MemoryEventRepo()
+    for (let i = 0; i < 5; i++) {
+      const e = await repo.create(
+        evt({ id: `event_b${i}`, slug: `b${i}`, ownerUserId: SYSTEM_USER_ID }),
+      )
+      ;(e as { createdAt: Date }).createdAt = new Date(2026, 0, 1, 0, 0, i)
+      await repo.patch(e.id, {})
+    }
+    const first = await repo.listBrowsable({ includeDeleted: false, limit: 2 })
+    expect(first.items).toHaveLength(2)
+    expect(first.nextCursor).toBeTruthy()
+    const second = await repo.listBrowsable({
+      includeDeleted: false,
+      limit: 2,
+      cursor: first.nextCursor,
+    })
+    expect(second.items).toHaveLength(2)
+    const firstIds = new Set(first.items.map((e) => e.id))
+    for (const e of second.items) expect(firstIds.has(e.id)).toBe(false)
+  })
+})
+
+describe('MemoryEventRepo.joinAsViewer', () => {
+  function seedRepos() {
+    const repos = buildMemoryRepos()
+    return repos.events
+      .create({
+        id: 'event_jv',
+        tenantId: 'rallypoint',
+        ownerUserId: SYSTEM_USER_ID,
+        slug: 'jv',
+        name: 'Join Viewer',
+        timezone: 'UTC',
+        privacyMode: 'unlisted',
+      })
+      .then(() => repos)
+  }
+
+  it('happy path adds a viewer member + active attendee', async () => {
+    const repos = await seedRepos()
+    const res = await repos.events.joinAsViewer({
+      memberId: 'evm_j1',
+      attendeeId: 'eva_j1',
+      eventId: 'event_jv',
+      userId: 'user_joiner',
+      skipMemberAdd: false,
+    })
+    expect(res.ok).toBe(true)
+    if (res.ok) expect(res.readmitted).toBe(false)
+    expect((await repos.members.findByEventAndUser('event_jv', 'user_joiner'))?.role).toBe(
+      'viewer',
+    )
+    expect(
+      (await repos.attendees.findByEventAndUser('event_jv', 'user_joiner'))?.removedAt,
+    ).toBeNull()
+  })
+
+  it('re-admission clears removedAt, keeps the member row, and downgrades role to viewer', async () => {
+    const repos = await seedRepos()
+    await repos.members.add({
+      id: 'evm_pre',
+      eventId: 'event_jv',
+      userId: 'user_back',
+      role: 'editor',
+    })
+    await repos.attendees.upsert({ id: 'eva_pre', eventId: 'event_jv', userId: 'user_back' })
+    await repos.attendees.softRemove('event_jv', 'user_back', new Date())
+
+    const res = await repos.events.joinAsViewer({
+      memberId: 'evm_unused',
+      attendeeId: 'eva_back',
+      eventId: 'event_jv',
+      userId: 'user_back',
+      skipMemberAdd: true,
+    })
+    expect(res.ok).toBe(true)
+    if (res.ok) expect(res.readmitted).toBe(true)
+    expect(
+      (await repos.attendees.findByEventAndUser('event_jv', 'user_back'))?.removedAt,
+    ).toBeNull()
+    const m = await repos.members.findByEventAndUser('event_jv', 'user_back')
+    expect(m?.id).toBe('evm_pre')
+    // Self-join never re-grants elevated roles.
+    expect(m?.role).toBe('viewer')
+  })
+
+  it('returns already_active_member on a duplicate insert race', async () => {
+    const repos = await seedRepos()
+    await repos.members.add({
+      id: 'evm_race',
+      eventId: 'event_jv',
+      userId: 'user_race',
+      role: 'viewer',
+    })
+    const res = await repos.events.joinAsViewer({
+      memberId: 'evm_race2',
+      attendeeId: 'eva_race',
+      eventId: 'event_jv',
+      userId: 'user_race',
       skipMemberAdd: false,
     })
     expect(res.ok).toBe(false)

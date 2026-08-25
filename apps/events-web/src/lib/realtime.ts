@@ -66,7 +66,7 @@ const REFRESH_MARGIN_MS = 30_000
 const REFRESH_RETRY_MS = 5_000
 
 // Ref-counted "is anything subscribed?" gate. Multiple pages can mount
-// subscriptions simultaneously (e.g. a group chrome + a group chat tab).
+// subscriptions simultaneously (e.g. a group chrome + a group map tab).
 // The connection store stays `synced: true` until the last subscription
 // drops, mirroring the previous SSE behaviour.
 let openSubscriptionCount = 0

@@ -8,7 +8,7 @@ import {
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import type { LedgerInviteRecord } from '../repos/types.js'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { readJsonBody } from './_body.js'
 import { envelope, ledgerChannel } from '../realtime/channels.js'
@@ -83,6 +83,17 @@ export const ledgerInvitesRoutes = new Hono<HonoApp>()
     if (!invite) throw errors.inviteCodeInvalid()
     if (invite.consumedAt) throw errors.inviteAlreadyConsumed()
     if (invite.expiresAt.getTime() < Date.now()) throw errors.inviteExpired()
+
+    // Email-restricted invite: if the invite was minted for a specific
+    // address, the acceptor must match (case-insensitive). Resolve the
+    // acceptor's email via the profiles service; if the lookup fails we
+    // cannot confirm a match, so we reject rather than silently bypass.
+    if (invite.invitedEmail !== null) {
+      const profile = await c.var.services.profiles.lookup(userId)
+      if (!profile || profile.email.toLowerCase() !== invite.invitedEmail.toLowerCase()) {
+        throw errors.forbidden('This invite was minted for a different email address.')
+      }
+    }
 
     const ledger = await c.var.repos.ledgers.findById(invite.ledgerId)
     if (!ledger || ledger.deletedAt) throw errors.inviteCodeInvalid()

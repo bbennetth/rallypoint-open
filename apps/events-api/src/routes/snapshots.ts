@@ -47,7 +47,7 @@ export const snapshotsRoutes = new Hono<HonoApp>()
     const userId = c.var.session!.userId
 
     // Capture the current state first so the restore itself is undoable.
-    await captureSnapshot(c, event.id, snapshot.kind, 'before restore', userId)
+    await captureSnapshot(c.var.repos, event.id, snapshot.kind, 'before restore', userId)
 
     if (snapshot.kind === 'lineup') {
       const rows = deserializeLineupSnapshot(snapshot.data)

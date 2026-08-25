@@ -22,7 +22,11 @@ import {
 import { requireSession } from '../../middleware/session.js'
 import { SESSION_LIFETIME_MS } from '../../session/issue.js'
 import { errors } from '../../errors.js'
-import { rateLimit } from '../../middleware/rate-limit.js'
+import {
+  rateLimit,
+  applyPerUserRateLimit,
+  applyPerEmailRateLimit,
+} from '../../middleware/rate-limit.js'
 import {
   buildSsoHintCookie,
   buildSsoHintClearCookie,
@@ -32,13 +36,34 @@ import {
 // and 3b (signin + 2FA). Slice 3a's session/signout routes live
 // in routes/auth/session.ts; slices 4/5 add the rest.
 //
-// Rate-limit policy:
+// Rate-limit policy. Per-IP buckets are middleware (below); per-email
+// and per-user buckets are applied inline in the handlers (the pre-auth
+// email lives in the parsed body, which the middleware can't see, and the
+// per-user id comes from requireSession).
 //   - signup: 5 / 10 min per IP + 20 / 24h per IP (signup-per-day)
+//             + 5 / 1h per EMAIL — verification-mail bombing of one address
 //   - verify-email: 30 / 5 min per IP
 //   - signin/start: 10 / 10 min per IP — password-guessing defense
+//             + 10 / 10 min per EMAIL — same cap across a rotating botnet
 //   - signin/complete: 30 / 10 min per IP — covers honest typos
 //   - signin/resend-2fa: 5 / 10 min per IP — per-challenge resend
 //     spam control
+//   - password-reset/request: 5 / 10 min per IP
+//             + 5 / 1h per EMAIL — reset-mail bombing of one inbox
+//   - me/change-password: 10 / 10 min per IP + 5 / 1h per USER
+//   - me/email-change/request: 5 / 10 min per IP + 3 / 1h per USER
+//   - me (PATCH/DELETE): 20 / 10 min per IP + 20 / 10 min per USER
+//
+// The per-EMAIL buckets run in the route wrapper BEFORE the handler's own
+// captcha/breached-password gates, so a benign captcha miss or a rejected
+// weak password still spends a token — the 1h caps are sized (5, not 3) to
+// leave a legit user headroom after a fumble or two.
+//
+// Token/challenge-keyed confirm endpoints (verify-email, signin/complete,
+// password-reset/confirm, me/email-change/{confirm,cancel}) stay per-IP
+// only ON PURPOSE: they're gated by a high-entropy single-use token (and,
+// for signin/complete, the per-challenge attempt lockout), so a per-email /
+// per-user bucket would add churn without adding a real defense.
 
 export const authUiRoutes = new Hono<HonoApp>()
   .use(
@@ -87,6 +112,15 @@ export const authUiRoutes = new Hono<HonoApp>()
   )
   .post('/api/v1/ui/signup', async (c) => {
     const body = await readJsonBody(c)
+    const limitEmail = bodyEmailForLimit(body)
+    if (limitEmail) {
+      await applyPerEmailRateLimit(c, {
+        email: limitEmail,
+        route: 'signup',
+        limit: 5,
+        windowSeconds: 3600,
+      })
+    }
     const result = await handleSignup(body, {
       repos: c.var.repos,
       services: c.var.services,
@@ -96,6 +130,9 @@ export const authUiRoutes = new Hono<HonoApp>()
       ipAddress: extractIp(c),
       userAgent: c.req.header('user-agent') ?? '',
       logger: c.var.logger,
+      ...(c.var.env.DEV_AUTO_VERIFY_EMAIL
+        ? { devAutoVerifyEmail: true }
+        : {}),
     })
     return c.json(result)
   })
@@ -111,6 +148,15 @@ export const authUiRoutes = new Hono<HonoApp>()
   })
   .post('/api/v1/ui/signin/start', async (c) => {
     const body = await readJsonBody(c)
+    const limitEmail = bodyEmailForLimit(body)
+    if (limitEmail) {
+      await applyPerEmailRateLimit(c, {
+        email: limitEmail,
+        route: 'signin-start',
+        limit: 10,
+        windowSeconds: 10 * 60,
+      })
+    }
     const result = await handleSigninStart(body, {
       repos: c.var.repos,
       services: c.var.services,
@@ -118,6 +164,10 @@ export const authUiRoutes = new Hono<HonoApp>()
       publicBaseUrl: c.var.env.PUBLIC_BASE_URL,
       argon2PepperKey: c.var.env.ARGON2_PEPPER,
       signinCodeHmacKey: c.var.env.SIGNIN_CODE_HMAC_KEY,
+      sessionHmacKey: c.var.env.SESSION_HMAC_KEY,
+      ...(c.var.env.DEV_SIGNIN_CODE_OVERRIDE
+        ? { devSigninCodeOverride: c.var.env.DEV_SIGNIN_CODE_OVERRIDE }
+        : {}),
       ipAddress: extractIp(c),
       userAgent: c.req.header('user-agent') ?? '',
       logger: c.var.logger,
@@ -133,6 +183,10 @@ export const authUiRoutes = new Hono<HonoApp>()
       publicBaseUrl: c.var.env.PUBLIC_BASE_URL,
       argon2PepperKey: c.var.env.ARGON2_PEPPER,
       signinCodeHmacKey: c.var.env.SIGNIN_CODE_HMAC_KEY,
+      sessionHmacKey: c.var.env.SESSION_HMAC_KEY,
+      ...(c.var.env.DEV_SIGNIN_CODE_OVERRIDE
+        ? { devSigninCodeOverride: c.var.env.DEV_SIGNIN_CODE_OVERRIDE }
+        : {}),
       ipAddress: extractIp(c),
       userAgent: c.req.header('user-agent') ?? '',
       logger: c.var.logger,
@@ -141,7 +195,7 @@ export const authUiRoutes = new Hono<HonoApp>()
     const secure = c.var.env.NODE_ENV === 'production'
     c.header(
       'Set-Cookie',
-      `${c.var.env.SESSION_COOKIE_NAME}=${result.sessionToken}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Lax`,
+      `${c.var.env.SESSION_COOKIE_NAME}=${result.sessionToken}; Path=/; Max-Age=${maxAge}; ${secure ? 'Secure; ' : ''}HttpOnly; SameSite=Lax`,
     )
     c.header(
       'Set-Cookie',
@@ -166,6 +220,10 @@ export const authUiRoutes = new Hono<HonoApp>()
       publicBaseUrl: c.var.env.PUBLIC_BASE_URL,
       argon2PepperKey: c.var.env.ARGON2_PEPPER,
       signinCodeHmacKey: c.var.env.SIGNIN_CODE_HMAC_KEY,
+      sessionHmacKey: c.var.env.SESSION_HMAC_KEY,
+      ...(c.var.env.DEV_SIGNIN_CODE_OVERRIDE
+        ? { devSigninCodeOverride: c.var.env.DEV_SIGNIN_CODE_OVERRIDE }
+        : {}),
       ipAddress: extractIp(c),
       userAgent: c.req.header('user-agent') ?? '',
       logger: c.var.logger,
@@ -174,6 +232,15 @@ export const authUiRoutes = new Hono<HonoApp>()
   })
   .post('/api/v1/ui/password-reset/request', async (c) => {
     const body = await readJsonBody(c)
+    const limitEmail = bodyEmailForLimit(body)
+    if (limitEmail) {
+      await applyPerEmailRateLimit(c, {
+        email: limitEmail,
+        route: 'pwreset-request',
+        limit: 5,
+        windowSeconds: 3600,
+      })
+    }
     const result = await handlePasswordResetRequest(body, {
       repos: c.var.repos,
       services: c.var.services,
@@ -207,6 +274,12 @@ export const authUiRoutes = new Hono<HonoApp>()
     '/api/v1/ui/me/change-password',
     requireSession('cookie'),
     async (c) => {
+      await applyPerUserRateLimit(c, {
+        userId: c.var.session!.userId,
+        route: 'me-change-pw',
+        limit: 5,
+        windowSeconds: 3600,
+      })
       const body = await readJsonBody(c)
       const result = await handleChangePassword(body, meCtx(c))
       for (const h of result.revokedIdHashes) c.var.sessionCache?.invalidate(h)
@@ -214,7 +287,7 @@ export const authUiRoutes = new Hono<HonoApp>()
       const secure = c.var.env.NODE_ENV === 'production'
       c.header(
         'Set-Cookie',
-        `${c.var.env.SESSION_COOKIE_NAME}=${result.newSessionToken}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Lax`,
+        `${c.var.env.SESSION_COOKIE_NAME}=${result.newSessionToken}; Path=/; Max-Age=${maxAge}; ${secure ? 'Secure; ' : ''}HttpOnly; SameSite=Lax`,
       )
       c.header(
         'Set-Cookie',
@@ -230,8 +303,15 @@ export const authUiRoutes = new Hono<HonoApp>()
   )
   .post(
     '/api/v1/ui/me/email-change/request',
+    rateLimit({ route: 'email-change-request', perIp: { limit: 5, windowSeconds: 10 * 60 } }),
     requireSession('cookie'),
     async (c) => {
+      await applyPerUserRateLimit(c, {
+        userId: c.var.session!.userId,
+        route: 'me-email-change',
+        limit: 3,
+        windowSeconds: 3600,
+      })
       const body = await readJsonBody(c)
       const result = await handleEmailChangeRequest(body, meCtx(c))
       return c.json(result)
@@ -239,6 +319,7 @@ export const authUiRoutes = new Hono<HonoApp>()
   )
   .post(
     '/api/v1/ui/me/email-change/confirm',
+    rateLimit({ route: 'email-change-confirm', perIp: { limit: 10, windowSeconds: 10 * 60 } }),
     requireSession('cookie'),
     async (c) => {
       const body = await readJsonBody(c)
@@ -248,8 +329,12 @@ export const authUiRoutes = new Hono<HonoApp>()
   )
   // Cancel does NOT require a session — the link goes to the OLD
   // email address, where the user might not be signed in. The
-  // cancel-token IS the auth here.
-  .post('/api/v1/ui/me/email-change/cancel', async (c) => {
+  // cancel-token IS the auth here — so rate-limit by IP to blunt any
+  // token-guessing / abuse of this unauthenticated endpoint.
+  .post(
+    '/api/v1/ui/me/email-change/cancel',
+    rateLimit({ route: 'email-change-cancel', perIp: { limit: 10, windowSeconds: 10 * 60 } }),
+    async (c) => {
     const body = await readJsonBody(c)
     // MeCtxAuthlessLink — no session field needed (#30); the
     // cancel-token IS the auth.
@@ -259,6 +344,7 @@ export const authUiRoutes = new Hono<HonoApp>()
       passwordHasher: c.var.passwordHasher,
       publicBaseUrl: c.var.env.PUBLIC_BASE_URL,
       argon2PepperKey: c.var.env.ARGON2_PEPPER,
+      sessionHmacKey: c.var.env.SESSION_HMAC_KEY,
       ipAddress: extractIp(c),
       userAgent: c.req.header('user-agent') ?? '',
       logger: c.var.logger,
@@ -266,11 +352,23 @@ export const authUiRoutes = new Hono<HonoApp>()
     return c.json(result)
   })
   .patch('/api/v1/ui/me', requireSession('cookie'), async (c) => {
+    await applyPerUserRateLimit(c, {
+      userId: c.var.session!.userId,
+      route: 'me-mutate',
+      limit: 20,
+      windowSeconds: 10 * 60,
+    })
     const body = await readJsonBody(c)
     const result = await handlePatchMe(body, meCtx(c))
     return c.json(result)
   })
   .delete('/api/v1/ui/me', requireSession('cookie'), async (c) => {
+    await applyPerUserRateLimit(c, {
+      userId: c.var.session!.userId,
+      route: 'me-mutate',
+      limit: 20,
+      windowSeconds: 10 * 60,
+    })
     const body = await readJsonBody(c)
     const { revokedIdHashes, ...rest } = await handleDeleteMe(body, meCtx(c))
     for (const h of revokedIdHashes) c.var.sessionCache?.invalidate(h)
@@ -278,7 +376,7 @@ export const authUiRoutes = new Hono<HonoApp>()
     // Clear the session cookie since the session was just invalidated.
     c.header(
       'Set-Cookie',
-      `${c.var.env.SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
+      `${c.var.env.SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; ${secure ? 'Secure; ' : ''}HttpOnly; SameSite=Lax`,
     )
     // Clear the SSO hint cookie so JS on app subdomains stops attempting
     // silent SSO after account deletion.
@@ -325,6 +423,7 @@ function meCtx(c: Context<HonoApp>) {
     passwordHasher: c.var.passwordHasher,
     publicBaseUrl: c.var.env.PUBLIC_BASE_URL,
     argon2PepperKey: c.var.env.ARGON2_PEPPER,
+    sessionHmacKey: c.var.env.SESSION_HMAC_KEY,
     ipAddress: extractIp(c),
     userAgent: c.req.header('user-agent') ?? '',
     logger: c.var.logger,
@@ -338,6 +437,19 @@ async function readJsonBody(c: { req: { raw: Request } }): Promise<unknown> {
   } catch {
     throw errors.bodyInvalid()
   }
+}
+
+// Best-effort email extraction for the pre-auth per-email rate limiter.
+// Returns the raw submitted email string (normalization happens inside
+// applyPerEmailRateLimit) when the body carries a non-empty one, else null
+// so the caller skips the limiter and lets the handler's schema validation
+// produce the 400.
+function bodyEmailForLimit(body: unknown): string | null {
+  if (body && typeof body === 'object' && 'email' in body) {
+    const e = (body as { email?: unknown }).email
+    if (typeof e === 'string' && e.trim() !== '') return e
+  }
+  return null
 }
 
 // extractIp(...) moved to apps/id-api/src/http/extract-ip.ts (#34).

@@ -245,7 +245,7 @@ describe('requireSession — RPID userId mismatch', () => {
 // --- RPID transport error → 503 and row kept ---
 
 describe('requireSession — RPID transport error', () => {
-  it('returns 503 and preserves the session row when RPID is unreachable', async () => {
+  it('returns 503 and preserves the session row when RPID is unreachable AND no recent verify (E4 O2 grace miss)', async () => {
     const repos = buildMemoryRepos()
     const services: Services = {
       idClient: {
@@ -272,5 +272,111 @@ describe('requireSession — RPID transport error', () => {
     // Row must be preserved — RPID hiccup ≠ revocation
     const row = await repos.sessions.findByIdHash(idHash)
     expect(row).toBeTruthy()
+  })
+})
+
+// --- E4 O2: offline-grace branch — RPID transport error + recent verify → 200 ---
+
+describe('requireSession — RPID transport error WITH offline-grace (E4 O2)', () => {
+  it('accepts the request when last_verified_at is within SESSION_OFFLINE_TTL_HOURS', async () => {
+    const repos = buildMemoryRepos()
+    const services: Services = {
+      idClient: {
+        verifyRpidBearer: async () => { throw new Error('rpid_transport_error') },
+        signoutRpidBearer: async () => {},
+      },
+      rpidSso: {
+        exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
+      },
+      settings: {
+        get: async () => ({}),
+        patch: async () => ({}),
+      },
+    }
+    const { app, env } = buildTestApp(repos, services)
+    const bearer = await createSession(repos, env, { userId: 'user_offline_ok' })
+    const idHash = hashToken(bearer)
+    // Stamp a recent successful verify — 1 hour ago, well within the
+    // default 24h SESSION_OFFLINE_TTL_HOURS.
+    await repos.sessions.markVerified(idHash, new Date(Date.now() - 3_600_000))
+
+    const res = await app.request('http://localhost/api/v1/ui/session', {
+      method: 'GET',
+      headers: authHeaders(bearer, env),
+    })
+    // The /session route returns 200 with the session profile. The
+    // offline-grace branch should NOT fail with 503.
+    expect(res.status).not.toBe(503)
+    const row = await repos.sessions.findByIdHash(idHash)
+    expect(row).toBeTruthy()
+  })
+
+  it('still returns 503 when last_verified_at is older than the TTL', async () => {
+    const repos = buildMemoryRepos()
+    const services: Services = {
+      idClient: {
+        verifyRpidBearer: async () => { throw new Error('rpid_transport_error') },
+        signoutRpidBearer: async () => {},
+      },
+      rpidSso: {
+        exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
+      },
+      settings: {
+        get: async () => ({}),
+        patch: async () => ({}),
+      },
+    }
+    const { app, env } = buildTestApp(repos, services)
+    const bearer = await createSession(repos, env, { userId: 'user_offline_stale' })
+    const idHash = hashToken(bearer)
+    // 30 hours ago — outside the default 24h grace window.
+    await repos.sessions.markVerified(idHash, new Date(Date.now() - 30 * 3_600_000))
+
+    const res = await app.request('http://localhost/api/v1/ui/session', {
+      method: 'GET',
+      headers: authHeaders(bearer, env),
+    })
+    expect(res.status).toBe(503)
+  })
+
+  it('returns 503 when last_verified_at is null (legacy row, no grace)', async () => {
+    const repos = buildMemoryRepos()
+    const services: Services = {
+      idClient: {
+        verifyRpidBearer: async () => { throw new Error('rpid_transport_error') },
+        signoutRpidBearer: async () => {},
+      },
+      rpidSso: {
+        exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
+      },
+      settings: {
+        get: async () => ({}),
+        patch: async () => ({}),
+      },
+    }
+    const { app, env } = buildTestApp(repos, services)
+    // Brand-new session row — lastVerifiedAt defaults to null.
+    await createSession(repos, env, { userId: 'user_no_grace' })
+    const fakeBearer = generateRawToken(PLANNER_SESSION_BEARER_PREFIX)
+    await repos.sessions.create({
+      idHash: hashToken(fakeBearer),
+      userId: 'user_no_grace_2',
+      rpidBearerCiphertext: Buffer.from('aaaa', 'base64'),
+      rpidBearerNonce: Buffer.from('aaaa', 'base64'),
+      rpidBearerKeyVersion: env.PLANNER_SESSION_KEY_VERSION,
+      absoluteExpiresAt: new Date(Date.now() + 3_600_000),
+      ipHash: '',
+      uaHash: '',
+    })
+    // Send the brand-new (non-grace) session; ciphertext is garbage so
+    // we'd fail on decrypt anyway — but the more revealing case is the
+    // first bearer (legitimate, no lastVerifiedAt set yet).
+    const bearer = await createSession(repos, env, { userId: 'user_fresh' })
+
+    const res = await app.request('http://localhost/api/v1/ui/session', {
+      method: 'GET',
+      headers: authHeaders(bearer, env),
+    })
+    expect(res.status).toBe(503)
   })
 })

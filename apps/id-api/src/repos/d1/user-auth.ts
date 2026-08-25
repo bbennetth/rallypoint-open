@@ -1,12 +1,16 @@
-import { eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { UserId } from '@rallypoint/shared'
 import {
   users as usersTable,
   authMethods as authMethodsTable,
   emailChanges as emailChangesTable,
+  emailVerifications as emailVerificationsTable,
   passwordResets as passwordResetsTable,
+  oauthIdentities as oauthIdentitiesTable,
+  webauthnCredentials as webauthnCredentialsTable,
 } from '@rallypoint/db'
-import type { User, AuthMethod, AuthMethodKind } from '../types.js'
+import type { User, AuthMethod, AuthMethodKind, GuardedDeleteResult } from '../types.js'
+import type { OAuthIdentityRecord, OAuthProviderSlug } from '../oauth-identity.js'
 import type { Db } from './db.js'
 import { mapUniqueViolation } from './_errors.js'
 
@@ -53,6 +57,8 @@ function rowToUser(row: typeof usersTable.$inferSelect): User {
     lastName: row.lastName,
     pictureUrl: row.pictureUrl,
     avatarKey: row.avatarKey,
+    failedSigninCount: row.failedSigninCount,
+    lockedUntil: row.lockedUntil,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,
@@ -144,6 +150,29 @@ export async function confirmEmailChange(
 }
 
 /**
+ * Email-verification confirm, atomically. Marks the user verified AND
+ * consumes the verification token in one db.batch(). A crash between the
+ * two writes previously left the account verified with the token still
+ * replayable (or the token consumed without the flag flipping).
+ */
+export async function confirmEmailVerification(
+  db: Db,
+  input: { userId: UserId; tokenHash: string; when: Date },
+): Promise<void> {
+  const markVerified = db
+    .update(usersTable)
+    .set({ emailVerified: true, updatedAt: input.when })
+    .where(eq(usersTable.id, input.userId))
+
+  const consumeToken = db
+    .update(emailVerificationsTable)
+    .set({ consumedAt: input.when })
+    .where(eq(emailVerificationsTable.tokenHash, input.tokenHash))
+
+  await db.batch([markVerified, consumeToken])
+}
+
+/**
  * Password-reset confirm, atomically. Rotates the auth-method secret AND
  * consumes the reset token in one db.batch(), so the token can never outlive
  * the rotation (a crash between the two writes previously left the new
@@ -170,4 +199,177 @@ export async function confirmPasswordReset(
     .where(eq(passwordResetsTable.tokenHash, input.tokenHash))
 
   await db.batch([rotateSecret, consumeToken])
+}
+
+function rowToOAuthIdentity(
+  row: typeof oauthIdentitiesTable.$inferSelect,
+): OAuthIdentityRecord {
+  return {
+    id: row.id,
+    userId: row.userId as UserId,
+    tenantId: row.tenantId,
+    provider: row.provider as OAuthProviderSlug,
+    subject: row.subject,
+    email: row.email,
+    emailVerified: row.emailVerified,
+    createdAt: row.createdAt,
+    lastUsedAt: row.lastUsedAt,
+  }
+}
+
+/**
+ * Social-signup: insert a users row and its first oauth_identities row
+ * atomically via db.batch(). Either both land or neither does, so a crash
+ * can't strand a user with no sign-in method. A (provider, subject) or
+ * email unique-collision rolls the batch back as UniqueConstraintError.
+ */
+export async function createUserWithOAuthIdentity(
+  db: Db,
+  user: {
+    id: UserId
+    tenantId: string
+    email: string
+    username: string
+    firstName?: string | null
+    lastName?: string | null
+    emailVerified: boolean
+  },
+  identity: {
+    id: string
+    tenantId: string
+    provider: OAuthProviderSlug
+    subject: string
+    email?: string | null
+    emailVerified: boolean
+  },
+): Promise<{ user: User; identity: OAuthIdentityRecord }> {
+  const insertUser = db
+    .insert(usersTable)
+    .values({
+      id: user.id,
+      tenantId: user.tenantId,
+      email: user.email,
+      emailVerified: user.emailVerified,
+      username: user.username,
+      firstName: user.firstName ?? null,
+      lastName: user.lastName ?? null,
+    })
+    .returning()
+
+  const insertIdentity = db
+    .insert(oauthIdentitiesTable)
+    .values({
+      id: identity.id,
+      userId: user.id,
+      tenantId: identity.tenantId,
+      provider: identity.provider,
+      subject: identity.subject,
+      email: identity.email ?? null,
+      emailVerified: identity.emailVerified,
+    })
+    .returning()
+
+  try {
+    const [userRows, identityRows] = await db.batch([insertUser, insertIdentity])
+    return {
+      user: rowToUser(userRows[0]!),
+      identity: rowToOAuthIdentity(identityRows[0]!),
+    }
+  } catch (err: unknown) {
+    throw mapUniqueViolation(err)
+  }
+}
+
+// Sum of usable sign-in methods for a user, expressed as a SQL scalar.
+// Excludes `${excludeTable}.${'id'}` = `${excludeId}` so the caller can
+// ask "how many methods remain AFTER removing this one". Password rows
+// count; every webauthn credential + oauth identity counts.
+function remainingMethodsGuard(
+  userId: UserId,
+  exclude: { table: 'webauthn_credentials' | 'oauth_identities'; id: string },
+) {
+  const webauthnCount =
+    exclude.table === 'webauthn_credentials'
+      ? sql`(SELECT count(*) FROM webauthn_credentials WHERE user_id = ${userId} AND id != ${exclude.id})`
+      : sql`(SELECT count(*) FROM webauthn_credentials WHERE user_id = ${userId})`
+  const oauthCount =
+    exclude.table === 'oauth_identities'
+      ? sql`(SELECT count(*) FROM oauth_identities WHERE user_id = ${userId} AND id != ${exclude.id})`
+      : sql`(SELECT count(*) FROM oauth_identities WHERE user_id = ${userId})`
+  return sql`(
+    (SELECT count(*) FROM auth_methods WHERE user_id = ${userId} AND kind = 'password')
+    + ${webauthnCount}
+    + ${oauthCount}
+  ) >= 1`
+}
+
+/**
+ * Remove a passkey, but ONLY if at least one other usable sign-in method
+ * (password / another passkey / a linked social identity) would remain.
+ * The remaining-methods count is evaluated in the DELETE's WHERE clause,
+ * so two concurrent removals can't both pass the guard and leave the
+ * account with zero sign-in methods.
+ */
+export async function deleteWebauthnCredentialGuarded(
+  db: Db,
+  input: { userId: UserId; credentialId: string },
+): Promise<GuardedDeleteResult> {
+  const deleted = await db
+    .delete(webauthnCredentialsTable)
+    .where(
+      and(
+        eq(webauthnCredentialsTable.id, input.credentialId),
+        eq(webauthnCredentialsTable.userId, input.userId),
+        remainingMethodsGuard(input.userId, {
+          table: 'webauthn_credentials',
+          id: input.credentialId,
+        }),
+      ),
+    )
+    .returning({ id: webauthnCredentialsTable.id })
+  if (deleted.length > 0) return 'deleted'
+  // No-op path: classify not_found vs last_method for a friendly error.
+  const existing = await db
+    .select({ id: webauthnCredentialsTable.id })
+    .from(webauthnCredentialsTable)
+    .where(
+      and(
+        eq(webauthnCredentialsTable.id, input.credentialId),
+        eq(webauthnCredentialsTable.userId, input.userId),
+      ),
+    )
+    .limit(1)
+  return existing.length > 0 ? 'last_method' : 'not_found'
+}
+
+/** Unlink a social identity with the same lockout guard as above. */
+export async function deleteOAuthIdentityGuarded(
+  db: Db,
+  input: { userId: UserId; identityId: string },
+): Promise<GuardedDeleteResult> {
+  const deleted = await db
+    .delete(oauthIdentitiesTable)
+    .where(
+      and(
+        eq(oauthIdentitiesTable.id, input.identityId),
+        eq(oauthIdentitiesTable.userId, input.userId),
+        remainingMethodsGuard(input.userId, {
+          table: 'oauth_identities',
+          id: input.identityId,
+        }),
+      ),
+    )
+    .returning({ id: oauthIdentitiesTable.id })
+  if (deleted.length > 0) return 'deleted'
+  const existing = await db
+    .select({ id: oauthIdentitiesTable.id })
+    .from(oauthIdentitiesTable)
+    .where(
+      and(
+        eq(oauthIdentitiesTable.id, input.identityId),
+        eq(oauthIdentitiesTable.userId, input.userId),
+      ),
+    )
+    .limit(1)
+  return existing.length > 0 ? 'last_method' : 'not_found'
 }

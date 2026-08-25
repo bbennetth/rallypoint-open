@@ -69,6 +69,7 @@ describe('D1 integration — list items', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -302,6 +303,39 @@ describe('D1 integration — list items', () => {
     expect(patched.status).toBe('todo')
     expect(patched.completed).toBe(false)
     expect(patched.completed_at).toBeNull()
+  })
+
+  // E2 #12: clearing the status (statusId=null) MUST also clear the
+  // completed mirror. Previously the inner `if (fields.status !==
+  // null)` in buildUpdateSet skipped the mirror update, leaving a
+  // task with completed=true + stale completedAt + status=null —
+  // incompleteCount and any active-items filter then read the wrong
+  // value. (The API surface uses `statusId`; the route's resolveStatus
+  // translates a null statusId into {status:null,statusId:null} for
+  // the patch that reaches buildUpdateSet.)
+  it('clears the completed mirror when a PATCH sets statusId to null (E2 #12)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_clearmirror`)
+    const taskList = await makeList(bearer, { listType: 'tasks' })
+    const task = (await (await req(bearer, 'POST', `/api/v1/ui/lists/${taskList}/items`, {
+      title: 'Will be done then cleared',
+    })).json()) as { id: string }
+    // First mark it done via status='done' (drives completed=true).
+    const done = (await (await req(bearer, 'PATCH', `/api/v1/ui/lists/${taskList}/items/${task.id}`, {
+      status: 'done',
+    })).json()) as Record<string, unknown>
+    expect(done.status).toBe('done')
+    expect(done.completed).toBe(true)
+    expect(done.completed_at).not.toBeNull()
+    // Now clear the linkage via statusId:null. The route's
+    // resolveStatus turns that into patch.status=null, which previously
+    // skipped the completed-mirror update.
+    const cleared = (await (await req(bearer, 'PATCH', `/api/v1/ui/lists/${taskList}/items/${task.id}`, {
+      statusId: null,
+    })).json()) as Record<string, unknown>
+    expect(cleared.status).toBeNull()
+    expect(cleared.status_id).toBeNull()
+    expect(cleared.completed).toBe(false)
+    expect(cleared.completed_at).toBeNull()
   })
 
   it('treats a self-move (listId === current) as a no-op', async () => {

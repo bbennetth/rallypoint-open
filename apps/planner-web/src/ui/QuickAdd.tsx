@@ -1,33 +1,43 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Drawer } from '@rallypoint/ui'
 import { TICKET_PLATFORMS } from '@rallypoint/events-shared'
 import {
   ApiError,
+  choresListQuery,
   createChoreSeries,
   createDiaryEntry,
   createNote,
   createPersonalEvent,
   createTaskItem,
-  getChoresList,
-  getDiaryList,
-  listFieldDefs,
-  listTaskLists,
-  type ChoreListDto,
-  type DiaryListDto,
-  type FieldDefDto,
-  type TaskListDto,
+  diaryListQuery,
+  fieldDefsQuery,
+  taskListsQuery,
 } from '../lib/api.js'
-import { combineDueDateTime, splitQuickNote, toInstant } from '../lib/planner-helpers.js'
+import { useCachedQuery } from '../lib/offline/use-cached-query.js'
+import {
+  combineDueDateTime,
+  dateInputToInstant,
+  instantToDateInput,
+  instantToLocalInput,
+  instantToTimeInput,
+  splitQuickNote,
+  toInstant,
+} from '../lib/planner-helpers.js'
 import { buildChoreSeriesInput } from '../lib/chores-helpers.js'
 import { findMoodField, formatEntryDate } from '../lib/diary-helpers.js'
 import { LAST_TASK_LIST_KEY, pickDefaultList } from '../lib/task-edit.js'
-import { notifyCreated } from '../lib/refresh-bus.js'
-import { addShoppingItemByTitle } from '../lib/shopping-helpers.js'
+import { notifyCreated, type CreatedKind } from '../lib/refresh-bus.js'
+import {
+  MAX_BULK_SHOPPING_ITEMS,
+  addShoppingItemsByTitles,
+  parseShoppingLines,
+} from '../lib/shopping-helpers.js'
 import { PriorityPicker } from './PriorityPicker.js'
 import { MoodPicker } from './MoodPicker.js'
 import { RecurrenceForm, defaultRecurrenceState, type RecurrenceState } from './RecurrenceForm.js'
-import { Icon } from './icons.js'
+import { AssistDrawer } from './AssistDrawer.js'
+import { Icon, type IconName } from './icons.js'
 
 // Floating quick-add pill (bottom-right, every authed screen). Tapping it opens
 // a small menu (task / chore / event / note / shopping / diary); each action
@@ -35,14 +45,34 @@ import { Icon } from './icons.js'
 // calls the full pages use. On success it nudges any live page to refetch
 // (refresh-bus) and shows a toast.
 
-type Action = 'task' | 'event' | 'note' | 'shopping' | 'chore' | 'diary'
+type Action = 'assist' | 'task' | 'event' | 'note' | 'shopping' | 'chore' | 'diary'
 
 function errMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message
   return 'Something went wrong. Please try again.'
 }
 
-export function QuickAdd({ onToast }: { onToast: (msg: string) => void }) {
+export function QuickAdd({
+  anchor = 'float',
+  onToast,
+}: {
+  /**
+   * Where the FAB sits:
+   *   - `'float'` (default): a fixed-position button at the shared
+   *     bottom-right anchor (`.pl-fab-wrap` provides the positioning).
+   *     Use on pages with no sub-bar (Notes, Diary, Settings, …).
+   *   - `'subbar'`: a bare flex-child button intended to be dropped in
+   *     as the trailing child of an `<SubBar>`. The sub-bar's own
+   *     positioning + glass chrome anchor the FAB; we skip the
+   *     standalone `.pl-fab-wrap` wrapper so positioning doesn't
+   *     double up. The popover menu still anchors above the FAB.
+   */
+  anchor?: 'float' | 'subbar'
+  /** Toast callback; pages get this from their parent chrome or via the
+   *  shared @rallypoint/ui `useToast` store. Optional so a bare
+   *  `<QuickAdd />` can be dropped into a page without ceremony. */
+  onToast?: (msg: string) => void
+}) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [action, setAction] = useState<Action | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -70,13 +100,14 @@ export function QuickAdd({ onToast }: { onToast: (msg: string) => void }) {
   }
   const close = () => setAction(null)
 
-  function done(kind: Action, toast: string) {
+  function done(kind: CreatedKind, toast: string) {
     notifyCreated(kind)
-    onToast(toast)
+    onToast?.(toast)
     close()
   }
 
-  const MENU: { key: Action; label: string }[] = [
+  const MENU: { key: Action; label: string; icon?: IconName }[] = [
+    { key: 'assist', label: 'AI Assist', icon: 'bolt' },
     { key: 'task', label: 'Task' },
     { key: 'chore', label: 'Chore' },
     { key: 'event', label: 'Event' },
@@ -85,8 +116,13 @@ export function QuickAdd({ onToast }: { onToast: (msg: string) => void }) {
     { key: 'diary', label: 'Diary' },
   ]
 
-  return (
-    <div className="pl-fab-wrap" ref={wrapRef}>
+  // The popover menu + button + drawers are shared between both
+  // anchors. Only the outer positioning wrapper varies — `'float'`
+  // gets `.pl-fab-wrap` (position: fixed, bottom-right), `'subbar'`
+  // gets a bare `position: relative` shell so the absolute-positioned
+  // `.pl-fab-menu` still anchors above the button.
+  const inner = (
+    <>
       {menuOpen && (
         <div className="pl-fab-menu" role="menu">
           {MENU.map((m) => (
@@ -97,23 +133,32 @@ export function QuickAdd({ onToast }: { onToast: (msg: string) => void }) {
               role="menuitem"
               onClick={() => open(m.key)}
             >
-              <Icon name="plus" size={15} stroke={2} />
+              <Icon name={m.icon ?? 'plus'} size={15} stroke={2} />
               {m.label}
             </button>
           ))}
         </div>
       )}
+      {/* Kit's 40×40 squared `.rp-fab` (from PR #603) replaces the
+          previous 56×56 round `.pl-fab`. Plus glyph shrinks
+          proportionally from 22 → 18 to keep the visual weight. */}
       <button
         type="button"
-        className={'pl-fab' + (menuOpen ? ' is-open' : '')}
+        className={'rp-fab' + (menuOpen ? ' is-open' : '')}
         aria-label="Quick add"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={() => setMenuOpen((o) => !o)}
       >
-        <Icon name="plus" size={22} stroke={2} />
+        <Icon name="plus" size={18} stroke={2.4} />
       </button>
 
+      {/* AI Assist manages its own save + Undo/Change lifecycle (it can save
+          any of the five kinds and fires refresh-bus per save), so it takes
+          onClose + onToast directly rather than the single-shot done(). */}
+      <Drawer open={action === 'assist'} onClose={close} title="AI Assist" mobileSheet>
+        <AssistDrawer onClose={close} {...(onToast ? { onToast } : {})} />
+      </Drawer>
       <Drawer open={action === 'task'} onClose={close} title="Add task" mobileSheet>
         <AddTaskForm onDone={() => done('task', 'Task added')} onClose={close} />
       </Drawer>
@@ -127,11 +172,47 @@ export function QuickAdd({ onToast }: { onToast: (msg: string) => void }) {
         <AddNoteForm onDone={() => done('note', 'Note added')} />
       </Drawer>
       <Drawer open={action === 'shopping'} onClose={close} title="Add to shopping list" mobileSheet>
-        <AddShoppingItemForm onDone={() => done('shopping', 'Item added to shopping list')} />
+        <AddShoppingItemForm
+          onDone={(count) =>
+            done(
+              'shopping',
+              count > 1
+                ? `${count} items added to shopping list`
+                : 'Item added to shopping list',
+            )
+          }
+        />
       </Drawer>
       <Drawer open={action === 'diary'} onClose={close} title="Add diary entry" mobileSheet>
         <AddDiaryForm onDone={() => done('diary', 'Diary entry added')} />
       </Drawer>
+    </>
+  )
+
+  if (anchor === 'subbar') {
+    // Bare flex-child shell: no fixed positioning, no z-index — the
+    // parent `<SubBar>` handles all of that. `position: relative` so
+    // the absolutely-positioned `.pl-fab-menu` anchors above this
+    // button rather than the document.
+    return (
+      <div ref={wrapRef} style={{ position: 'relative', display: 'inline-flex', flex: '0 0 auto' }}>
+        {inner}
+      </div>
+    )
+  }
+
+  // `.rp-fab-float` is normally a button modifier per the kit's Fab
+  // component, but QuickAdd needs a wrapper element to (a) anchor the
+  // absolute-positioned `.pl-fab-menu` popover and (b) catch
+  // outside-click for menu dismissal via `wrapRef.contains`. Applying
+  // it to the wrapper here gives us a positioned ancestor at the
+  // correct kit coordinates (matching the in-subbar trailing FAB's
+  // screen position) so navigation between sub-bar and no-sub-bar
+  // pages doesn't visibly shift the FAB. The button inside stays
+  // `.rp-fab` only — no `.rp-fab-float` doubling.
+  return (
+    <div className="rp-fab-float" ref={wrapRef}>
+      {inner}
     </div>
   )
 }
@@ -146,7 +227,11 @@ function FormError({ message }: { message: string | null }) {
 }
 
 function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => void }) {
-  const [lists, setLists] = useState<TaskListDto[] | null>(null)
+  // Render-from-cache (same pattern as the pages): the last-known lists paint
+  // instantly — online or offline — while a background refresh runs. The
+  // 'loading' hint only shows on a true cold cache miss.
+  const listsQ = useCachedQuery(useMemo(() => taskListsQuery(), []))
+  const lists = listsQ.data ?? null
   const [listId, setListId] = useState('')
   const [title, setTitle] = useState('')
   const [dueDate, setDueDate] = useState('')
@@ -155,28 +240,24 @@ function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => v
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Preselect the list this user last filed a quick-add task to, so the
+  // common "same list again" case is a single keystroke. Runs whenever the
+  // cached lists (re)arrive but never stomps a selection the user already
+  // made — unless a refresh dropped that list entirely.
   useEffect(() => {
-    let alive = true
-    listTaskLists()
-      .then((rows) => {
-        if (!alive) return
-        setLists(rows)
-        // Preselect the list this user last filed a quick-add task to, so the
-        // common "same list again" case is a single keystroke.
-        const remembered = (() => {
-          try {
-            return localStorage.getItem(LAST_TASK_LIST_KEY)
-          } catch {
-            return null
-          }
-        })()
-        setListId(pickDefaultList(rows, remembered))
-      })
-      .catch((e) => alive && setError(errMessage(e)))
-    return () => {
-      alive = false
-    }
-  }, [])
+    if (!lists || lists.length === 0) return
+    setListId((cur) => {
+      if (cur && lists.some((l) => l.id === cur)) return cur
+      const remembered = (() => {
+        try {
+          return localStorage.getItem(LAST_TASK_LIST_KEY)
+        } catch {
+          return null
+        }
+      })()
+      return pickDefaultList(lists, remembered)
+    })
+  }, [lists])
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -207,7 +288,12 @@ function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => v
     }
   }
 
-  if (lists === null) return <p className="pl-fab-hint">Loading your lists…</p>
+  if (lists === null) {
+    // status 'error' only ever fires on a cold miss (a cached value renders
+    // as 'stale' even when the refresh fails), so this is a real dead end.
+    if (listsQ.status === 'error') return <FormError message={errMessage(listsQ.error)} />
+    return <p className="pl-fab-hint">Loading your lists…</p>
+  }
   if (lists.length === 0) {
     return (
       <div className="pl-fab-empty">
@@ -281,6 +367,7 @@ function AddTaskForm({ onDone, onClose }: { onDone: () => void; onClose: () => v
 
 function AddEventForm({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState('')
+  const [isAllDay, setIsAllDay] = useState(false)
   const [start, setStart] = useState('')
   const [end, setEnd] = useState('')
   const [location, setLocation] = useState('')
@@ -289,19 +376,47 @@ function AddEventForm({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  function handleAllDayChange(checked: boolean) {
+    setIsAllDay(checked)
+    // Convert the current start/end values between datetime-local and date
+    // formats, same as PersonalEventEdit's toggle (#675).
+    if (checked) {
+      // switching to all-day: strip the time portion
+      if (start) {
+        const instant = toInstant(start)
+        setStart(instant ? instantToDateInput(instant) : '')
+      }
+      if (end) {
+        const instant = toInstant(end)
+        setEnd(instant ? instantToDateInput(instant) : '')
+      }
+    } else {
+      // switching to timed: reparse as local midnight instant then back to datetime-local
+      if (start) {
+        const instant = dateInputToInstant(start)
+        setStart(instant ? instantToLocalInput(instant) : '')
+      }
+      if (end) {
+        const instant = dateInputToInstant(end)
+        setEnd(instant ? instantToLocalInput(instant) : '')
+      }
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault()
     const nm = name.trim()
     if (!nm || busy) return
     setBusy(true)
     setError(null)
-    const startAt = toInstant(start)
-    const endAt = toInstant(end)
+    const startAt = isAllDay ? (dateInputToInstant(start) ?? undefined) : toInstant(start)
+    const endAt = isAllDay ? (dateInputToInstant(end) ?? undefined) : toInstant(end)
     const loc = location.trim()
     const emailTrimmed = email.trim()
     try {
       await createPersonalEvent({
         name: nm,
+        allDay: isAllDay,
         ...(startAt ? { startAt } : {}),
         ...(endAt ? { endAt } : {}),
         ...(loc ? { locationLabel: loc } : {}),
@@ -327,11 +442,20 @@ function AddEventForm({ onDone }: { onDone: () => void }) {
           aria-label="Event name"
         />
       </label>
+      <label className="pl-fab-label" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={isAllDay}
+          onChange={(e) => handleAllDayChange(e.target.checked)}
+          aria-label="All day event"
+        />
+        All day
+      </label>
       <label className="pl-fab-label">
         Starts
         <input
           className="pl-input"
-          type="datetime-local"
+          type={isAllDay ? 'date' : 'datetime-local'}
           value={start}
           onChange={(e) => setStart(e.target.value)}
           aria-label="Event start"
@@ -341,7 +465,7 @@ function AddEventForm({ onDone }: { onDone: () => void }) {
         Ends
         <input
           className="pl-input"
-          type="datetime-local"
+          type={isAllDay ? 'date' : 'datetime-local'}
           value={end}
           onChange={(e) => setEnd(e.target.value)}
           aria-label="Event end"
@@ -435,23 +559,37 @@ function AddNoteForm({ onDone }: { onDone: () => void }) {
   )
 }
 
-// Single-field form for the shopping quick-add. No list picker — the server
-// auto-provisions the user's single system-managed shopping list on first use
-// (getShoppingList). Server also auto-categorizes the item by title.
-function AddShoppingItemForm({ onDone }: { onDone: () => void }) {
-  const [title, setTitle] = useState('')
+// Bulk-add form for the shopping quick-add: one item per non-empty line.
+// No list picker — the server auto-provisions the user's single
+// system-managed shopping list on first use (getShoppingList). Server also
+// auto-categorizes each item by title.
+function AddShoppingItemForm({ onDone }: { onDone: (count: number) => void }) {
+  const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const titles = parseShoppingLines(text)
+  const overMax = titles.length > MAX_BULK_SHOPPING_ITEMS
 
   async function submit(e: FormEvent) {
     e.preventDefault()
-    const t = title.trim()
-    if (!t || busy) return
+    if (titles.length === 0 || overMax || busy) return
     setBusy(true)
     setError(null)
     try {
-      await addShoppingItemByTitle(t)
-      onDone()
+      const result = await addShoppingItemsByTitles(titles)
+      if (result.error) {
+        // Partial failure: keep only the un-added lines so a retry can't
+        // duplicate the items that already landed.
+        setText(result.remaining.join('\n'))
+        setError(
+          result.created.length > 0
+            ? `Added ${result.created.length} of ${titles.length} — the rest are still below. ${errMessage(result.error)}`
+            : errMessage(result.error),
+        )
+        setBusy(false)
+        return
+      }
+      onDone(result.created.length)
     } catch (err) {
       setError(errMessage(err))
       setBusy(false)
@@ -461,20 +599,25 @@ function AddShoppingItemForm({ onDone }: { onDone: () => void }) {
   return (
     <form className="pl-fab-form" onSubmit={submit}>
       <label className="pl-fab-label">
-        Item
-        <input
+        Items
+        <textarea
           className="pl-input"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="What do you need?"
-          aria-label="Shopping item name"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="What do you need? One item per line."
+          aria-label="Shopping items, one per line"
+          rows={5}
           disabled={busy}
         />
       </label>
-      <FormError message={error} />
-      <button className="pl-btn" type="submit" disabled={busy || !title.trim()}>
+      <FormError
+        message={
+          overMax ? `Too many items — max ${MAX_BULK_SHOPPING_ITEMS} per add.` : error
+        }
+      />
+      <button className="pl-btn" type="submit" disabled={busy || titles.length === 0 || overMax}>
         <Icon name="plus" size={13} />
-        Add to list
+        {titles.length > 1 ? `Add ${titles.length} to list` : 'Add to list'}
       </button>
     </form>
   )
@@ -484,23 +627,16 @@ function AddShoppingItemForm({ onDone }: { onDone: () => void }) {
 // system-managed chores list, then creates a series from the shared recurrence
 // form via the same buildChoreSeriesInput the Chores page uses.
 function AddChoreForm({ onDone }: { onDone: () => void }) {
-  const [list, setList] = useState<ChoreListDto | null>(null)
+  // Render-from-cache: the warmed choresList row paints the form instantly
+  // (online or offline); only a true cold miss shows the loading hint.
+  const listQ = useCachedQuery(useMemo(() => choresListQuery(), []))
+  const list = listQ.data ?? null
   const [title, setTitle] = useState('')
   // Lazy initializer — React calls defaultRecurrenceState() once for the
   // initial value (the function is passed, not its result).
   const [rec, setRec] = useState<RecurrenceState>(defaultRecurrenceState)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    getChoresList()
-      .then((l) => alive && setList(l))
-      .catch((e) => alive && setError(errMessage(e)))
-    return () => {
-      alive = false
-    }
-  }, [])
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -531,7 +667,10 @@ function AddChoreForm({ onDone }: { onDone: () => void }) {
     }
   }
 
-  if (list === null && !error) return <p className="pl-fab-hint">Loading…</p>
+  if (list === null) {
+    if (listQ.status === 'error') return <FormError message={errMessage(listQ.error)} />
+    return <p className="pl-fab-hint">Loading…</p>
+  }
 
   return (
     <form className="pl-fab-form" onSubmit={submit}>
@@ -560,32 +699,23 @@ function AddChoreForm({ onDone }: { onDone: () => void }) {
 // composer. Resolves (auto-provisions + seeds the Mood field) the diary list,
 // then loads the field defs to render the Mood picker.
 function AddDiaryForm({ onDone }: { onDone: () => void }) {
-  const [list, setList] = useState<DiaryListDto | null>(null)
-  const [moodField, setMoodField] = useState<FieldDefDto | null>(null)
+  // Render-from-cache: the diary list + its field defs paint from the warmed
+  // cache instantly (the old effect was a 2-request network waterfall on
+  // every open, and a dead end offline). Mood stays optional — a defs miss
+  // still lets the user write a body.
+  const listQ = useCachedQuery(useMemo(() => diaryListQuery(), []))
+  const list = listQ.data ?? null
+  const listId = list?.id ?? null
+  const defsQ = useCachedQuery(useMemo(() => (listId ? fieldDefsQuery(listId) : null), [listId]))
+  const moodField = useMemo(() => findMoodField(defsQ.data ?? []), [defsQ.data])
   const [date, setDate] = useState(() => new Date().toLocaleDateString('en-CA'))
+  // Capture the time of entry: defaults to "now", editable, and clearable —
+  // an empty time keeps the entry day-only (raw date string, as before).
+  const [time, setTime] = useState(() => instantToTimeInput(new Date().toISOString()))
   const [body, setBody] = useState('')
   const [mood, setMood] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    getDiaryList()
-      .then(async (l) => {
-        if (!alive) return
-        setList(l)
-        try {
-          const defs = await listFieldDefs(l.id)
-          if (alive) setMoodField(findMoodField(defs))
-        } catch {
-          // Mood is optional — a fields hiccup still lets the user write a body.
-        }
-      })
-      .catch((e) => alive && setError(errMessage(e)))
-    return () => {
-      alive = false
-    }
-  }, [])
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -601,7 +731,10 @@ function AddDiaryForm({ onDone }: { onDone: () => void }) {
       await createDiaryEntry(list.id, {
         title: formatEntryDate(date),
         notes: text ? text : null,
-        dueDate: date,
+        // Timed entries store a true local instant; a cleared time falls back
+        // to the raw day string (midnight-UTC, the legacy day-only shape the
+        // diary helpers key off).
+        dueDate: date && time ? combineDueDateTime(date, time) : date,
         ...(moodField && mood ? { customFields: { [moodField.id]: mood } } : {}),
       })
       onDone()
@@ -611,20 +744,37 @@ function AddDiaryForm({ onDone }: { onDone: () => void }) {
     }
   }
 
-  if (list === null && !error) return <p className="pl-fab-hint">Loading…</p>
+  if (list === null) {
+    if (listQ.status === 'error') return <FormError message={errMessage(listQ.error)} />
+    return <p className="pl-fab-hint">Loading…</p>
+  }
 
   return (
     <form className="pl-fab-form" onSubmit={submit}>
       <label className="pl-fab-label">
         Date
-        <input
-          className="pl-input"
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          aria-label="Entry date"
-          disabled={busy}
-        />
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            className="pl-input"
+            type="date"
+            value={date}
+            onChange={(e) => {
+              setDate(e.target.value)
+              // A time with no date is meaningless — clear it with the date.
+              if (!e.target.value) setTime('')
+            }}
+            aria-label="Entry date"
+            disabled={busy}
+          />
+          <input
+            className="pl-input"
+            type="time"
+            value={time}
+            onChange={(e) => setTime(e.target.value)}
+            aria-label="Entry time"
+            disabled={busy || !date}
+          />
+        </div>
       </label>
       {moodField && (
         <div className="pl-fab-label">

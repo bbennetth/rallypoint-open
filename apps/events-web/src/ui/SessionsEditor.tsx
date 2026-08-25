@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
+import { ConfirmDialog, SwipeActions } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   bulkApplySessions,
@@ -165,6 +167,9 @@ export function SessionsEditor({
   const [stages, setStages] = useState<StageDto[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [filterStatus, setFilterStatus] = useState<SessionApprovalStatus | ''>('')
+  // Swipe/hover Delete stages the session here; ConfirmDialog commits it.
+  const [confirmDelete, setConfirmDelete] = useState<SessionDtoFull | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Create form
   const [title, setTitle] = useState('')
@@ -190,24 +195,22 @@ export function SessionsEditor({
     return creates.length > 0 || updates.length > 0 || deletes.length > 0
   }, [draftRows, sessions])
 
+  const run = useAsyncTask()
   useEffect(() => {
-    let cancelled = false
-    Promise.all([listSessions(eventId), listDays(eventId), listStages(eventId)])
-      .then(([s, d, st]) => {
-        if (cancelled) return
+    void run(async (ctx) => {
+      try {
+        const [s, d, st] = await Promise.all([listSessions(eventId), listDays(eventId), listStages(eventId)])
+        if (ctx.stale()) return
         setSessions(s)
         setDays(d)
         setStages(st)
         setDraftRows(s.map(rowFromSession))
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
+      } catch (err) {
+        if (ctx.stale()) return
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load sessions.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [eventId, reloadSignal])
+      }
+    })
+  }, [eventId, reloadSignal, run])
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
@@ -246,11 +249,12 @@ export function SessionsEditor({
   }
 
   async function handleDelete(sessionId: string) {
+    setDeleteError(null)
     try {
       await deleteSession(eventId, sessionId)
       setSessions((prev) => prev.filter((s) => s.id !== sessionId))
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : 'Failed to delete session.')
+      setDeleteError(err instanceof ApiError ? err.message : 'Failed to delete session.')
     }
   }
 
@@ -435,10 +439,11 @@ export function SessionsEditor({
     return (
       <div
         role="alert"
-        className="p-3 text-sm text-[color:var(--ink)]"
+        className="p-3 text-sm"
         style={{
-          border: '1.5px solid var(--hot)',
-          background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+          background: 'var(--hot-soft)',
+          color: 'var(--hot-text)',
+          borderRadius: 'var(--radius-lg)',
         }}
       >
         {loadError}
@@ -455,7 +460,7 @@ export function SessionsEditor({
       : sessions
 
   return (
-    <div className="p-4 space-y-6" style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}>
+    <div className="p-4 space-y-6 pl-card">
       {/* Create form */}
       <div className="space-y-3">
         <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">Create session</h3>
@@ -595,10 +600,11 @@ export function SessionsEditor({
           {createError && (
             <div
               role="alert"
-              className="p-3 text-sm text-[color:var(--ink)]"
+              className="p-3 text-sm"
               style={{
-                border: '1.5px solid var(--hot)',
-                background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+                background: 'var(--hot-soft)',
+                color: 'var(--hot-text)',
+                borderRadius: 'var(--radius-lg)',
               }}
             >
               {createError}
@@ -794,8 +800,7 @@ export function SessionsEditor({
                               width: 'auto',
                               padding: '2px 8px',
                               fontSize: '0.7rem',
-                              color: row.pendingDelete ? 'var(--map-highlight)' : 'var(--hot)',
-                              borderColor: row.pendingDelete ? 'var(--map-highlight)' : 'var(--hot)',
+                              color: row.pendingDelete ? 'var(--map-highlight)' : 'var(--hot-text)',
                             }}
                           >
                             {row.pendingDelete ? 'Undo' : 'Del'}
@@ -810,8 +815,7 @@ export function SessionsEditor({
                               width: 'auto',
                               padding: '2px 8px',
                               fontSize: '0.7rem',
-                              color: 'var(--hot)',
-                              borderColor: 'var(--hot)',
+                              color: 'var(--hot-text)',
                             }}
                           >
                             ×
@@ -849,10 +853,11 @@ export function SessionsEditor({
             {bulkError && (
               <div
                 role="alert"
-                className="p-3 text-sm text-[color:var(--ink)]"
+                className="p-3 text-sm"
                 style={{
-                  border: '1.5px solid var(--hot)',
-                  background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+                  background: 'var(--hot-soft)',
+                  color: 'var(--hot-text)',
+                  borderRadius: 'var(--radius-lg)',
                 }}
               >
                 {bulkError}
@@ -882,15 +887,37 @@ export function SessionsEditor({
           <p className="text-xs text-[color:var(--ink-mute)]">No sessions found.</p>
         )}
 
+        {deleteError && (
+          <div
+            role="alert"
+            className="p-3 text-sm"
+            style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
+          >
+            {deleteError}
+          </div>
+        )}
+
         <ul className="space-y-2">
           {displayed.map((session) => {
             const day = session.day_id ? dayMap.get(session.day_id) : undefined
             const stage = session.stage_id ? stageMap.get(session.stage_id) : undefined
+            const hasInlineActions =
+              (isOwner && session.approval_status !== 'approved') ||
+              (!isOwner && session.approval_status === 'rejected')
             return (
-              <li
+              <SwipeActions
                 key={session.id}
-                className="p-3 space-y-2"
-                style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+                as="li"
+                contentClassName="p-3 space-y-2"
+                contentStyle={{ background: 'var(--surface)' }}
+                actions={[
+                  {
+                    key: 'delete',
+                    label: `Delete session ${session.title}`,
+                    icon: <>✕</>,
+                    onAction: () => setConfirmDelete(session),
+                  },
+                ]}
               >
                 <div className="flex items-start gap-2">
                   <div className="flex-1 space-y-0.5">
@@ -919,50 +946,58 @@ export function SessionsEditor({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  {isOwner && session.approval_status !== 'approved' && (
-                    <>
+                {hasInlineActions && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {isOwner && session.approval_status !== 'approved' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleApproval(session.id, 'approve')}
+                          className="btn-ghost"
+                          style={{ width: 'auto', color: 'var(--map-highlight)' }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleApproval(session.id, 'reject')}
+                          className="btn-hot"
+                          style={{ width: 'auto' }}
+                        >
+                          Reject
+                        </button>
+                      </>
+                    )}
+                    {!isOwner && session.approval_status === 'rejected' && (
                       <button
                         type="button"
-                        onClick={() => void handleApproval(session.id, 'approve')}
+                        onClick={() => void handleApproval(session.id, 'submit')}
                         className="btn-ghost"
-                        style={{ width: 'auto', color: 'var(--map-highlight)', borderColor: 'var(--map-highlight)' }}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleApproval(session.id, 'reject')}
-                        className="btn-hot"
                         style={{ width: 'auto' }}
                       >
-                        Reject
+                        Submit for approval
                       </button>
-                    </>
-                  )}
-                  {!isOwner && session.approval_status === 'rejected' && (
-                    <button
-                      type="button"
-                      onClick={() => void handleApproval(session.id, 'submit')}
-                      className="btn-ghost"
-                      style={{ width: 'auto' }}
-                    >
-                      Submit for approval
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void handleDelete(session.id)}
-                    className="btn-ghost"
-                    style={{ width: 'auto', color: 'var(--hot)', borderColor: 'var(--hot)' }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </li>
+                    )}
+                  </div>
+                )}
+              </SwipeActions>
             )
           })}
         </ul>
+        <ConfirmDialog
+          open={confirmDelete !== null}
+          title="Delete session?"
+          body={confirmDelete ? `Remove “${confirmDelete.title}” from this event.` : undefined}
+          confirmLabel="Delete"
+          confirmVariant="hot"
+          onConfirm={async () => {
+            if (!confirmDelete) return
+            const id = confirmDelete.id
+            setConfirmDelete(null)
+            await handleDelete(id)
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
       </div>
 
       <CsvImportPanel

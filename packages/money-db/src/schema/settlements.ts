@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { ledgers } from './ledgers.js'
 
 // settlements — one party paying another to reduce an outstanding
@@ -36,12 +36,24 @@ export const settlements = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
+    // Client-supplied idempotency key (audit E2 #7). Optional; when set,
+    // a partial unique index on (ledger_id, ref) lets a retried POST find
+    // the row that was already created and return it instead of inserting
+    // a duplicate. NULL never participates in the unique check (SQLite
+    // treats NULLs as distinct in UNIQUE), so callers that don't care
+    // about idempotency just omit it.
+    ref: text('ref'),
   },
   (t) => ({
     ledgerSettledIdx: index('money_settlements_ledger_settled_idx').on(
       t.ledgerId,
       t.settledAt,
     ),
+    // Partial unique index — only enforced when ref IS NOT NULL, so
+    // un-keyed settlements continue to allow duplicate amounts/dates.
+    ledgerRefUq: uniqueIndex('money_settlements_ledger_ref_uq')
+      .on(t.ledgerId, t.ref)
+      .where(sql`${t.ref} IS NOT NULL`),
   }),
 )
 

@@ -67,6 +67,9 @@ export async function buildPushRequest(
 
 export interface SendPushOptions extends BuildPushRequestOptions {
   fetch?: typeof globalThis.fetch
+  /** Abort the request after this many ms. Default 10s — keeps a stalled
+   * push service from hanging the cron Worker until its CPU limit. */
+  timeoutMs?: number
 }
 
 export interface SendPushResult {
@@ -83,6 +86,7 @@ export async function sendPush(opts: SendPushOptions): Promise<SendPushResult> {
     method: 'POST',
     headers: prepared.headers,
     body: prepared.body,
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
   })
   return {
     ok: res.ok,

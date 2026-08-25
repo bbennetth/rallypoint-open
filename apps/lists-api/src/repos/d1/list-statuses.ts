@@ -1,4 +1,5 @@
 import { and, asc, eq, isNull, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import { listItems, listStatuses } from '@rallypoint/lists-db'
 import type { StatusCategory } from '@rallypoint/lists-shared'
 import type {
@@ -8,6 +9,8 @@ import type {
   UpdateListStatusInput,
 } from '../types.js'
 import type { Db } from './db.js'
+
+type Stmt = BatchItem<'sqlite'>
 
 // Append-at-end position scalar subquery (mirrors field-defs; SQLite
 // supports scalar subqueries in INSERT projections).
@@ -82,7 +85,12 @@ export class D1ListStatusRepo implements ListStatusRepo {
     seeds: { id: string; name: string; color: string; category: StatusCategory }[],
   ): Promise<ListStatusRecord[]> {
     if (seeds.length === 0) return []
-    const rows = await this.db
+    // Audit E2 #11: INSERT OR IGNORE on the PK. The caller (route) now
+    // mints DETERMINISTIC seed ids (lst_seed_<listId>_<category>), so a
+    // concurrent double-seed produces the same ids and the second
+    // insert's rows are dropped on PK collision. Re-read via
+    // listForList to surface the canonical winner set.
+    await this.db
       .insert(listStatuses)
       .values(
         seeds.map((s, i) => ({
@@ -96,8 +104,8 @@ export class D1ListStatusRepo implements ListStatusRepo {
           createdBy,
         })),
       )
-      .returning()
-    return rows.map(rowToStatus)
+      .onConflictDoNothing({ target: listStatuses.id })
+    return this.listForList(listId)
   }
 
   async update(id: string, fields: UpdateListStatusInput): Promise<ListStatusRecord | null> {
@@ -126,7 +134,18 @@ export class D1ListStatusRepo implements ListStatusRepo {
     fromStatusId: string,
     to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
   ): Promise<number> {
-    const rows = await this.db
+    const rows = await this.#reassignItemsStmt(listId, fromStatusId, to).returning({
+      id: listItems.id,
+    })
+    return rows.length
+  }
+
+  #reassignItemsStmt(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+  ) {
+    return this.db
       .update(listItems)
       .set({
         statusId: to.statusId,
@@ -142,7 +161,29 @@ export class D1ListStatusRepo implements ListStatusRepo {
           isNull(listItems.deletedAt),
         ),
       )
-      .returning({ id: listItems.id })
-    return rows.length
+  }
+
+  // Reassign items off the status being deleted and soft-delete the status
+  // itself atomically via db.batch() — D1 has no interactive
+  // db.transaction(), and running these as two separate awaited calls
+  // leaves a window where items have been reassigned but the status row
+  // is still live (or vice versa if the process is interrupted between
+  // calls).
+  async reassignItemsAndSoftDelete(
+    listId: string,
+    fromStatusId: string,
+    to: { statusId: string | null; status: StatusCategory | null; completed: boolean },
+    when: Date,
+  ): Promise<number> {
+    const reassign = this.#reassignItemsStmt(listId, fromStatusId, to).returning({
+      id: listItems.id,
+    }) as Stmt
+    const softDelete = this.db
+      .update(listStatuses)
+      .set({ deletedAt: when, updatedAt: new Date() })
+      .where(eq(listStatuses.id, fromStatusId)) as Stmt
+
+    const [reassignResult] = await this.db.batch([reassign, softDelete])
+    return (reassignResult as { id: string }[]).length
   }
 }

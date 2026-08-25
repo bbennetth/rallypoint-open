@@ -1,6 +1,7 @@
 import type { ListItemDto } from '@rallypoint/lists-client'
 import type { PersonalEventDto, UserEventDto } from '@rallypoint/events-client'
-import { dayInstant, type DayWindow } from './day-window.js'
+import type { WorkoutSummaryDto } from '@rallypoint/fitness-client'
+import { dayInstant, type DayWindow } from '@rallypoint/shared'
 import { expandEventDays, isAllDay, type EventDayItem } from './event-days.js'
 
 // Pure My Day composition: given the actor's task items and personal events,
@@ -17,6 +18,7 @@ export interface MyDay {
   undatedTasks: ListItemDto[] // no dueDate; priority asc (high first) then title
   events: PersonalEventDto[] // starting within the day, soonest first
   eventDays: EventDayItem[] // group event days falling on the day, all-day first
+  training: WorkoutSummaryDto[] // today's logged workouts from fitness-api; [] on absence/outage
 }
 
 // Numeric-instant membership in the half-open window [start, end). Parsing
@@ -123,6 +125,8 @@ export function composeMyDay(input: {
   userEvents: UserEventDto[] // group (festival) events, expanded per day
   /** Group event ids that should be marked shared in the output (planner-flagged). */
   sharedEventIds?: readonly string[]
+  /** Today's logged workouts from fitness-api; pass-through, empty on absence/outage. */
+  training?: WorkoutSummaryDto[]
 }): MyDay {
   const startMs = Date.parse(input.window.start)
   const endMs = Date.parse(input.window.end)
@@ -166,5 +170,13 @@ export function composeMyDay(input: {
       return a.name.localeCompare(b.name)
     })
 
-  return { date: input.date, timezone: input.timezone, tasks, undatedTasks, events, eventDays }
+  return {
+    date: input.date,
+    timezone: input.timezone,
+    tasks,
+    undatedTasks,
+    events,
+    eventDays,
+    training: input.training ?? [],
+  }
 }

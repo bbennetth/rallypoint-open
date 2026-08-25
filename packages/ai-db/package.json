@@ -1,0 +1,29 @@
+{
+  "name": "@rallypoint/ai-db",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/schema/index.js",
+  "types": "dist/schema/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "ai:db:generate": "drizzle-kit generate --config=drizzle.config.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.0",
+    "typescript": "^5.7.0"
+  }
+}

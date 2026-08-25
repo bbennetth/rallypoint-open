@@ -3,12 +3,13 @@ import { secureHeaders } from 'hono/secure-headers'
 import { noopRealtimeBus, type RealtimeBus, type RealtimeHubNamespace } from '@rallypoint/realtime'
 import { ANTI_FINGERPRINT_NOT_FOUND } from '@rallypoint/shared'
 import type { Env } from './env.js'
-import { buildLogger, type Logger } from './logger.js'
+import { buildLoggerWithFlush, type Logger } from './logger.js'
 import type { HonoApp } from './context.js'
 import type { Repos } from './repos/types.js'
 import type { Services } from './services/types.js'
 import { requestId } from './middleware/request-id.js'
 import { accessLog } from './middleware/access-log.js'
+import { logFlush } from './middleware/log-flush.js'
 import { errorHandler } from './middleware/error-handler.js'
 import { requireAllowedOrigin } from './middleware/origin.js'
 import { requireCsrf } from './middleware/csrf.js'
@@ -18,30 +19,35 @@ import { ssoRoutes } from './routes/sso.js'
 import { settingsRoutes } from './routes/settings.js'
 import { eventsRoutes } from './routes/events.js'
 import { attendeesRoutes } from './routes/attendees.js'
+import { attendanceRoutes } from './routes/attendance.js'
 import { ticketsRoutes } from './routes/tickets.js'
 import { lineupRoutes } from './routes/lineup.js'
 import { sessionsRoutes } from './routes/sessions.js'
 import { snapshotsRoutes } from './routes/snapshots.js'
 import { mapsRoutes } from './routes/maps.js'
+import { groupMapsRoutes } from './routes/group-maps.js'
+import { memberLocationsRoutes } from './routes/member-locations.js'
 import { groupsRoutes } from './routes/groups.js'
 import { ralliesRoutes } from './routes/rallies.js'
 import { groupDayRoutes } from './routes/group-day.js'
 import { chatRoutes } from './routes/chat.js'
 import { realtimeRoutes } from './routes/realtime.js'
 import { sdkEventsRoutes } from './routes/sdk-events.js'
-import { sdkPersonalEventsRoutes } from './routes/sdk-personal-events.js'
-import { sdkPersonalTicketsRoutes } from './routes/sdk-personal-tickets.js'
-import { sdkUserEventsRoutes } from './routes/sdk-user-events.js'
+import { pwaRoutes } from './routes/pwa.js'
 import { publicHtmlRoutes } from './routes/public-html.js'
 import { weatherRoutes } from './routes/weather.js'
 import { setStarsRoutes } from './routes/set-stars.js'
-import { requireSdkKey } from './middleware/app-api-key.js'
-import { plannerPrefsUiRoutes, plannerPrefsSdkRoutes } from './routes/planner-prefs.js'
-import { sdkHolidaysRoutes } from './routes/sdk-holidays.js'
+import { artistFavoritesRoutes } from './routes/artist-favorites.js'
+import { plannerPrefsUiRoutes } from './routes/planner-prefs.js'
+import { browseRoutes } from './routes/browse.js'
 
 export interface BuildAppDeps {
   env: Env
   logger?: Logger
+  // Drains the PostHog log-sink buffer. Passed alongside `logger` by the
+  // Worker entrypoint (paired via buildLoggerWithFlush). Defaults to a
+  // no-op when a bare logger is injected without one (tests).
+  flushLogs?: () => Promise<void>
   // Tests inject memory/stub implementations; the Worker entrypoint
   // passes buildD1Repos(createDb(env.EVENTS_DB)). No pg default — the
   // Node server was retired in the D1 migration.
@@ -59,23 +65,42 @@ export interface BuildAppDeps {
 }
 
 export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
-  const logger = deps.logger ?? buildLogger(deps.env)
+  let logger: Logger
+  let flushLogs: () => Promise<void>
+  if (deps.logger) {
+    logger = deps.logger
+    flushLogs = deps.flushLogs ?? (async () => {})
+  } else {
+    ;({ logger, flushLogs } = buildLoggerWithFlush(deps.env))
+  }
   const repos = deps.repos
   const services = deps.services
   const realtime = deps.realtime ?? noopRealtimeBus()
   const app = new Hono<HonoApp>()
 
+  // Outermost middleware: after every request (success or throw) drain the
+  // PostHog log-sink buffer via executionCtx.waitUntil. Registered first so
+  // its post-next flush runs last, after all logging including onError.
+  app.use('*', logFlush(flushLogs))
+
   // Conservative default headers. Slice 2 layers CSP with nonces
   // when the API starts serving authenticated UI routes; slice 1
   // doesn't render any HTML so the stock secureHeaders defaults
   // are enough.
-  app.use(
-    '*',
-    secureHeaders({
-      ...(deps.env.NODE_ENV === 'production'
-        ? { strictTransportSecurity: 'max-age=31536000; includeSubDomains' }
-        : {}),
-    }),
+  //
+  // The realtime WS-upgrade route is exempt: secureHeaders mutates
+  // c.res.headers after next(), but that route returns the RealtimeHub
+  // DO's response verbatim — a fetch()-produced Response with immutable
+  // headers (and a 101 carrying webSocket must not be cloned), so the
+  // mutation throws "Can't modify immutable headers" and 500s the
+  // handshake.
+  const secure = secureHeaders({
+    ...(deps.env.NODE_ENV === 'production'
+      ? { strictTransportSecurity: 'max-age=31536000; includeSubDomains' }
+      : {}),
+  })
+  app.use('*', (c, next) =>
+    c.req.path === '/api/v1/ui/realtime' ? next() : secure(c, next),
   )
   app.use('*', requestId)
   app.use('*', async (c, next) => {
@@ -120,17 +145,37 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   app.route('/', realtimeRoutes)
   // Planner-pref UI routes must be mounted BEFORE eventsRoutes so that
   // GET /api/v1/ui/events/planner-prefs is not captured by eventsRoutes'
-  // GET /api/v1/ui/events/:slug wildcard. The SDK routes follow
-  // sdkUserEventsRoutes below, under their own requireSdkKey guards.
+  // GET /api/v1/ui/events/:slug wildcard. The companion SDK routes were
+  // retired in PR 3 of feat/rpc-bindings — planner-api reaches them via
+  // the EventsRPC binding.
   app.route('/', plannerPrefsUiRoutes)
+  // Per-event PWA (#per-event-install). Mounted before eventsRoutes so
+  // the static `app-icon` segment can't be captured by a broader
+  // /events/:slug pattern; the public manifest + icon routes it also
+  // carries are content-gated on the event id, not public_page_config
+  // (see routes/pwa.ts for why).
+  app.route('/', pwaRoutes)
+  // Browse tab (#browse-tab). Mounted before eventsRoutes so the literal
+  // GET /api/v1/ui/events/browse wins over GET /api/v1/ui/events/:slug
+  // (same reason as plannerPrefsUiRoutes above).
+  app.route('/', browseRoutes)
   app.route('/', eventsRoutes)
   app.route('/', attendeesRoutes)
+  app.route('/', attendanceRoutes)
   app.route('/', ticketsRoutes)
   app.route('/', lineupRoutes)
   app.route('/', setStarsRoutes)
+  app.route('/', artistFavoritesRoutes)
   app.route('/', sessionsRoutes)
   app.route('/', snapshotsRoutes)
   app.route('/', mapsRoutes)
+  // Group-scoped mirror reads of the event map surface (attendee Map
+  // tab). Mounted before groupsRoutes; paths (:id/maps, :id/pois,
+  // :id/zones) are distinct deeper segments, so none is captured by
+  // GET /groups/:id.
+  app.route('/', groupMapsRoutes)
+  // Crew map pins (attendee Map tab) — same deeper-segment reasoning.
+  app.route('/', memberLocationsRoutes)
   app.route('/', groupsRoutes)
   // Rallies (slice 9b) — under the /api/v1/ui/groups/* session guard above.
   app.route('/', ralliesRoutes)
@@ -141,41 +186,17 @@ export function buildApp(deps: BuildAppDeps): Hono<HonoApp> {
   // GET /groups/:id.
   app.route('/', chatRoutes)
 
-  // Slice 11 — the public surfaces. Mounted at the end so the
-  // ordering reads as "internal UI first, then public", but they
-  // share NO middleware with /api/v1/ui/* (no session, no CSRF, no
-  // origin allowlist). Gating is content-side (public_page_config
-  // + privacy_mode); see routes/sdk-events.ts and routes/public-html.ts.
-  // The coordinate forecast (`GET /api/v1/sdk/weather`) is API-key gated —
-  // it isn't tied to a public event, so without the key it would be an open
-  // Open-Meteo proxy. The event-scoped weather endpoints in weatherRoutes stay
-  // public (gated content-side by event privacy), so the gate is path-exact.
-  app.use('/api/v1/sdk/weather', requireSdkKey)
+  // Public surfaces — share NO middleware with /api/v1/ui/* (no session,
+  // no CSRF, no origin allowlist). Gating is content-side
+  // (public_page_config + privacy_mode); see routes/sdk-events.ts and
+  // routes/public-html.ts. The PLANNER_API_KEY-gated `/api/v1/sdk/*`
+  // surfaces (personal-events, user-events, planner-prefs, holidays,
+  // weather coordinate forecast) were retired in PR 3 of
+  // feat/rpc-bindings — consumers now reach those handlers through the
+  // `EventsRPC` `WorkerEntrypoint` binding.
   app.route('/', weatherRoutes)
   app.route('/', sdkEventsRoutes)
   app.route('/', publicHtmlRoutes)
-
-  // Slice 2 — authenticated personal-events namespace. The key gate
-  // is applied ONLY to /api/v1/sdk/personal-events (and the wildcard
-  // sub-path); the public /api/v1/sdk/events/* surface is untouched.
-  app.use('/api/v1/sdk/personal-events', requireSdkKey)
-  app.use('/api/v1/sdk/personal-events/*', requireSdkKey)
-  app.route('/', sdkPersonalEventsRoutes)
-  app.route('/', sdkPersonalTicketsRoutes)
-
-  // Authenticated read of the actor's group (festival) events — owner,
-  // collaborator, or attendee. Same planner-key gate as personal-events.
-  app.use('/api/v1/sdk/user-events', requireSdkKey)
-  app.route('/', sdkUserEventsRoutes)
-
-  // SDK planner-pref routes (UI routes are mounted above eventsRoutes):
-  app.use('/api/v1/sdk/events/:eventId/planner-pref', requireSdkKey)
-  app.use('/api/v1/sdk/planner-events', requireSdkKey)
-  app.route('/', plannerPrefsSdkRoutes)
-
-  // Holidays SDK route — key-gated, no DB dependency (pure computation).
-  app.use('/api/v1/sdk/holidays', requireSdkKey)
-  app.route('/', sdkHolidaysRoutes)
 
   app.notFound((c) =>
     c.json({ error: ANTI_FINGERPRINT_NOT_FOUND }, 404),

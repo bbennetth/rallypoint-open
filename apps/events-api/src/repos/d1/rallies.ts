@@ -16,6 +16,9 @@ function rowToRally(row: typeof rallies.$inferSelect): RallyRecord {
     locationLabel: row.locationLabel ?? null,
     lat: row.lat != null ? String(row.lat) : null,
     lng: row.lng != null ? String(row.lng) : null,
+    pinLayer: row.pinLayer ?? null,
+    pinXPct: row.pinXPct ?? null,
+    pinYPct: row.pinYPct ?? null,
     status: row.status as RallyStatus,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
@@ -45,6 +48,9 @@ export class D1RallyRepo implements RallyRepo {
         locationLabel: input.locationLabel ?? null,
         lat: latNum,
         lng: lngNum,
+        pinLayer: input.pinLayer ?? null,
+        pinXPct: input.pinXPct ?? null,
+        pinYPct: input.pinYPct ?? null,
         status: input.status ?? 'proposed',
         createdBy: input.createdBy,
       })
@@ -76,6 +82,9 @@ export class D1RallyRepo implements RallyRepo {
     if (fields.locationLabel !== undefined) set.locationLabel = fields.locationLabel
     if (fields.lat !== undefined) set.lat = fields.lat != null ? parseFloat(fields.lat) : null
     if (fields.lng !== undefined) set.lng = fields.lng != null ? parseFloat(fields.lng) : null
+    if (fields.pinLayer !== undefined) set.pinLayer = fields.pinLayer
+    if (fields.pinXPct !== undefined) set.pinXPct = fields.pinXPct
+    if (fields.pinYPct !== undefined) set.pinYPct = fields.pinYPct
     if (fields.status !== undefined) set.status = fields.status
 
     const [row] = await this.db.update(rallies).set(set).where(eq(rallies.id, id)).returning()

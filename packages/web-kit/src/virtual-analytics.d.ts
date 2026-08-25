@@ -9,10 +9,13 @@ declare module 'virtual:analytics' {
   export interface AnalyticsOptions {
     key: string
     host?: string
+    serviceName: string
+    environment?: string
   }
   export function initAnalytics(opts: AnalyticsOptions): void
   export function captureEvent(name: string, properties?: Record<string, unknown>): void
   export function identify(distinctId: string, properties?: Record<string, unknown>): void
   export function resetAnalytics(): void
   export function captureException(error: unknown, properties?: Record<string, unknown>): void
+  export function getSessionId(): string | undefined
 }

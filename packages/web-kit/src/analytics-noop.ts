@@ -8,6 +8,8 @@
 export interface AnalyticsOptions {
   key: string
   host?: string
+  serviceName: string
+  environment?: string
 }
 
 export function initAnalytics(_opts: AnalyticsOptions): void {
@@ -37,4 +39,8 @@ export function captureException(
   _properties?: Record<string, unknown>,
 ): void {
   // intentional no-op
+}
+
+export function getSessionId(): string | undefined {
+  return undefined
 }

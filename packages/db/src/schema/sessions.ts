@@ -47,6 +47,3 @@ export const sessions = sqliteTable(
     parentIdx: index('sessions_parent_idx').on(t.parentSessionId),
   }),
 )
-
-export type DbSession = typeof sessions.$inferSelect
-export type DbSessionInsert = typeof sessions.$inferInsert

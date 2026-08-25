@@ -1,19 +1,5 @@
-@import 'tailwindcss';
-@import '@rallypoint/ui/theme.css';
+/* Marketing site styles: self-hosted fonts from the Ink design system +
+   the Soft Ink marketing chrome (tokens scoped on body in www.css — the
+   site is dark-only and independent of the app themes). */
 @import '@rallypoint/ui/fonts.css';
-
-/* The Ink token layer owns the design tokens (var(--bg/--ink/--font-*)).
-   Set the document defaults off those tokens. */
-html,
-body {
-  background: var(--bg);
-  color: var(--ink);
-}
-
-body {
-  font-family: var(--font-body);
-}
-
-code {
-  font-family: var(--font-mono);
-}
+@import './www.css';

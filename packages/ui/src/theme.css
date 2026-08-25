@@ -1,17 +1,38 @@
-/* @rallypoint/ui — "Ink" theme.
+/* @rallypoint/ui — "Soft Ink" theme entry.
  *
- * Cyber-brutalist design system promoted from the Rallypoint Planner
- * design handoff. Dual-axis theming: `data-mode` (dark default / light)
+ * The Ink design system in its Soft Ink form (#762): rounded 7–14px
+ * corners, soft shadows, borderless surface-step separation, accent
+ * `color-mix` tints — same palette and Archivo Black / Space Grotesk /
+ * Space Mono type. Dual-axis theming: `data-mode` (dark default / light)
  * selects the chassis (bg/surface/ink), and `data-color` (blue / orange
  * / purple / pink / red / green) selects the accent. Both attributes are
  * written to <html> by `applyThemeToDom` in the shared theme store.
+ *
+ * STRUCTURE — this file is now a thin entry that @imports the four
+ * tokens files (mirroring the kit's `design_files/tokens/` split):
+ *
+ *   tokens/colors.css       — chassis + accents + derived washes
+ *   tokens/typography.css   — font families + size vars + tracking + leading
+ *   tokens/spacing.css      — spacing scale + borders + radius + shadows + glass + motion
+ *   tokens/primitives.css   — .display, .mono, .eyebrow, .meta, .chip(-solid),
+ *                             .btn-brutal/ghost/hot, .cyber-input,
+ *                             .cyber-checkbox, .progress, .divider
+ *                             (`.pl-chip` lives in shell.css instead so the
+ *                              `.repeat` / `.toggle` modifiers have one home)
+ *
+ * Everything BELOW the @imports is legacy back-compat that lives here
+ * because it's not part of the kit's tokens layer: the global form
+ * normalize, safe-area helpers, dark-mode-only Tailwind remaps, the
+ * .app-* responsive layout grid (separate from `.plapp` in shell.css),
+ * Android platform tweaks, and a handful of layout utilities
+ * (`.page-pad`, `.group-grid`, `.content-cap`, etc.) that callers depend
+ * on without owning their own CSS.
  *
  * Back-compat: the legacy single-axis `data-theme` attribute still
  * works — `:root[data-theme='dark']` maps to the dark chassis and
  * `:root[data-theme='light']` to the light chassis — so the four sibling
  * apps (events-web/lists-web/money-web/id-web) keep rendering correctly
  * whether they emit `data-mode` (new store) or only `data-theme`.
- * Token NAMES are unchanged so existing component CSS keeps resolving.
  *
  * Default (no attribute) = dark Ink chassis + blue accent.
  *
@@ -20,78 +41,10 @@
  * (e.g. `.border-b`) so importing it alongside Tailwind is side-effect
  * free. */
 
-:root {
-  /* Type stack (mode/color-independent). */
-  --font-display: 'Archivo Black', system-ui, -apple-system, sans-serif;
-  --font-body: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-  --font-mono: 'Space Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  /* Festival-map highlight: theme-agnostic neon green for the
-     direction line + nearest-POI halo. */
-  --map-highlight: #39ff14;
-  --hot: #ef4444;
-  --focus-ring: var(--acid);
-}
-
-/* ─── CHASSIS (data-mode) ───────────────────────────────────
-   Dark is the default; applied to bare `:root` so apps that have not
-   yet written any theme attribute render the Ink dark chassis. */
-:root,
-[data-mode='dark'],
-:root[data-theme='dark'] {
-  --bg: #0b1b2b;
-  --surface: #152638;
-  --surface-2: #1d2f45;
-  --line: #2b3d56;
-  --ink: #ffffff;
-  --ink-dim: #a8bcd4;
-  --ink-mute: #7a8fa6;
-  color-scheme: dark;
-}
-
-[data-mode='light'],
-:root[data-theme='light'] {
-  --bg: #ffffff;
-  --surface: #f5f7fa;
-  --surface-2: #eaf0f7;
-  --line: #d7dfe8;
-  --ink: #0b1b2b;
-  --ink-dim: #4a5a70;
-  --ink-mute: #7d8ca1;
-  color-scheme: light;
-}
-
-/* ─── ACCENTS (data-color) ──────────────────────────────────
-   `:root` carries the default (blue) so `--acid`/`--accent` resolve when
-   no data-color is set. `--accent` always aliases `--acid`. */
-:root,
-[data-color='blue'] {
-  --acid: #0ea5e9;
-  --accent: var(--acid);
-  --accent-ink: #ffffff;
-}
-[data-color='orange'] { --acid: #fb923c; --accent: var(--acid); --accent-ink: #0b1b2b; }
-[data-color='purple'] { --acid: #a855f7; --accent: var(--acid); --accent-ink: #000000; }
-[data-color='pink']   { --acid: #ff2d7a; --accent: var(--acid); --accent-ink: #ffffff; }
-[data-color='red']    { --acid: #ef4444; --accent: var(--acid); --accent-ink: #ffffff; }
-[data-color='green']  { --acid: #22c55e; --accent: var(--acid); --accent-ink: #0b1b2b; }
-
-/* Light-mode accents run a touch darker for contrast on white, and all
-   use white accent-ink. */
-[data-mode='light'][data-color='blue']   { --acid: #0284c7; --accent-ink: #ffffff; }
-[data-mode='light'][data-color='orange'] { --acid: #c2410c; --accent-ink: #ffffff; }
-[data-mode='light'][data-color='purple'] { --acid: #7c3aed; --accent-ink: #ffffff; }
-[data-mode='light'][data-color='pink']   { --acid: #db2777; --accent-ink: #ffffff; }
-[data-mode='light'][data-color='red']    { --acid: #dc2626; --accent-ink: #ffffff; }
-[data-mode='light'][data-color='green']  { --acid: #15803d; --accent-ink: #ffffff; }
-
-/* Soft accent washes derived from the live accent. */
-:root,
-[data-mode] {
-  --accent-soft: color-mix(in srgb, var(--acid) 14%, transparent);
-  --accent-soft-2: color-mix(in srgb, var(--acid) 8%, transparent);
-  /* Dimmed accent at 60% opacity — used for secondary accent text/borders. */
-  --acid-dim: color-mix(in srgb, var(--acid) 60%, transparent);
-}
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/primitives.css';
 
 * {
   -webkit-tap-highlight-color: transparent;
@@ -196,6 +149,12 @@ select {
 [data-mode='light'] .text-white\/80 {
   color: var(--ink-dim);
 }
+/* /85 is near-full-white — a primary-text role, so map to --ink (not
+   --ink-dim). Used for lineup artist names on the browse preview +
+   public event pages. */
+[data-mode='light'] .text-white\/85 {
+  color: var(--ink);
+}
 [data-mode='light'] .bg-white\/3,
 [data-mode='light'] .bg-white\/5 {
   background-color: var(--surface);
@@ -231,88 +190,7 @@ html[data-platform='android'] { font-size: 17.5px; }
 html[data-platform='android'] .app-root { font-size: 1.08em; }
 html[data-platform='android'] .tabbar-link { font-size: 12px; }
 
-/* ─── UTILITY CLASSES ───────────────────────────────────── */
-
-/* `.mono` is intentionally a no-op. The Ink theme used it as a
-   pervasive monospace label/eyebrow primitive; Rallypoint Minimal
-   doesn't. The class is kept (without a body) so the ~45 existing
-   `className="mono"` call-sites compile and render at body font.
-   Code/ID/timestamp displays that genuinely need monospace use the
-   `font-mono` Tailwind utility instead. */
-.mono    {}
-.display { font-family: var(--font-display); }
-
-.chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 2px 8px; border-radius: 6px;
-  background: var(--surface-2); color: var(--ink);
-  font-family: var(--font-body); font-size: 12px; font-weight: 500;
-  white-space: nowrap;
-}
-
-.chip-solid {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 2px 8px; border-radius: 6px;
-  background: var(--acid); color: var(--accent-ink);
-  font-family: var(--font-body); font-size: 12px; font-weight: 500;
-  white-space: nowrap;
-}
-.chip-solid:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-brutal {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 10px 16px; background: var(--acid); color: var(--accent-ink);
-  font-family: var(--font-body); font-size: 14px; font-weight: 600;
-  border: none; border-radius: 8px; cursor: pointer;
-  width: 100%;
-}
-.btn-brutal:hover { opacity: 0.9; }
-.btn-brutal:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.btn-brutal:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-ghost {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 10px 16px; background: transparent; color: var(--ink);
-  border: 1px solid var(--line); border-radius: 8px;
-  font-family: var(--font-body); font-size: 14px; font-weight: 500;
-  cursor: pointer;
-}
-.btn-ghost:hover { background: var(--accent-soft); }
-.btn-ghost:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-hot {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 10px 16px; background: var(--hot); color: #ffffff;
-  font-family: var(--font-body); font-size: 14px; font-weight: 600;
-  border: none; border-radius: 8px; cursor: pointer;
-  width: 100%;
-}
-.btn-hot:hover { opacity: 0.9; }
-.btn-hot:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.btn-hot:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.progress { height: 4px; background: var(--surface-2); position: relative; overflow: hidden; }
-.progress > div { position: absolute; inset: 0; background: var(--accent); transform-origin: left; }
-
-/* Cyber input. `font-size: 16px` is the threshold below which iOS
-   Safari auto-zooms on focus — do not undercut it. */
-.cyber-input {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 16px;
-  padding: 10px 12px;
-  outline: none;
-  transition: border-color 120ms ease-out;
-}
-.cyber-input:focus { border-color: var(--acid); outline: 2px solid var(--focus-ring); outline-offset: -1px; }
-.cyber-input::placeholder { color: var(--ink-mute); }
-
-.divider { height: 1px; background: var(--line); }
+/* ─── LAYOUT UTILITIES (not part of the kit's tokens) ────── */
 
 /* Priority star clip-path */
 .star-clip {

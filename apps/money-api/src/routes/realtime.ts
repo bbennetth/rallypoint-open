@@ -106,5 +106,14 @@ export const realtimeRoutes = new Hono<HonoApp>()
       })
     }
     const stub = hub.get(hub.idFromName(verdict.channel))
-    return stub.fetch(c.req.raw)
+    const res = await stub.fetch(c.req.raw)
+    // A 101 carrying webSocket must pass through untouched — cloning
+    // breaks the handshake. Anything else (DO error responses) is
+    // re-wrapped so its fetch()-immutable headers become mutable for
+    // downstream middleware. (webSocket is a Workers-runtime extension
+    // absent from the Node Response type, hence the structural cast.)
+    const ws = (res as Response & { webSocket?: unknown }).webSocket
+    // Also pass any 101 through: the Response constructor rejects
+    // status 101, so re-wrapping one would throw.
+    return ws || res.status === 101 ? res : new Response(res.body, res)
   })

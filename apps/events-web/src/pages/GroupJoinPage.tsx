@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
@@ -44,28 +45,35 @@ export function GroupJoinPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const runPreview = useAsyncTask()
   const resolvePreview = useCallback(
     async (value: string) => {
       const trimmed = value.trim()
       if (!trimmed) return
       setError(null)
       setPreviewing(true)
-      try {
-        const p = await previewGroupJoin(trimmed)
-        if (p.you_are_member) {
-          // Already in — straight into the group shell (FP behavior).
-          void navigate(`/groups/${p.group_id}`)
-          return
+      // Gate the commits: a deep-link preview and a manual form submit can be
+      // in flight together; only the latest should land.
+      await runPreview(async (ctx) => {
+        try {
+          const p = await previewGroupJoin(trimmed)
+          if (ctx.stale()) return
+          if (p.you_are_member) {
+            // Already in — straight into the group shell (FP behavior).
+            void navigate(`/groups/${p.group_id}`)
+            return
+          }
+          setPreview(p)
+        } catch (err) {
+          if (ctx.stale()) return
+          setPreview(null)
+          setError(joinErrorMessage(err))
+        } finally {
+          if (!ctx.stale()) setPreviewing(false)
         }
-        setPreview(p)
-      } catch (err) {
-        setPreview(null)
-        setError(joinErrorMessage(err))
-      } finally {
-        setPreviewing(false)
-      }
+      })
     },
-    [navigate],
+    [navigate, runPreview],
   )
 
   // QR / share-link deep link: resolve immediately on mount (and only
@@ -105,10 +113,11 @@ export function GroupJoinPage() {
 
         {error && (
           <div
-            className="p-3 text-sm text-white/80"
+            className="p-3 text-sm"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              color: 'var(--hot-text)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
             {error}
@@ -117,8 +126,7 @@ export function GroupJoinPage() {
 
         {preview ? (
           <section
-            className="p-4 space-y-3"
-            style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+            className="p-4 space-y-3 pl-card"
           >
             <p className="text-xs font-medium text-[color:var(--ink-mute)]">You're joining</p>
             <h2 className="display text-xl">{preview.name}</h2>

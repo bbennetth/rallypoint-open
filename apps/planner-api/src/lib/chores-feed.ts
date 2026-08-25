@@ -29,23 +29,56 @@ export function choresInFeedsEnabled(settings: Record<string, unknown>): boolean
   return settings[SETTING_SHOW_CHORES_IN_FEEDS] !== false
 }
 
-// Resolve the actor's chores-list items for the feed, honoring the toggle.
-// Returns [] when the toggle is off, the chores list doesn't exist yet, or any
+// Resolve the actor's chores-list items for the feed.
+//
+// `scope` controls how the showChoresInFeeds toggle is interpreted:
+//
+//   • 'future' (default; used by Upcoming) — toggle gates the read. When the
+//     toggle is OFF returns []; when ON returns the items.
+//   • 'today' (used by My Day) — the toggle DOES NOT gate the read. Today's
+//     Chores section on My Day is always visible (handoff: "always renders on
+//     the current day's agenda regardless of the chores toggle"); the
+//     showChoresInFeeds toggle only controls future-scope surfaces.
+//
+// Returns [] when the chores list doesn't exist yet (never provisions), or any
 // settings read fails (non-fatal — a settings hiccup must never drop the feed).
-// Never provisions the chores list (findChoresList is read-only).
 export async function fetchChoresFeedItems(
   listsClient: ListsClient,
   settings: SettingsReader,
   actor: string,
+  scope: 'today' | 'future' = 'future',
 ): Promise<ListItemDto[]> {
-  let enabled = true
-  try {
-    enabled = choresInFeedsEnabled(await settings.get(actor, 'planner'))
-  } catch {
-    // Settings fetch failure is non-fatal — fall back to default (on).
+  return (await fetchChoresFeed(listsClient, settings, actor, scope)).items
+}
+
+// Like fetchChoresFeedItems, but also surfaces the resolved chores-list id so
+// the caller can return it to the UI. My Day includes it in its response —
+// the client needs it to split chore rows out of the agenda (and to render
+// the morning check-in's chores) and previously had to derive it from a
+// separate /recurring + chore-series round trip, delaying the chores render
+// until the slowest request chain finished.
+//
+// `listId` is the chores list's id whenever the list exists — even when the
+// 'future' toggle suppresses the items — and null when no chores list exists
+// yet (never provisions).
+export async function fetchChoresFeed(
+  listsClient: ListsClient,
+  settings: SettingsReader,
+  actor: string,
+  scope: 'today' | 'future' = 'future',
+): Promise<{ listId: string | null; items: ListItemDto[] }> {
+  let suppressed = false
+  if (scope === 'future') {
+    let enabled = true
+    try {
+      enabled = choresInFeedsEnabled(await settings.get(actor, 'planner'))
+    } catch {
+      // Settings fetch failure is non-fatal — fall back to default (on).
+    }
+    suppressed = !enabled
   }
-  if (!enabled) return []
   const list = await findChoresList(listsClient, actor)
-  if (!list) return []
-  return listsClient.listItems(list.id)
+  if (!list) return { listId: null, items: [] }
+  if (suppressed) return { listId: list.id, items: [] }
+  return { listId: list.id, items: await listsClient.listItems(list.id, actor) }
 }

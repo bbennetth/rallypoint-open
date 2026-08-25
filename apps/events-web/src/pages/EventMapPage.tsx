@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { ApiError, getEvent, type EventDto } from '../lib/api.js'
 import { MapEditor } from '../ui/MapEditor.js'
 import { shouldRefetch, subscribeEventStream } from '../lib/realtime.js'
@@ -15,36 +16,35 @@ export function EventMapPage({ userId }: { userId: string }) {
   // Bumped on a realtime map invalidation so the MapEditor re-fetches.
   const [mapReload, setMapReload] = useState(0)
 
+  const run = useAsyncTask()
   const load = useCallback(
-    async (opts: { silent?: boolean; shouldApply?: () => boolean } = {}) => {
+    async (opts: { silent?: boolean } = {}) => {
       if (!slug) return
       if (!opts.silent) setState({ status: 'loading' })
-      try {
-        const event = await getEvent(slug)
-        if (opts.shouldApply && !opts.shouldApply()) return
-        setState({ status: 'ready', event })
-      } catch (err) {
-        if (opts.shouldApply && !opts.shouldApply()) return
-        if (err instanceof ApiError && err.status === 404) {
-          setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
-        } else {
-          setState({
-            status: 'error',
-            code: err instanceof ApiError ? err.code : 'unexpected_error',
-            message: err instanceof Error ? err.message : 'Unknown error.',
-          })
+      await run(async (ctx) => {
+        try {
+          const event = await getEvent(slug)
+          if (ctx.stale()) return
+          setState({ status: 'ready', event })
+        } catch (err) {
+          if (ctx.stale()) return
+          if (err instanceof ApiError && err.status === 404) {
+            setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
+          } else {
+            setState({
+              status: 'error',
+              code: err instanceof ApiError ? err.code : 'unexpected_error',
+              message: err instanceof Error ? err.message : 'Unknown error.',
+            })
+          }
         }
-      }
+      })
     },
-    [slug],
+    [slug, run],
   )
 
   useEffect(() => {
-    let cancelled = false
-    void load({ shouldApply: () => !cancelled })
-    return () => {
-      cancelled = true
-    }
+    void load()
   }, [load])
 
   // Live updates: once the event id is known, subscribe to its stream. The
@@ -82,8 +82,8 @@ export function EventMapPage({ userId }: { userId: string }) {
         <div
           className="max-w-md w-full p-4"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            borderRadius: 'var(--radius-xl)',
           }}
         >
           <h1 className="text-lg font-semibold text-white/80">

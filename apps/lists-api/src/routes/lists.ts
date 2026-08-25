@@ -142,13 +142,11 @@ export const listsRoutes = new Hono<HonoApp>()
   .get('/api/v1/ui/lists/shared-with-me', async (c) => {
     const userId = c.var.session!.userId
     const shares = await c.var.repos.listShares.listForUser(userId)
-    const items: ReturnType<typeof serializeList>[] = []
-    for (const share of shares) {
-      const list = await c.var.repos.lists.findById(share.listId)
-      if (!list || list.deletedAt) continue
-      if (list.createdBy === userId) continue
-      items.push(serializeList(list))
-    }
+    const lists = await c.var.repos.lists.findByIds(shares.map((s) => s.listId))
+    const items = lists
+      .filter((list): list is NonNullable<typeof list> => list !== null && !list.deletedAt)
+      .filter((list) => list.createdBy !== userId)
+      .map(serializeList)
     return c.json({ items })
   })
 

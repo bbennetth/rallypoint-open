@@ -266,6 +266,10 @@ export const expenseRefField = z
   .min(1, 'ref must not be empty.')
   .max(256, 'ref must be at most 256 characters.')
 
+// Upper bound on participants in one expense — well past ledger-membership
+// reality, and keeps a single splits payload from ballooning.
+export const MAX_EXPENSE_SPLITS = 50
+
 const equalExpensePayload = z.object({
   splitMode: z.literal('equal'),
   paidByUserId: splitUserIdField,
@@ -274,7 +278,7 @@ const equalExpensePayload = z.object({
   spentAt: spentAtField,
   categoryId: expenseCategoryIdField.nullable().optional(),
   ref: expenseRefField.nullable().optional(),
-  splits: z.array(equalSplitRow).min(1, 'At least one participant is required.'),
+  splits: z.array(equalSplitRow).min(1, 'At least one participant is required.').max(MAX_EXPENSE_SPLITS, 'Too many splits.'),
 })
 
 const byShareExpensePayload = z.object({
@@ -285,7 +289,7 @@ const byShareExpensePayload = z.object({
   spentAt: spentAtField,
   categoryId: expenseCategoryIdField.nullable().optional(),
   ref: expenseRefField.nullable().optional(),
-  splits: z.array(byShareSplitRow).min(1, 'At least one participant is required.'),
+  splits: z.array(byShareSplitRow).min(1, 'At least one participant is required.').max(MAX_EXPENSE_SPLITS, 'Too many splits.'),
 })
 
 const byAmountExpensePayload = z.object({
@@ -296,7 +300,7 @@ const byAmountExpensePayload = z.object({
   spentAt: spentAtField,
   categoryId: expenseCategoryIdField.nullable().optional(),
   ref: expenseRefField.nullable().optional(),
-  splits: z.array(byAmountSplitRow).min(1, 'At least one participant is required.'),
+  splits: z.array(byAmountSplitRow).min(1, 'At least one participant is required.').max(MAX_EXPENSE_SPLITS, 'Too many splits.'),
 })
 
 // POST /api/v1/ui/ledgers/:id/expenses — create an expense. The split
@@ -417,6 +421,11 @@ export const CreateSettlementSchema = z
     amountCents: settlementAmountCentsField,
     note: settlementNoteField,
     settledAt: spentAtField,
+    // Optional client-supplied idempotency key (audit E2 #7). A retried
+    // POST with the same (ledgerId, ref) returns the existing settlement
+    // instead of inserting a duplicate. 1–64 chars; clients may use a
+    // ULID, UUID, or short slug.
+    ref: z.string().trim().min(1).max(64).optional(),
   })
   .refine(
     (v) => v.fromUserId !== v.toUserId,

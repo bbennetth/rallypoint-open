@@ -233,6 +233,39 @@ describe('composeMyDay', () => {
     expect(out).toMatchObject({ date: '2026-06-03', timezone: 'America/Chicago' })
   })
 
+  it('defaults training to [] when omitted', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [],
+      userEvents: [],
+    })
+    expect(out.training).toEqual([])
+  })
+
+  it('passes training through unchanged when provided', () => {
+    const workout = {
+      id: 'wk_01',
+      performedAt: '2026-06-03T07:00:00.000Z',
+      modality: 'strength' as const,
+      title: 'Push Day',
+      durationS: 3600,
+      setCount: 12,
+    }
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [],
+      events: [],
+      userEvents: [],
+      training: [workout],
+    })
+    expect(out.training).toEqual([workout])
+  })
+
   // --- group (festival) event days -------------------------------------
 
   it('keeps only the group event days that fall inside the window', () => {

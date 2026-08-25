@@ -30,6 +30,3 @@ export const emailVerifications = sqliteTable(
     expiresIdx: index('email_verifications_expires_idx').on(t.expiresAt),
   }),
 )
-
-export type DbEmailVerification = typeof emailVerifications.$inferSelect
-export type DbEmailVerificationInsert = typeof emailVerifications.$inferInsert

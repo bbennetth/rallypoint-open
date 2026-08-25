@@ -54,6 +54,54 @@ describe('admin namespace gating', () => {
   })
 })
 
+describe('GET /api/v1/admin/audit pagination', () => {
+  const TOKEN = 'admin-secret-1234567890123456789012'
+  const headers = { authorization: `Bearer ${TOKEN}` }
+
+  it('returns {items, next_cursor} and walks the opaque cursor to the end', async () => {
+    const { app, repos } = build({ ADMIN_TOKEN: TOKEN })
+    for (let i = 0; i < 5; i++) {
+      await repos.audit.write({
+        tenantId: 'rallypoint',
+        eventType: `evt.${i}`,
+        userId: null,
+        ipHash: '',
+        uaHash: '',
+      })
+    }
+
+    const seen: string[] = []
+    let cursor: string | null = null
+    let guard = 0
+    do {
+      const url: string = `/api/v1/admin/audit?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const res = await app.request(url, { headers })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { items: Array<{ id: string }>; next_cursor: string | null }
+      expect(Array.isArray(body.items)).toBe(true)
+      for (const e of body.items) seen.push(e.id)
+      cursor = body.next_cursor
+      if (cursor) expect(cursor).not.toContain('|')
+    } while (cursor && ++guard < 10)
+
+    expect(cursor).toBeNull()
+    expect(new Set(seen).size).toBe(5)
+    expect(guard).toBeGreaterThan(1)
+  })
+
+  it('rejects an undecodable cursor with 400', async () => {
+    const { app } = build({ ADMIN_TOKEN: TOKEN })
+    const res = await app.request('/api/v1/admin/audit?cursor=not-a-cursor', { headers })
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects an out-of-range limit with 400', async () => {
+    const { app } = build({ ADMIN_TOKEN: TOKEN })
+    expect((await app.request('/api/v1/admin/audit?limit=0', { headers })).status).toBe(400)
+    expect((await app.request('/api/v1/admin/audit?limit=9999', { headers })).status).toBe(400)
+  })
+})
+
 describe('GET /api/v1/admin/version (P4.1 — commit moved out of /health)', () => {
   const TOKEN = 'admin-secret-1234567890123456789012'
   it('returns version + commit + env behind admin auth', async () => {

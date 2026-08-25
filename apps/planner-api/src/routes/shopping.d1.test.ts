@@ -3,6 +3,7 @@ import { env as testEnv } from 'cloudflare:test'
 import type { Hono } from 'hono'
 import {
   ListsClientError,
+  type FieldDefDto,
   type GroupDto,
   type ListDto,
   type ListItemDto,
@@ -38,6 +39,7 @@ function makeFakeLists(): { client: ListsClient } {
   const groups: GroupDto[] = []
   const lists: ListDto[] = []
   const items: ListItemDto[] = []
+  const fieldDefs: FieldDefDto[] = []
 
   function ownsGroup(actor: string, scopeId: string): boolean {
     return groups.some((g) => g.id === scopeId && g.createdBy === actor)
@@ -64,6 +66,15 @@ function makeFakeLists(): { client: ListsClient } {
     listLists: async (scope) =>
       lists.filter((l) => l.scopeType === scope.scopeType && l.scopeId === scope.scopeId),
     listItems: async (listId) => items.filter((i) => i.listId === listId),
+    listItemsPage: async (listId, _actor, page) => {
+      const all = items
+        .filter((i) => i.listId === listId)
+        .sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
+      const start = page?.cursor ? all.findIndex((i) => i.id === page.cursor) + 1 : 0
+      const slice = all.slice(start, start + (page?.limit ?? 100))
+      const hasMore = start + (page?.limit ?? 100) < all.length
+      return { items: slice, nextCursor: hasMore && slice.length ? slice[slice.length - 1]!.id : null }
+    },
     createList: async (input, actor) => {
       if (input.scopeType === 'list_group' && !ownsGroup(actor, input.scopeId)) {
         throw new ListsClientError(404, 'not_found', 'List group not found.')
@@ -84,7 +95,7 @@ function makeFakeLists(): { client: ListsClient } {
       lists.push(l)
       return l
     },
-    createListItem: async (listId, input, actor) => {
+    createListItem: vi.fn(async (listId, input, actor) => {
       const list = listOf(listId)
       if (!list || (list.scopeType === 'list_group' && !ownsGroup(actor, list.scopeId))) {
         throw new ListsClientError(404, 'not_found', 'List not found.')
@@ -109,7 +120,7 @@ function makeFakeLists(): { client: ListsClient } {
       }
       items.push(it)
       return it
-    },
+    }),
     updateListItem: async (listId, itemId, patch, _actor) => {
       const it = items.find((x) => x.id === itemId && x.listId === listId)
       if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
@@ -129,9 +140,33 @@ function makeFakeLists(): { client: ListsClient } {
       if (idx === -1) throw new ListsClientError(404, 'not_found', 'List not found.')
       lists.splice(idx, 1)
     },
+    // Field defs are exercised: the shopping BFF provisions a `quantity`
+    // def on list load. Mirrors lists-api's key derivation (slugified
+    // label, deduped per list).
+    listFieldDefs: async (listId) => fieldDefs.filter((d) => d.listId === listId),
+    createFieldDef: async (listId, input, actor) => {
+      const taken = new Set(fieldDefs.filter((d) => d.listId === listId).map((d) => d.key))
+      const base = input.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+      let key = base
+      for (let n = 2; taken.has(key); n++) key = `${base}_${n}`
+      const d: FieldDefDto = {
+        id: `lfd_${fieldDefs.length + 1}`,
+        listId,
+        key,
+        label: input.label,
+        fieldType: input.fieldType,
+        options: {},
+        required: input.required ?? false,
+        defaultValue: null,
+        position: fieldDefs.length,
+        createdBy: actor,
+        createdAt: isoNow(),
+        updatedAt: isoNow(),
+      }
+      fieldDefs.push(d)
+      return d
+    },
     // Stub remaining SDK methods not used by the shopping BFF.
-    listFieldDefs: async () => [],
-    createFieldDef: async () => { throw new Error('not stubbed') },
     updateFieldDef: async () => { throw new Error('not stubbed') },
     deleteFieldDef: async () => {},
     listSeries: async () => [],
@@ -156,6 +191,9 @@ describe('D1 integration — Planner Shopping BFF', () => {
   let repos: Repos
   let env: Env
   let app: Hono<HonoApp>
+  // The fake backing the app built for the current test — held so assertions
+  // can read the SDK-side state (field defs) the BFF provisioned.
+  let fakeLists: ListsClient
 
   const baseServices = (): Services => ({
     idClient: {
@@ -174,7 +212,9 @@ describe('D1 integration — Planner Shopping BFF', () => {
   })
 
   beforeEach(() => {
-    app = buildApp({ env, logger: undefined, repos, services: baseServices() })
+    const services = baseServices()
+    fakeLists = services.listsClient
+    app = buildApp({ env, logger: undefined, repos, services })
   })
 
   async function loginAs(userId: string): Promise<string> {
@@ -204,6 +244,7 @@ describe('D1 integration — Planner Shopping BFF', () => {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: env.PLANNER_UI_ORIGIN,
     }
   }
 
@@ -229,6 +270,83 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const body = (await res.json()) as Record<string, unknown>
     expect(typeof body.id).toBe('string')
     expect(body.listType).toBe('shopping')
+  })
+
+  // --- quantity custom field (#762 PR5) -------------------------------------
+
+  it('GET /shopping/list provisions the quantity field def and returns its id', async () => {
+    const bearer = await loginAs('user_shop_qty_new')
+    const res = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(typeof body.quantityFieldId).toBe('string')
+
+    // The def is a free-form text field on the shopping list itself.
+    const defs = await fakeLists.listFieldDefs(body.id as string, 'user_shop_qty_new')
+    expect(defs).toHaveLength(1)
+    expect(defs[0]!.key).toBe('quantity')
+    expect(defs[0]!.fieldType).toBe('text')
+    expect(defs[0]!.id).toBe(body.quantityFieldId)
+  })
+
+  it('GET /shopping/list returns the same quantityFieldId on repeat calls', async () => {
+    const bearer = await loginAs('user_shop_qty_idem')
+    const first = (await (await req(bearer, 'GET', '/api/v1/ui/shopping/list')).json()) as {
+      id: string
+      quantityFieldId: string
+    }
+    const second = (await (await req(bearer, 'GET', '/api/v1/ui/shopping/list')).json()) as {
+      quantityFieldId: string
+    }
+    expect(second.quantityFieldId).toBe(first.quantityFieldId)
+    // Idempotent: no second def was created.
+    expect(await fakeLists.listFieldDefs(first.id, 'user_shop_qty_idem')).toHaveLength(1)
+  })
+
+  it('item quantity round-trips through the customFields PATCH', async () => {
+    const bearer = await loginAs('user_shop_qty_rt')
+    const list = (await (await req(bearer, 'GET', '/api/v1/ui/shopping/list')).json()) as {
+      id: string
+      quantityFieldId: string
+    }
+    const created = (await (
+      await req(bearer, 'POST', `/api/v1/ui/shopping/${list.id}/items`, { title: 'Ice' })
+    ).json()) as { id: string }
+
+    const patched = (await (
+      await req(bearer, 'PATCH', `/api/v1/ui/shopping/${list.id}/items/${created.id}`, {
+        customFields: { 'rp:category': 'frozen', [list.quantityFieldId]: '4 bags' },
+      })
+    ).json()) as { customFields: Record<string, unknown> }
+    expect(patched.customFields[list.quantityFieldId]).toBe('4 bags')
+    expect(patched.customFields['rp:category']).toBe('frozen')
+
+    // A null clears the quantity without disturbing the category.
+    const cleared = (await (
+      await req(bearer, 'PATCH', `/api/v1/ui/shopping/${list.id}/items/${created.id}`, {
+        customFields: { 'rp:category': 'frozen', [list.quantityFieldId]: null },
+      })
+    ).json()) as { customFields: Record<string, unknown> }
+    expect(cleared.customFields[list.quantityFieldId]).toBeNull()
+    expect(cleared.customFields['rp:category']).toBe('frozen')
+  })
+
+  it('GET /shopping/list still returns the list when the field def cannot be resolved', async () => {
+    const bearer = await loginAs('user_shop_qty_down')
+    const services = baseServices()
+    services.listsClient = {
+      ...services.listsClient,
+      listFieldDefs: async () => {
+        throw new ListsClientError(500, 'upstream', 'Lists unavailable.')
+      },
+    }
+    app = buildApp({ env, logger: undefined, repos, services })
+
+    const res = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.listType).toBe('shopping')
+    expect(body.quantityFieldId).toBeNull()
   })
 
   it('GET /shopping/list is idempotent — repeated calls return the same list id', async () => {
@@ -274,6 +392,53 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const items = (await listItemsRes.json()) as Array<Record<string, unknown>>
     expect(items.length).toBe(1)
     expect(items[0].title).toBe('Milk')
+  })
+
+  it('opt-in pagination: no params → array; ?limit → {items, next_cursor}', async () => {
+    const bearer = await loginAs('user_shop_pager')
+    const listId = ((await (await req(bearer, 'GET', '/api/v1/ui/shopping/list')).json()) as {
+      id: string
+    }).id
+    for (const t of ['Milk', 'Eggs', 'Bread']) {
+      await req(bearer, 'POST', `/api/v1/ui/shopping/${listId}/items`, { title: t })
+    }
+
+    // No params → legacy array.
+    const arr = (await (
+      await req(bearer, 'GET', `/api/v1/ui/shopping/${listId}/items`)
+    ).json()) as unknown[]
+    expect(Array.isArray(arr)).toBe(true)
+    expect(arr).toHaveLength(3)
+
+    // ?limit → paged shape; walk to next_cursor: null.
+    const seen: string[] = []
+    let cursor: string | null = null
+    let guard = 0
+    do {
+      const path = `/api/v1/ui/shopping/${listId}/items?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const body = (await (await req(bearer, 'GET', path)).json()) as {
+        items: Array<{ id: string }>
+        next_cursor: string | null
+      }
+      for (const it of body.items) seen.push(it.id)
+      cursor = body.next_cursor
+    } while (cursor && ++guard < 10)
+    expect(cursor).toBeNull()
+    expect(new Set(seen).size).toBe(3)
+  })
+
+  it('forwards a client-supplied ref (offline outbox idempotency key) to the Lists SDK', async () => {
+    const bearer = await loginAs('user_shop_ref')
+    const listRes = await req(bearer, 'GET', '/api/v1/ui/shopping/list')
+    const listId = ((await listRes.json()) as Record<string, unknown>).id as string
+
+    const itemRes = await req(bearer, 'POST', `/api/v1/ui/shopping/${listId}/items`, {
+      title: 'Milk',
+      ref: 'tmp_shop_abc123',
+    })
+    expect(itemRes.status).toBe(201)
+    const createListItem = fakeLists.createListItem as ReturnType<typeof vi.fn>
+    expect(createListItem.mock.calls[0]?.[1]).toMatchObject({ ref: 'tmp_shop_abc123' })
   })
 
   it('can check off a shopping item', async () => {
@@ -483,6 +648,7 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const h = {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${rawBearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       'content-type': 'application/json',
     }
 
@@ -553,6 +719,7 @@ describe('D1 integration — Planner Shopping BFF', () => {
     const h = {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${rawBearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       'content-type': 'application/json',
     }
 

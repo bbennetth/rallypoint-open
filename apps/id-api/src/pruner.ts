@@ -35,6 +35,8 @@ export interface PrunerTickResult {
   emailChanges: number
   emailVerifications: number
   rateLimits: number
+  webauthnChallenges: number
+  oauthStates: number
   /** Aggregate of the above; convenience for the log line. */
   total: number
   /** Time the tick spent doing actual work. */
@@ -66,6 +68,8 @@ export async function runPrunerTick(
     repos.emailChanges.pruneExpired(cutoff),
     repos.emailVerifications.pruneExpired(cutoff),
     repos.rateLimit.pruneOldBuckets(oldRateLimitCutoff),
+    repos.webauthnChallenges.pruneExpired(cutoff),
+    repos.oauthStates.pruneExpired(cutoff),
   ])
   const [
     sessions,
@@ -75,6 +79,8 @@ export async function runPrunerTick(
     emailChanges,
     emailVerifications,
     rateLimits,
+    webauthnChallenges,
+    oauthStates,
   ] = results.map((r) => (r.status === 'fulfilled' ? r.value : 0))
   const tick: PrunerTickResult = {
     sessions: sessions ?? 0,
@@ -84,6 +90,8 @@ export async function runPrunerTick(
     emailChanges: emailChanges ?? 0,
     emailVerifications: emailVerifications ?? 0,
     rateLimits: rateLimits ?? 0,
+    webauthnChallenges: webauthnChallenges ?? 0,
+    oauthStates: oauthStates ?? 0,
     total:
       (sessions ?? 0) +
       (signinChallenges ?? 0) +
@@ -91,7 +99,9 @@ export async function runPrunerTick(
       (ssoCodes ?? 0) +
       (emailChanges ?? 0) +
       (emailVerifications ?? 0) +
-      (rateLimits ?? 0),
+      (rateLimits ?? 0) +
+      (webauthnChallenges ?? 0) +
+      (oauthStates ?? 0),
     durationMs: Math.round(performance.now() - start),
   }
   const failures = results.filter((r) => r.status === 'rejected')

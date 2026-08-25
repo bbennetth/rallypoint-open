@@ -1,9 +1,12 @@
-import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { UserInfo } from '@rallypoint/shared'
 import { AccountShell } from '../ui/AccountShell.js'
 import { Avatar, Banner, Button, Field } from '@rallypoint/ui'
 import { RequireAuth } from '../ui/RequireAuth.js'
 import { api } from '../api/client.js'
+import { useAsyncTask } from '@rallypoint/web-kit'
+import { isPasskeySupported, registerNewPasskey } from '../lib/webauthn.js'
+import { providerMeta } from '../ui/provider-icons.js'
 
 // Three independent sub-forms, each with its own reauth field and
 // state. Sharing a single form would make field validation harder
@@ -357,19 +360,388 @@ function ChangeProfileSection({ user, onUserChanged }: SectionProps) {
   )
 }
 
+// AI & privacy — the cross-app AI-data opt-out. Stored as
+// `aiTrainingOptOut` in the shared settings namespace, so every
+// Rallypoint app honors it. Opting out keeps AI features working but
+// stops prompt/response content (and photos) from being stored in the
+// AI trace corpus — only ops telemetry (model, latency, errors) remains.
+function AiPrivacySection() {
+  const [optOut, setOptOut] = useState<boolean | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void api
+      .get<{ settings: Record<string, unknown> }>('/api/v1/ui/settings/shared')
+      .then((res) => {
+        if (cancelled) return
+        if (res.ok) setOptOut(res.data.settings['aiTrainingOptOut'] === true)
+        else setError(res.error.message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function toggle(next: boolean) {
+    setError(null)
+    setSaving(true)
+    const prev = optOut
+    setOptOut(next)
+    const res = await api.patch<{ settings: Record<string, unknown> }>(
+      '/api/v1/ui/settings/shared',
+      { aiTrainingOptOut: next },
+    )
+    setSaving(false)
+    if (!res.ok) {
+      setOptOut(prev)
+      setError(res.error.message)
+    }
+  }
+
+  return (
+    <section className="mb-10 rounded-lg border border-[color:var(--line)] p-6" style={{ background: 'var(--surface)' }}>
+      <h2 className="mb-1 text-lg font-medium">AI &amp; privacy</h2>
+      <p className="mb-4 text-sm text-[color:var(--ink-dim)]">
+        AI features (like photo scans) normally store what you sent and what the AI answered, to
+        help us improve the models. Opt out to keep using AI features without your prompts, photos,
+        or results being stored — only anonymous technical metrics remain.
+      </p>
+      {error ? (
+        <div className="mb-4">
+          <Banner tone="error">{error}</Banner>
+        </div>
+      ) : null}
+      <label className="flex items-center gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={optOut === true}
+          disabled={optOut === null || saving}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span>Don&apos;t store my AI prompts and responses</span>
+      </label>
+    </section>
+  )
+}
+
+interface Passkey {
+  id: string
+  label: string
+  createdAt: string
+  lastUsedAt: string | null
+  backedUp: boolean | null
+}
+
+function PasskeyRow({ passkey, onChanged }: { passkey: Passkey; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false)
+  const [label, setLabel] = useState(passkey.label)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function save() {
+    if (!label.trim()) return
+    setBusy(true)
+    setError(null)
+    const res = await api.patch<{ ok: true }>(
+      `/api/v1/ui/webauthn/credentials/${encodeURIComponent(passkey.id)}`,
+      { label: label.trim() },
+    )
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error.message)
+      return
+    }
+    setEditing(false)
+    onChanged()
+  }
+
+  async function remove() {
+    setBusy(true)
+    setError(null)
+    const res = await api.delete<{ ok: true }>(
+      `/api/v1/ui/webauthn/credentials/${encodeURIComponent(passkey.id)}`,
+    )
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error.message)
+      return
+    }
+    onChanged()
+  }
+
+  return (
+    <li className="flex flex-wrap items-center gap-3 rounded-md border border-[color:var(--line)] p-3">
+      <div className="min-w-0 flex-1">
+        {editing ? (
+          <input
+            className="cyber-input w-full"
+            value={label}
+            autoFocus
+            onChange={(e) => setLabel(e.target.value)}
+            maxLength={64}
+          />
+        ) : (
+          <div className="truncate font-medium">{passkey.label}</div>
+        )}
+        <div className="text-xs text-[color:var(--ink-dim)]">
+          Added {new Date(passkey.createdAt).toLocaleDateString()}
+          {passkey.lastUsedAt
+            ? ` · last used ${new Date(passkey.lastUsedAt).toLocaleDateString()}`
+            : ' · never used'}
+        </div>
+        {error ? <div className="mt-1 text-xs text-[color:var(--hot)]">{error}</div> : null}
+      </div>
+      {editing ? (
+        <Button type="button" loading={busy} onClick={() => void save()} style={{ width: 'auto' }}>
+          Save
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => setEditing(true)}
+          style={{ width: 'auto' }}
+        >
+          Rename
+        </Button>
+      )}
+      <Button
+        type="button"
+        variant="hot"
+        disabled={busy}
+        onClick={() => void remove()}
+        style={{ width: 'auto' }}
+      >
+        Remove
+      </Button>
+    </li>
+  )
+}
+
+// Passkeys — register a WebAuthn credential and use it to sign in without
+// a password. Registration requires this active session.
+function PasskeysSection() {
+  const [passkeys, setPasskeys] = useState<Passkey[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const supported = isPasskeySupported()
+  const run = useAsyncTask()
+
+  const refetch = useCallback(
+    () =>
+      run(async (ctx) => {
+        const res = await api.get<{ credentials: Passkey[] }>('/api/v1/ui/webauthn/credentials')
+        if (ctx.stale()) return
+        if (res.ok) setPasskeys(res.data.credentials)
+        else setError(res.error.message)
+      }),
+    [run],
+  )
+  useEffect(() => {
+    void refetch()
+  }, [refetch])
+
+  async function onAdd() {
+    setBusy(true)
+    setError(null)
+    setInfo(null)
+    const res = await registerNewPasskey()
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error?.message ?? 'Could not add a passkey.')
+      return
+    }
+    setInfo('Passkey added.')
+    void refetch()
+  }
+
+  return (
+    <section
+      className="mb-10 rounded-lg border border-[color:var(--line)] p-6"
+      style={{ background: 'var(--surface)' }}
+    >
+      <h2 className="mb-1 text-lg font-medium">Passkeys</h2>
+      <p className="mb-4 text-sm text-[color:var(--ink-dim)]">
+        Sign in with your fingerprint, face, or a security key — no password or emailed code.
+      </p>
+      {info ? (
+        <div className="mb-4">
+          <Banner tone="success">{info}</Banner>
+        </div>
+      ) : null}
+      {error ? (
+        <div className="mb-4">
+          <Banner tone="error">{error}</Banner>
+        </div>
+      ) : null}
+      {!supported ? (
+        <Banner tone="info">This browser or device doesn&apos;t support passkeys.</Banner>
+      ) : (
+        <>
+          {passkeys && passkeys.length > 0 ? (
+            <ul className="mb-4 space-y-2">
+              {passkeys.map((p) => (
+                <PasskeyRow key={p.id} passkey={p} onChanged={() => void refetch()} />
+              ))}
+            </ul>
+          ) : (
+            <p className="mb-4 text-sm text-[color:var(--ink-dim)]">No passkeys yet.</p>
+          )}
+          <Button type="button" loading={busy} onClick={() => void onAdd()} style={{ width: 'auto' }}>
+            {busy ? 'Waiting…' : 'Add a passkey'}
+          </Button>
+        </>
+      )}
+    </section>
+  )
+}
+
+interface LinkedIdentity {
+  id: string
+  provider: string
+  email: string | null
+  createdAt: string
+  lastUsedAt: string | null
+}
+
+// Linked accounts — connect Google/Apple/GitHub for one-tap sign-in, or
+// unlink one (blocked if it's the only remaining sign-in method).
+function LinkedAccountsSection() {
+  const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
+  const [providers, setProviders] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const run = useAsyncTask()
+
+  const refetch = useCallback(
+    () =>
+      run(async (ctx) => {
+        const [ids, provs] = await Promise.all([
+          api.get<{ identities: LinkedIdentity[] }>('/api/v1/ui/oauth/identities'),
+          api.get<{ providers: string[] }>('/api/v1/ui/oauth/providers'),
+        ])
+        if (ctx.stale()) return
+        if (ids.ok) setIdentities(ids.data.identities)
+        else setError(ids.error.message)
+        if (provs.ok) setProviders(provs.data.providers)
+      }),
+    [run],
+  )
+  useEffect(() => {
+    void refetch()
+  }, [refetch])
+
+  if (providers.length === 0) return null
+
+  const linkedProviders = new Set((identities ?? []).map((i) => i.provider))
+  const connectable = providers.filter((p) => !linkedProviders.has(p))
+
+  async function unlink(id: string) {
+    setBusyId(id)
+    setError(null)
+    const res = await api.delete<{ ok: true }>(`/api/v1/ui/oauth/identities/${encodeURIComponent(id)}`)
+    setBusyId(null)
+    if (!res.ok) {
+      setError(res.error.message)
+      return
+    }
+    void refetch()
+  }
+
+  return (
+    <section
+      className="mb-10 rounded-lg border border-[color:var(--line)] p-6"
+      style={{ background: 'var(--surface)' }}
+    >
+      <h2 className="mb-1 text-lg font-medium">Linked accounts</h2>
+      <p className="mb-4 text-sm text-[color:var(--ink-dim)]">
+        Connect a social account to sign in with one tap.
+      </p>
+      {error ? (
+        <div className="mb-4">
+          <Banner tone="error">{error}</Banner>
+        </div>
+      ) : null}
+      {identities && identities.length > 0 ? (
+        <ul className="mb-4 space-y-2">
+          {identities.map((i) => {
+            const meta = providerMeta(i.provider)
+            return (
+              <li
+                key={i.id}
+                className="flex flex-wrap items-center gap-3 rounded-md border border-[color:var(--line)] p-3"
+              >
+                <span className="inline-flex items-center gap-2 font-medium">
+                  {meta ? <meta.Icon /> : null}
+                  {meta?.label ?? i.provider}
+                </span>
+                {i.email ? (
+                  <span className="truncate text-xs text-[color:var(--ink-dim)]">{i.email}</span>
+                ) : null}
+                <span className="flex-1" />
+                <Button
+                  type="button"
+                  variant="hot"
+                  loading={busyId === i.id}
+                  onClick={() => void unlink(i.id)}
+                  style={{ width: 'auto' }}
+                >
+                  Unlink
+                </Button>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <p className="mb-4 text-sm text-[color:var(--ink-dim)]">No linked accounts yet.</p>
+      )}
+      {connectable.length > 0 ? (
+        <div className="space-y-2">
+          {connectable.map((slug) => {
+            const meta = providerMeta(slug)
+            if (!meta) return null
+            const { label, Icon } = meta
+            return (
+              <Button
+                key={slug}
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  window.location.href = `/api/v1/oauth/${slug}/start?link=1&returnTo=${encodeURIComponent(
+                    '/account/settings',
+                  )}`
+                }}
+                style={{ width: 'auto' }}
+              >
+                <span className="inline-flex items-center justify-center gap-2">
+                  <Icon /> Connect {label}
+                </span>
+              </Button>
+            )
+          })}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 export function AccountSettingsPage() {
   return (
     <RequireAuth>
-      {(user) => (
+      {(user, refetch) => (
         <AccountShell user={user}>
           <h1 className="mb-6 text-2xl font-semibold">Account settings</h1>
-          <AvatarSection user={user} onUserChanged={() => window.location.reload()} />
-          <ChangeProfileSection
-            user={user}
-            onUserChanged={() => window.location.reload()}
-          />
+          <AvatarSection user={user} onUserChanged={refetch} />
+          <ChangeProfileSection user={user} onUserChanged={refetch} />
+          <PasskeysSection />
+          <LinkedAccountsSection />
           <ChangePasswordSection user={user} onUserChanged={() => undefined} />
           <ChangeEmailSection user={user} onUserChanged={() => undefined} />
+          <AiPrivacySection />
         </AccountShell>
       )}
     </RequireAuth>

@@ -1,0 +1,33 @@
+{
+  "name": "@rallypoint/api-kit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rallypoint/crypto": "*",
+    "@rallypoint/logger": "*",
+    "@rallypoint/rate-limit": "*",
+    "@rallypoint/shared": "*",
+    "drizzle-orm": "^0.45.0",
+    "fflate": "^0.8.2",
+    "hono": "^4.13.3",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

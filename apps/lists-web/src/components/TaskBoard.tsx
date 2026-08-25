@@ -357,7 +357,11 @@ function TaskCard({
 
         <select
           value={item.priority ?? 'medium'}
-          onChange={(e) => onSetPriority(item.id, e.target.value as TaskPriority)}
+          onChange={(e) => {
+            if (e.target.value !== (item.priority ?? 'medium')) {
+              onSetPriority(item.id, e.target.value as TaskPriority)
+            }
+          }}
           aria-label="Priority"
           className="rounded-full border bg-transparent px-2 py-0.5 text-xs"
           style={PRIORITY_STYLE[item.priority ?? 'medium']}

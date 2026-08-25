@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import type { Hono } from 'hono'
-import { verifyChannelToken, type RealtimeHubNamespace } from '@rallypoint/realtime'
+import {
+  mintChannelToken,
+  verifyChannelToken,
+  type RealtimeHubNamespace,
+} from '@rallypoint/realtime'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { buildApp } from '../build-app.js'
 import { buildMemoryRepos } from '../repos/memory.js'
@@ -107,6 +111,7 @@ describe('realtime routes (memory)', () => {
       cookie: `${env.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${env.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: env.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -266,5 +271,77 @@ describe('realtime routes (memory)', () => {
       headers: { Upgrade: 'websocket' },
     })
     expect(res.status).toBe(503)
+  })
+
+  // ── secureHeaders exemption / immutable DO responses ─────────────────
+  // Real DO-stub responses have immutable headers in workerd; the global
+  // secureHeaders middleware mutating them after next() 500'd every WS
+  // handshake in prod ("Can't modify immutable headers"). The upgrade
+  // route is exempt from secureHeaders, and non-WS DO responses are
+  // re-wrapped mutable.
+
+  function mintToken(channel: string): string {
+    return mintChannelToken({
+      channel,
+      key: env.REALTIME_TOKEN_HMAC_KEY,
+      now: Date.now(),
+      ttlMs: 60_000,
+    })
+  }
+
+  // A Response whose headers throw on mutation, like one produced by a
+  // real fetch()/DO-stub call in workerd (the node pool's undici
+  // responses are mutable, so simulate the guard).
+  function immutableFakeHub(): RealtimeHubNamespace {
+    const deny = (): never => {
+      throw new TypeError("Can't modify immutable headers.")
+    }
+    return {
+      idFromName: (name: string) => ({ name }),
+      get: () => ({
+        async fetch(): Promise<Response> {
+          const h = new Headers({ 'x-forwarded-channel': 'immutable' })
+          h.set = deny
+          h.append = deny
+          h.delete = deny
+          const res = new Response(null, { status: 200 })
+          Object.defineProperty(res, 'headers', { value: h })
+          return res
+        },
+      }),
+    }
+  }
+
+  it('skips secureHeaders on the WS-upgrade route (other routes still carry them)', async () => {
+    const token = mintToken('events:event:evt_secure')
+    const res = await app.request(
+      `http://localhost/api/v1/ui/realtime?token=${encodeURIComponent(token)}`,
+      { headers: { Upgrade: 'websocket' } },
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-content-type-options')).toBeNull()
+
+    // Control: any non-exempt path (even a 404) gets the secure headers.
+    const control = await app.request('http://localhost/api/v1/ui/realtime-not-exempt')
+    expect(control.headers.get('x-content-type-options')).toBe('nosniff')
+  })
+
+  it('forwards an immutable-headers DO response without a 500 (prod repro)', async () => {
+    const immApp = buildApp({
+      env,
+      logger: undefined,
+      repos,
+      services,
+      hub: immutableFakeHub(),
+    })
+    const token = mintToken('events:event:evt_imm')
+    const res = await immApp.request(
+      `http://localhost/api/v1/ui/realtime?token=${encodeURIComponent(token)}`,
+      { headers: { Upgrade: 'websocket' } },
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-forwarded-channel')).toBe('immutable')
+    // The route re-wraps non-WS DO responses so headers are mutable again.
+    expect(() => res.headers.set('x-probe', '1')).not.toThrow()
   })
 })

@@ -1,49 +1,21 @@
-import type { Context } from 'hono'
-import { ulid } from 'ulid'
+import type { Context, ErrorHandler } from 'hono'
+import { createErrorHandler, createCaptureServerException } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
-import { isApiError, type ApiError } from '../errors.js'
 
-// Top-level error handler. Converts thrown errors into the
-// {error: {code, message, details?}} envelope from
-// docs/design/error-shape.md (shared verbatim across services). 5xx
-// paths emit a ULID `error_id` and log the underlying exception
-// without exposing the stack to the client.
+// Top-level error handler + PostHog exception capture. Shared implementation
+// lives in @rallypoint/api-kit (createErrorHandler); this app supplies only
+// its service tag.
 
-export async function errorHandler(err: Error, c: Context<HonoApp>): Promise<Response> {
-  if (isApiError(err)) {
-    const apiErr = err as ApiError
-    c.var.logger?.info(
-      { requestId: c.var.requestId, code: apiErr.code, status: apiErr.status },
-      'request rejected',
-    )
-    return c.json(
-      {
-        error: {
-          code: apiErr.code,
-          message: apiErr.message,
-          details: apiErr.details ?? undefined,
-        },
-      },
-      apiErr.status,
-    )
-  }
-  const errorId = ulid()
-  c.var.logger?.error(
-    {
-      requestId: c.var.requestId,
-      errorId,
-      err: { message: err.message, stack: err.stack, name: err.name },
-    },
-    'unhandled error',
-  )
-  return c.json(
-    {
-      error: {
-        code: 'internal_error',
-        message: 'An unexpected error occurred.',
-        details: { error_id: errorId },
-      },
-    },
-    500,
-  )
+const SERVICE = 'rallypoint-lists'
+
+export const errorHandler = createErrorHandler({ service: SERVICE }) as ErrorHandler<HonoApp>
+
+const capture = createCaptureServerException({ service: SERVICE })
+
+export function captureServerException(
+  c: Context<HonoApp>,
+  err: unknown,
+  properties: Record<string, unknown>,
+): void {
+  capture(c, err, properties)
 }

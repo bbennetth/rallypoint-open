@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["**/*.test.ts", "**/*.spec.ts", "dist"],
+  "references": [
+    { "path": "../../apps/id-api" },
+    { "path": "../../packages/ai" },
+    { "path": "../../packages/ai-db" },
+    { "path": "../../packages/logger" }
+  ]
+}

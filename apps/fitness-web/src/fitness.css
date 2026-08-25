@@ -1,0 +1,1269 @@
+/* Rallypoint Fitness — content styles. Soft Ink: borderless surface-step
+   separation, rounded corners on the shared radius scale, low soft shadows
+   (`--shadow-card` for rows, `--shadow-panel` for cards/panels), mono-caps
+   labels, one accent. Imported AFTER `@rallypoint/ui/theme.css` +
+   `shell.css` from index.css. All color resolves to Ink tokens (`--bg`,
+   `--surface`, `--ink`, `--acid`, …) so the page re-tints with
+   `data-color` and inverts with `data-mode`. Softened from the brutalist
+   Ink prototype per the Soft Ink handoff (#762 PR6, 2026-07).
+
+   Aligned to planner's idioms (2026-07): zone seams inside a bar or card
+   use `--hairline-soft`, repeating rows separate by gap (or become their
+   own `--surface` card when they sit bare on the page), and "active"
+   states are a `--border-accent` left rail or an `--accent-soft` fill —
+   never an inset accent ring. `--line` survives only in the dashed
+   empty-state invitations and the sheet grab handle. */
+
+/* ── Page scaffold ─────────────────────────────────────────── */
+
+/* Every fitness page root is a `.page-pad` vertical stack. Desktop keeps
+   the prototype's 20px rhythm. */
+.page-pad { display: grid; gap: 20px; }
+/* A grid item's automatic minimum size is its CONTENT width, so one long
+   unbreakable string (a user-named plan, a long exercise name) grows its
+   card past the column — and the shell's `.plapp-main` has
+   `overflow-x: hidden`, so the excess is silently CLIPPED rather than
+   scrollable: content just disappears off the right edge. Making every
+   page-stack item shrinkable is what lets the `text-overflow: ellipsis`
+   rules further down actually fire. */
+.page-pad > * { min-width: 0; }
+/* `.nm` is this file's universal "name" element and it is always the
+   thing that should give in a crowded row. Dropping the automatic
+   minimum here, once, closes the whole class of bug at the source
+   instead of chasing it per row (`.wod-move`, `.plan-search-row`, … each
+   went missing it). `min-width: 0` only removes a floor — it can never
+   widen a box or introduce overflow. */
+.nm { min-width: 0; }
+
+/* Mobile spacing fix lives at the BOTTOM of this file (it must follow the
+   base rules it overrides in source order — same specificity). */
+
+.fit-head { margin-bottom: 16px; }
+/* flex-wrap + min-width: 0 — the shell's `.plapp-main` clips horizontal
+   overflow (overflow-x: hidden), so a no-wrap row silently loses its
+   right edge on narrow phones instead of wrapping (the Food page's
+   day-totals block was clipped at ~390px). */
+.fit-head .top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 12px; }
+.fit-head .top > * { min-width: 0; }
+.fit-head .fit-day-totals { text-align: right; }
+.fit-head .tot-kcal { font-family: var(--font-mono); font-size: 14px; color: var(--acid); }
+.fit-head .tot-macros { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; color: var(--ink-mute); text-transform: uppercase; margin-top: 3px; }
+.fit-head h1 { font-family: var(--font-display); font-size: 27px; line-height: 1; margin: 0; color: var(--ink); }
+.fit-head .eyebrow { margin-bottom: 9px; }
+.fit-head .sub { color: var(--ink-dim); font-size: 13px; margin: 7px 0 0; }
+
+/* eyebrow + hairline rule section intro */
+.sec-rule { display: flex; align-items: center; gap: 12px; margin: 22px 0 12px; }
+.sec-rule .eyebrow { white-space: nowrap; }
+.sec-rule .line { flex: 1; height: 1px; background: var(--hairline-soft); }
+.sec-rule .ct { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); letter-spacing: 0.08em; }
+
+/* ── Stat tiles ────────────────────────────────────────────── */
+.fit-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+/* 2×2 variant for the Stats › Training tile grid (B·F3 frame). Only that
+   view opts in — Body/Food and the live pages keep 3-across. */
+.fit-stats.grid2 { grid-template-columns: 1fr 1fr; }
+.fit-stat { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); padding: 12px 13px; }
+.fit-stat .v { font-family: var(--font-display); font-size: 23px; color: var(--ink); line-height: 1; }
+.fit-stat .v small { font-size: 12px; color: var(--ink-mute); font-family: var(--font-body); font-weight: 600; }
+/* Two DOM orders coexist: the legacy value-then-label tiles (Body/Food/
+   live) and the frame's label/value/unit order (Today + Training). The
+   sibling selectors put the 7px gap on whichever element comes second. */
+.fit-stat .k { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mute); }
+.fit-stat .v + .k { margin-top: 7px; }
+.fit-stat .k + .v { margin-top: 7px; }
+.fit-stat .u { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-mute); margin-top: 4px; letter-spacing: 0.03em; }
+.fit-stat .d { font-family: var(--font-mono); font-size: 10px; margin-top: 3px; letter-spacing: 0.02em; }
+.fit-stat .d.up { color: var(--acid); }
+.fit-stat .d.down { color: var(--ink-mute); }
+
+/* ── Week strip ────────────────────────────────────────────── */
+.week-strip { display: flex; align-items: center; gap: 6px; }
+.week-day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 9px 0; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.week-day .dl { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em; color: var(--ink-mute); text-transform: uppercase; }
+/* Idle day = a dim filled pip (was an outline ring — the last hard border
+   in the strip); hit days swap the fill to accent. */
+.week-day .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--surface-2); }
+/* Hit days read through the filled dot + accent label alone (the frame's
+   mini tiles keep identical chrome). */
+.week-day.hit .dot { background: var(--acid); }
+.week-day.hit .dl { color: var(--acid); }
+.week-day.today { background: var(--accent-soft-2); }
+
+/* ── WOD hero card ─────────────────────────────────────────── */
+/* Soft panel with a left accent rail — planner's `.pl-ev` idiom (and the
+   same rail `.wkrow.pr` already uses) so the hero reads "today's session"
+   without an accent ring around the whole card. */
+.wod-card { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); border-left: var(--border-accent) solid var(--acid); }
+.wod-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 15px 16px 13px; border-bottom: 1px solid var(--hairline-soft); }
+.wod-name { font-family: var(--font-display); font-size: 26px; line-height: 1; color: var(--ink); }
+.wod-type { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--acid); margin-top: 8px; }
+.wod-scheme { font-family: var(--font-display); font-size: 22px; color: var(--ink); line-height: 1; text-align: right; white-space: nowrap; }
+.wod-scheme small { display: block; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; color: var(--ink-mute); margin-top: 6px; font-weight: 400; }
+.wod-body { padding: 14px 16px; display: grid; gap: 12px; }
+.wod-moves { display: grid; gap: 4px; }
+/* min-width: 0 — the row is a grid item of `.wod-moves`, so it carries
+   its own content-based minimum; without this the name truncates but the
+   ROW still widens past the card. */
+.wod-move { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; min-width: 0; }
+/* nowrap without truncation would just push a long movement name out of
+   the card; the prescription detail on the right is the fixed part. */
+.wod-move .nm { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The prescription is the fixed half — the name gives first — but it is
+   capped and truncatable too, so a movement body carrying several detail
+   fields at once can't take the row over on its own. */
+.wod-move .dt { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); letter-spacing: 0.02em; flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wod-note { font-size: 12.5px; line-height: 1.5; color: var(--ink-dim); font-style: italic; margin: 0; }
+.wod-foot { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--hairline-soft); }
+.wod-best { display: flex; flex-direction: column; gap: 3px; }
+.wod-best .v { font-family: var(--font-display); font-size: 18px; color: var(--ink); line-height: 1; }
+.wod-best .k { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mute); }
+
+/* plain content card (strength piece) */
+/* `min-width: 0` for the same reason as `.page-pad > *`: the card is often
+   a flex/grid item one level below the page stack, and it must never
+   widen to fit its content. */
+.fit-card { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); min-width: 0; }
+/* Selected/confirmed card (Plan tab picker) — accent-tint fill, the
+   planner idiom for "this one is chosen". */
+.fit-card.sel { background: var(--accent-soft-2); }
+.fit-card-hd { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--hairline-soft); }
+/* Same shrink contract as `.live-block-hd` above: without `min-width: 0`
+   on the flex child, `.ti`'s ellipsis never fires and a long title
+   (a user-named plan) pushes the trailing controls out of the card. */
+.fit-card-hd > :first-child { min-width: 0; }
+.fit-card-hd .ti { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* Title rendered as a button (tap a plan to make it active). The reset
+   lives here, not in an inline `all: unset` — inline styles out-rank the
+   stylesheet at any specificity, so an inline reset silently wiped the
+   truncation above and let a long plan name wrap. The name truncates;
+   the ACTIVE chip is a non-shrinking sibling so it never gets clipped. */
+.fit-card-hd button.ti {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.fit-card-hd button.ti:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.fit-card-hd button.ti > .ti-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fit-card-hd button.ti > .pl-chip { flex: none; }
+.fit-card-body { padding: 6px 16px 8px; }
+.blk-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; }
+.blk-row + .blk-row { margin-top: 4px; }
+.blk-row .nm { font-size: 14px; font-weight: 600; color: var(--ink); }
+.blk-row .last { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-top: 3px; letter-spacing: 0.02em; }
+.blk-row .tg { font-family: var(--font-display); font-size: 16px; color: var(--ink); white-space: nowrap; }
+
+/* ── Buttons (extend Ink primitives) ───────────────────────── */
+/* flex-wrap: the composer's create-mode row (Cancel / Save to library /
+   Save & start / Start now) is 4 nowrap buttons — wider than a phone
+   viewport on one line. Wrapping keeps every row shrinkable so the
+   page grid can never be forced past the screen edge. */
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn-row > * { flex: 1; min-width: 0; }
+/* On narrow phones the nowrap button labels (3-up rows like the
+   composer's Cancel / Save to library / Save & start) can't shrink and
+   get clipped by the shell's overflow-x: hidden — let them wrap and
+   trim the padding. Scoped to .btn-row so standalone .fit-startbtn
+   uses keep their geometry. */
+@media (max-width: 430px) {
+  .btn-row .fit-startbtn { white-space: normal; padding: 13px 10px; font-size: 14px; }
+}
+.fit-startbtn { display: flex; align-items: center; justify-content: center; gap: 9px; width: 100%; padding: 15px; border: none; border-radius: var(--radius-md); background: var(--acid); color: var(--accent-ink); font-family: var(--font-body); font-weight: 700; font-size: 15px; cursor: pointer; letter-spacing: 0.01em; white-space: nowrap; }
+.fit-startbtn:active { transform: translateY(1px); }
+/* Ghost = surface-step fill (the shared .pl-btn.ghost recipe), not an
+   outline. */
+.fit-startbtn.ghost { background: var(--surface-2); color: var(--ink); }
+/* Destructive ghost variant (Delete workout, …) — replaces per-site
+   inline hot tints. */
+.fit-startbtn.ghost.hot { color: var(--hot); }
+
+/* ── History rows ──────────────────────────────────────────── */
+.wk-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.wkrow { display: flex; align-items: stretch; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); position: relative; overflow: hidden; }
+/* PR rows keep their 3px accent rail (clipped round by the row). */
+.wkrow.pr { border-left: 3px solid var(--acid); }
+.wkrow > button { flex: 1; display: flex; align-items: flex-start; gap: 12px; padding: 13px 14px; background: none; border: none; cursor: pointer; text-align: left; color: var(--ink); min-width: 0; }
+/* The row clips to its radius (so a child's :active fill can't square a
+   corner), which would also clip a default outside focus ring — draw it
+   inside instead. Same reason on .plan-row's buttons below. */
+.wkrow > button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -4px; }
+.wkrow .ico { width: 34px; height: 34px; flex: none; border-radius: var(--radius-md); background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; color: var(--ink-dim); margin-top: 1px; }
+.wkrow .mid { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.wkrow .ti { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+.wkrow .ti .prtag { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.08em; color: var(--acid); background: var(--accent-soft); border-radius: var(--radius-badge); padding: 2px 6px; }
+.wkrow .sumline { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-dim); letter-spacing: 0.02em; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.wkrow .score { font-family: var(--font-display); font-size: 17px; color: var(--ink); white-space: nowrap; align-self: center; padding-right: 12px; }
+
+/* ── Segmented control ─────────────────────────────────────── */
+/* Shell `.seg` recipe: surface container, transparent segments, accent
+   fill on the active one. */
+.fit-seg { display: inline-flex; background: var(--surface); border-radius: var(--radius-nav); padding: 3px; gap: 3px; width: 100%; }
+.fit-seg button { all: unset; box-sizing: border-box; flex: 1; text-align: center; padding: 8px 8px; border-radius: var(--radius-seg-active); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); cursor: pointer; transition: background 120ms ease, color 120ms ease; }
+.fit-seg button:hover { color: var(--ink); }
+.fit-seg button.on { background: var(--acid); color: var(--accent-ink); font-weight: 700; }
+
+/* ── Library ───────────────────────────────────────────────── */
+/* Bare on the page background (no wrapping card), so each row IS its own
+   soft card — the shared `.pl-row` recipe, matching `.wkrow`/`.plan-row`
+   here. Horizontal padding replaces what the card edge used to imply. */
+.lib-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); margin-bottom: 8px; }
+.lib-row .nm { font-size: 14.5px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 7px; }
+.lib-row .meta { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); margin-top: 3px; letter-spacing: 0.03em; }
+.lib-row .pr { font-family: var(--font-display); font-size: 14px; color: var(--ink); white-space: nowrap; }
+.lib-row .pr small { display: block; font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em; color: var(--ink-mute); text-align: right; margin-top: 2px; }
+.fav-star { color: var(--acid); display: inline-flex; }
+.lib-star { all: unset; box-sizing: border-box; cursor: pointer; width: 34px; height: 34px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-mute); border-radius: var(--radius-md); background: var(--surface-2); }
+.lib-star.on { color: var(--acid); background: var(--accent-soft); }
+.lib-star.on svg { fill: var(--acid); }
+.lib-main { all: unset; box-sizing: border-box; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; color: var(--ink); }
+
+/* ── Body / metrics ────────────────────────────────────────── */
+.spark { width: 100%; height: 64px; display: block; }
+.measure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.measure { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); padding: 12px 13px; }
+.measure .v { font-family: var(--font-display); font-size: 19px; color: var(--ink); line-height: 1; }
+.measure .k { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mute); margin-top: 7px; }
+.measure .t { font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); margin-top: 3px; }
+
+/* ── Insights ──────────────────────────────────────────────── */
+.vol-row { display: grid; gap: 5px; padding: 9px 0; }
+.vol-row .lab { display: flex; align-items: baseline; justify-content: space-between; }
+.vol-row .lab .g { font-size: 13px; font-weight: 600; color: var(--ink); }
+.vol-row .lab .n { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
+.vol-bar { height: 8px; background: var(--surface-2); position: relative; border-radius: var(--radius-badge); overflow: hidden; }
+.vol-bar > i { position: absolute; inset: 0 auto 0 0; background: var(--acid); border-radius: var(--radius-badge); }
+
+/* 8-week weekly-volume chart (B·F3 frame): a soft card holding flex-end
+   bars, past weeks surface-2 and the current week accent, with a mono
+   W1…W8 label row underneath. Bars keep a 3px stub at zero so the
+   baseline stays legible on an empty week. */
+.vol-week-card { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); padding: 18px 16px 10px; }
+.vol-week-bars { display: flex; align-items: flex-end; gap: 8px; height: 110px; }
+.vol-week-bars .bar { flex: 1; min-height: 3px; border-radius: 6px 6px 3px 3px; background: var(--surface-2); }
+.vol-week-bars .bar.cur { background: var(--acid); }
+.vol-week-labels { display: flex; gap: 8px; margin-top: 8px; }
+.vol-week-labels span { flex: 1; text-align: center; font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.06em; color: var(--ink-mute); }
+/* Bare on the page background like `.lib-row` — own soft card per row. */
+.pr-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); margin-bottom: 8px; }
+.pr-row .nm { font-size: 14px; font-weight: 600; color: var(--ink); }
+.pr-row .when { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-mute); margin-top: 3px; letter-spacing: 0.04em; }
+.pr-row .val { text-align: right; }
+.pr-row .val .v { font-family: var(--font-display); font-size: 17px; color: var(--ink); line-height: 1; }
+.pr-row .val .delta { font-family: var(--font-mono); font-size: 10px; color: var(--acid); margin-top: 4px; }
+.split-bar { display: flex; height: 12px; background: var(--surface-2); border-radius: var(--radius-badge); overflow: hidden; }
+.split-bar > i { display: block; }
+.split-legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin-top: 12px; }
+.split-legend .it { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.03em; color: var(--ink-dim); text-transform: uppercase; }
+.split-legend .it .sw { width: 10px; height: 10px; flex: none; }
+.split-legend .it .pc { margin-left: auto; color: var(--ink); }
+
+/* Calorie dashboard (/stats food sub-view) */
+.cal-goal-edit { display: flex; gap: 8px; }
+.cal-goal-edit input { flex: 1; min-width: 0; box-sizing: border-box; padding: 10px 12px; border: none; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 14px; }
+/* Shared `.pl-input:focus-visible` recipe: the accent inset ring is
+   decorative, the offset outline is the accessible indicator (box-shadow
+   is stripped in forced-colors mode, outline survives). */
+.cal-goal-edit input:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent-ring); outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.cal-goal-edit input::-webkit-outer-spin-button, .cal-goal-edit input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.cal-goal-edit button { all: unset; box-sizing: border-box; padding: 10px 14px; border-radius: var(--radius-md); background: var(--acid); color: var(--accent-ink); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; font-weight: 700; cursor: pointer; }
+.cal-goal-edit button.ghost { background: var(--surface-2); color: var(--ink-dim); font-weight: 600; }
+.cal-goal-edit button.ghost:hover { color: var(--ink); }
+/* goal marker tick inside a day bar */
+.cal-bar .goal-tick { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--hot); }
+.cal-legend { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.03em; color: var(--ink-dim); text-transform: uppercase; }
+.cal-legend .sw.goal { width: 12px; height: 0; border-top: 2px dashed var(--hot); }
+
+/* Food-tab header goal progress (under the day totals) */
+.cal-progress { margin-top: 6px; width: 132px; margin-left: auto; }
+.cal-progress .track { height: 5px; background: var(--surface-2); border-radius: var(--radius-badge); position: relative; overflow: hidden; }
+.cal-progress .track > i { position: absolute; inset: 0 auto 0 0; background: var(--acid); }
+.cal-progress.over .track > i { background: var(--hot); }
+.cal-progress .lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; color: var(--ink-mute); text-transform: uppercase; margin-top: 3px; }
+.cal-progress.over .lbl { color: var(--hot); }
+
+/* ════════════════════════════════════════════════════════════
+   LIVE WORKOUT — fullscreen takeover inside the phone shell
+   ════════════════════════════════════════════════════════════ */
+.live { position: absolute; inset: 0; z-index: 60; background: var(--bg); display: flex; flex-direction: column; animation: live-in 200ms ease-out; }
+@keyframes live-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+/* 3-column grid (1fr · auto · 1fr) so the centre title stays truly
+   centered no matter how many icons each side holds — the running state
+   has one button left (minimize) and two right (settings + pause); the
+   equal 1fr side tracks keep the title on the true centre either way. */
+/* `minmax(0, auto)` on the centre track, not bare `auto`: an `auto` track
+   floors at min-content, so a long session name (`templateName` is
+   user-set) widened the whole header past the viewport instead of letting
+   `.ttl .nm`'s ellipsis fire. The side tracks hold fixed-size buttons. */
+.live-top { flex: none; padding: calc(12px + env(safe-area-inset-top, 44px)) 16px 12px; border-bottom: 1px solid var(--hairline-soft); display: grid; grid-template-columns: 1fr minmax(0, auto) 1fr; align-items: center; gap: 10px; }
+.live-top .ttl { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.live-top .ttl.center { text-align: center; align-items: center; }
+/* Right-align the trailing control on EVERY `.live-top` consumer (this
+   header is shared by the Strength, WOD and rep-entry live sessions):
+   in a 1fr grid track a fixed-width item would otherwise sit at `start`
+   and drift toward the title. The leading back button keeps the default
+   `start` = screen-left. */
+.live-top > *:last-child { justify-self: end; }
+/* right-side control cluster (settings gear + pause) */
+.live-top-actions { display: flex; align-items: center; gap: 8px; }
+/* balances the 36px back button so a centered title stays centered */
+.live-top-spacer { width: 36px; flex: none; }
+/* `max-width: 100%` is what makes the ellipsis fire: `.ttl.center` sets
+   `align-items: center`, so this item sizes to max-content instead of
+   stretching, and a long session name painted straight out of the header
+   (past the viewport) rather than truncating inside its grid track. */
+.live-top .ttl .nm { font-size: 15px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.live-top .ttl .mode { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--acid); }
+.live-iconbtn { all: unset; box-sizing: border-box; cursor: pointer; width: var(--control-h-icon); height: var(--control-h-icon); border-radius: var(--radius-md); background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; color: var(--ink-dim); flex: none; }
+.live-iconbtn.on { background: var(--accent-soft); color: var(--acid); }
+/* destructive variant (discard session) — replaces per-site inline tints */
+.live-iconbtn.hot { background: var(--hot-soft); color: var(--hot-text); }
+
+/* running session clock */
+.live-clock { display: flex; align-items: baseline; gap: 10px; }
+.live-clock .t { font-family: var(--font-display); font-size: 30px; color: var(--ink); line-height: 1; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.live-clock .lbl { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mute); }
+
+.live-main { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 16px 120px; }
+.live-main::-webkit-scrollbar { width: 0; }
+/* desktop: cap the content column — full-bleed set rows put a huge gap
+   between the load input and the RPE/check cluster */
+.live-main > * { max-width: 560px; margin-inline: auto; }
+
+/* TIMER-FORWARD hero: giant clock. Sticky so the timer never scrolls
+   out of view mid-workout; the box-shadow paints over the scroll
+   container's top padding so content doesn't peek above it. */
+/* The 0-blur `0 -16px 0 0 var(--bg)` layer is load-bearing: it paints
+   over the scroll container's top padding so content can't peek above
+   the sticky hero — keep it first in the shadow list. */
+.live-hero { position: sticky; top: 0; z-index: 5; border-radius: var(--radius-xl); background: var(--surface); padding: 22px 18px; text-align: center; margin-bottom: 16px; box-shadow: 0 -16px 0 0 var(--bg), var(--shadow-panel); transition: padding 160ms ease; }
+.live-hero .big { font-family: var(--font-display); font-size: 72px; line-height: 0.92; color: var(--ink); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; transition: font-size 160ms ease; }
+.live-hero .big.warn { color: var(--hot); }
+.live-hero .cap { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mute); margin-top: 12px; }
+.live-hero .rounds { display: flex; align-items: baseline; justify-content: center; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--hairline-soft); }
+.live-hero .rounds .rv { font-family: var(--font-display); font-size: 40px; color: var(--acid); line-height: 1; transition: font-size 160ms ease; }
+.live-hero .rounds .rl { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mute); }
+
+/* compact hero once scrolled: single row, clock left / rounds right */
+.live-hero.compact { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; }
+.live-hero.compact .big { font-size: 34px; }
+.live-hero.compact .cap { display: none; }
+.live-hero.compact .rounds { margin-top: 0; padding-top: 0; border-top: none; }
+.live-hero.compact .rounds .rv { font-size: 24px; }
+
+/* exercise block in live — the active block carries a left accent rail
+   (planner's `.pl-ev`), not a ring. The base rule reserves the same
+   border in `transparent` so advancing the active block mid-workout
+   can't reflow the card by 3px. */
+/* overflow: hidden clips the swipe-wrapped header (whose own .rp-swipe
+   radius is the squarer 12px) to the card's 14px silhouette — without
+   it the flush-to-edge header wrapper paints past the card corner. */
+.live-block { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); margin-bottom: 12px; border-left: var(--border-accent) solid transparent; overflow: hidden; }
+.live-block.active { border-left-color: var(--acid); }
+.live-block-hd { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--hairline-soft); }
+/* `.nm` already asks to ellipsis-truncate, but a flex item's automatic
+   minimum size is its content width — so without `min-width: 0` on the
+   NAME'S WRAPPER (the flex child), a long exercise name pushed the whole
+   trailing control cluster past the card's right edge instead of
+   truncating. Pin the title column shrinkable and the control cluster
+   unshrinkable so the name is always what gives. */
+.live-block-hd > :first-child { min-width: 0; flex: 1 1 auto; }
+.live-block-hd > :last-child { flex: 0 0 auto; }
+/* On phones the trailing cluster (progress · reorder · gear · EDIT ·
+   remove) is ~257px on its own — leaving the name 30–100px, i.e.
+   truncated to "Incline Machi…" or worse "Hi…". Give the name its own
+   full-width line and spread the controls across the second one: the
+   header grows a row, but nothing is hidden and the exercise you're
+   mid-set on is actually readable. */
+@media (max-width: 560px) {
+  .live-block-hd { flex-wrap: wrap; row-gap: 8px; }
+  .live-block-hd > :first-child { flex: 1 1 100%; }
+  .live-block-hd > :last-child { flex: 1 1 100%; justify-content: space-between; }
+}
+.live-block-hd .nm { font-size: 15px; font-weight: 700; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* superset position chip (A1 / A2) + per-set target RPE tag */
+.live-ss-chip { font-family: var(--font-mono); font-size: 10px; color: var(--acid); background: var(--accent-soft); border-radius: var(--radius-badge); padding: 2px 6px; margin-right: 8px; vertical-align: 2px; }
+.set-row .u.rpe { color: var(--acid); }
+/* the "LAST · 8×155 @8, 7×150 @9" hint is a button (opens the history
+   drawer) — reset the native chrome, keep it inline + tappable, tint the
+   eyebrow accent so it reads as an affordance not static meta. */
+button.last { all: unset; box-sizing: border-box; cursor: pointer; display: inline-block; font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 5px; letter-spacing: 0.02em; }
+button.last:active { color: var(--acid); }
+/* exercise-history drawer: one card per past session, date eyebrow + a
+   wrapping row of set chips. */
+.ex-hist-session { border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); padding: 10px 12px; }
+.ex-hist-date { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--acid); margin-bottom: 6px; }
+.ex-hist-date .ex-hist-ttl { color: var(--ink-mute); }
+.ex-hist-sets { display: flex; flex-wrap: wrap; gap: 6px; }
+.ex-hist-set { font-family: var(--font-mono); font-size: 12px; color: var(--ink); background: var(--surface-2); border-radius: var(--radius-badge); padding: 3px 8px; white-space: nowrap; }
+.live-block-hd .prog { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); white-space: nowrap; }
+
+/* set row: ONE grid with fixed tracks so inputs column-align across
+   every row of a block and nothing can ever wrap. At 393px the fixed
+   tracks (16+60+12+64+48+44) + six 8px gaps leave the 1fr meta column
+   ~45px — always one line.
+   ix · amount · × · load · unit/target · RPE · action */
+.set-row { display: grid; grid-template-columns: 16px 60px 12px 64px minmax(0, 1fr) 48px 44px; column-gap: 8px; align-items: center; padding: 8px 12px; border-radius: var(--radius-md); }
+/* Rows separate by a gap inside the block card, not a rule (the nested
+   `.mc-chore`-in-`.mc-card` recipe planner uses). */
+.set-row + .set-row { margin-top: 4px; }
+/* Swipe-wrapped set rows: the sibling-margin recipe above no longer
+   matches (each row sits inside its own wrapper) — mirror it on the
+   wrappers. Match on .swipe-inline (the className prop, which the
+   empty-actions passthrough keeps even though it drops .rp-swipe) and
+   on the .set-row content, so header wrappers never pick up the gap
+   and non-edit passthrough rows keep it. Scoped to .live-block: the
+   composer card is a grid with its own gap. */
+.live-block .swipe-inline:has(> .set-row) + .swipe-inline:has(> .set-row) { margin-top: 4px; }
+/* ≤374px (360px-class phones): shave the fixed tracks so the meta
+   column keeps ~40px instead of collapsing under its text */
+@media (max-width: 374px) {
+  .set-row { grid-template-columns: 14px 54px 10px 58px minmax(0, 1fr) 44px 44px; column-gap: 6px; }
+}
+.set-row .ix { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); }
+/* per-set warmup toggle — reuses the .ix cell's slot; tapping cycles
+   working ↔ warmup for that one set. A surface-step fill (not an
+   outline) marks the idle number as tappable; the 'W' state swaps to an
+   accent-soft fill, the same chip idiom `.day-chip`/`.day-type-chip`
+   use for on/off elsewhere in this file. */
+.ix-toggle { all: unset; box-sizing: border-box; cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); text-align: center; width: 100%; padding: 3px 0; background: var(--surface-2); border-radius: var(--radius-badge); }
+.ix-toggle.warmup { color: var(--acid); font-weight: 700; background: var(--accent-soft); }
+/* warmup sets render muted (like .done) but stay distinguishable via
+   the accent-colored "warmup" badge in meta2 */
+.set-row.warmup { opacity: 0.6; }
+.set-row.warmup.done { opacity: 0.4; }
+.set-row .meta2 .mt.warmup-badge { color: var(--ink-mute); }
+.set-row .n { font-family: var(--font-display); font-size: 20px; color: var(--ink); line-height: 1; text-align: center; }
+.set-row .x { font-family: var(--font-mono); font-size: 13px; color: var(--ink-mute); text-align: center; }
+/* two stacked mono lines replacing the old inline "MAX reps × BW lb @9"
+   word salad: unit on top, target (@8 / MAX) in accent below */
+.set-row .meta2 { display: grid; gap: 3px; min-width: 0; }
+/* unit (top) + target (@rpe / MAX, bottom). Bumped 9px→10.5px and the
+   unit off --ink-mute onto --ink-dim so the column is legible at arm's
+   length mid-set (the replay showed it reading as garbled specks). */
+.set-row .meta2 .mu { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); }
+.set-row .meta2 .mt { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--acid); }
+/* editable reps/load inputs during live logging */
+.set-edit { width: 56px; background: var(--surface-2); border: none; border-radius: var(--radius-md); color: var(--ink); font-family: var(--font-display); font-size: 19px; padding: 4px 6px; text-align: center; -moz-appearance: textfield; }
+/* inside the grid the tracks own the width; 44px tall = the input IS
+   the tap target */
+.set-row .set-edit { width: 100%; padding: 10px 4px; }
+.set-row .set-edit.rpe::placeholder { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; }
+.set-edit::-webkit-outer-spin-button, .set-edit::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* Shared `.pl-input:focus-visible` recipe — decorative accent ring plus
+   the offset outline that survives forced-colors mode. */
+.set-edit:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent-ring); outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* weight recommendation strip under a block header — its own accent-tint
+   band, so it needs no rule to separate it from the sets below */
+.rec-line { display: flex; align-items: baseline; gap: 6px; padding: 8px 14px; background: var(--accent-soft-2); font-size: 12px; color: var(--ink-dim); flex-wrap: wrap; }
+.rec-line .rec-k { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--acid); }
+.rec-line b { font-family: var(--font-display); font-size: 15px; color: var(--ink); }
+.rec-line .rec-b { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); letter-spacing: 0.02em; }
+/* WOD movement split time */
+.rep-move .dt .split { color: var(--acid); }
+/* 44px = the tap-target floor. The check is the only action square on a
+   set row — one action per row; radius-checkbox marks it as the
+   checkable control. */
+.set-check { all: unset; box-sizing: border-box; cursor: pointer; width: 44px; height: 44px; flex: none; border-radius: var(--radius-checkbox); background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; color: var(--ink-mute); transition: transform 100ms ease-out; }
+.set-check:active { transform: scale(0.92); }
+.set-check:disabled { opacity: 0.35; cursor: not-allowed; }
+/* edit-mode replacement for the check: borderless hot ×, full hit area */
+/* EDIT / DONE toggle in the block header — rare + destructive set
+   removal lives behind a mode instead of a per-row 44px square */
+.live-edit-toggle { all: unset; box-sizing: border-box; cursor: pointer; height: 28px; padding: 0 8px; border-radius: var(--radius-badge); display: inline-flex; align-items: center; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
+.live-edit-toggle.on { color: var(--acid); background: var(--accent-soft); }
+/* Fixed-slot header cluster: unavailable actions disable in place
+   rather than unmounting, so the gear never moves mid-workout. */
+.live-edit-toggle:disabled, .mv-rm:disabled { opacity: 0.35; cursor: default; }
+/* the block-header remove is a quieter 28px so it doesn't compete
+   with the exercise name */
+/* completed sets fade AND settle onto a surface step, so a finished
+   block reads as a filled stack at a glance */
+.set-row.done { opacity: 0.55; background: var(--surface-2); }
+.set-row.done .set-check { background: var(--acid); color: var(--accent-ink); }
+
+/* + Add set / + Add exercise: quiet mono ghost row (replaces the
+   full-size start button shrunk with inline styles) */
+.live-addset { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 11px 10px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink-dim); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+.live-addset:active { background: var(--accent-soft); color: var(--ink); }
+/* inside a block card the card itself frames it — a gap separates it
+   from the last set row (the sibling margin only fires between rows) */
+.live-block .live-addset { background: none; border-radius: 0 0 var(--radius-xl) var(--radius-xl); margin-top: 4px; }
+
+/* one-line usage hint under the block list — a quiet meta line, not a
+   dashed empty-state frame (which read as a broken section) */
+.live-tip { margin: 6px 0 0; text-align: center; font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); letter-spacing: 0.03em; line-height: 1.6; }
+
+/* accent-tinted stopwatch glyph inside the rest buttons */
+.live-rest-ic { display: inline-flex; color: var(--acid); }
+
+/* big rep-counter movement (WOD checklist) */
+.rep-move { display: flex; align-items: center; gap: 14px; padding: 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); margin-bottom: 10px; }
+/* Swipe-wrapped movement rows: hand the row's 10px bottom margin to the
+   wrapper (same recipe as .plan-row / .mv-edit) so it doesn't paint as a
+   tray-height strip inside the clipped .rp-swipe card. */
+.rp-swipe > .rep-move { margin-bottom: 0; }
+.rp-swipe:has(> .rep-move) { margin-bottom: 10px; }
+/* Done rows dim at 0.5 — on a swipe-wrapped row that translucency would
+   let the tray bleed through the sliding content, so lift the dim onto
+   the wrapper (content occludes the tray first, then the whole group
+   fades together). */
+.rp-swipe:has(> .rep-move.done) { opacity: 0.5; }
+.rp-swipe > .rep-move.done { opacity: 1; }
+.rep-move.active { background: var(--accent-soft-2); box-shadow: var(--shadow-card); }
+.rep-move.done { opacity: 0.5; }
+.rep-move .mn { flex: 1; min-width: 0; }
+.rep-move .mn .nm { font-size: 16px; font-weight: 700; color: var(--ink); }
+.rep-move .mn .dt { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-dim); margin-top: 4px; letter-spacing: 0.02em; }
+.rep-count { font-family: var(--font-display); font-size: 30px; color: var(--acid); line-height: 1; flex: none; min-width: 56px; text-align: right; }
+.rep-move.done .rep-count { color: var(--ink-mute); }
+
+/* Drawers opened from the live takeover (Add exercise, etc.) render
+   inside .live's stacking context, where the shared .rp-drawer-root's
+   z-index 60 sat UNDER .live-foot (62) and the rest overlay (70) — the
+   foot bar painted over the sheet's confirm buttons. Lift them above
+   everything in the takeover. */
+.live .rp-drawer-root { z-index: 72; }
+
+/* Live footer action bar — composed on the kit's floating glass capsule
+   (`<SubBar className="live-foot">` → `.rp-subbar` in shell.css), the
+   same pill planner floats above its tab bar. Position, blur, radius and
+   shadow all come from `.rp-subbar`; this rule only says what differs:
+   the takeover has no tab bar to clear, so the shared clearance var
+   collapses to the safe area, and the z-index rejoins the takeover's own
+   stacking order (see the `.rp-drawer-root` note above: drawer 72 >
+   rest overlay 70 > foot 62 > `.live` 60). */
+.live-foot { --rp-tabbar-clear: 0px; z-index: 62; justify-content: center; }
+/* max-width mirrors .live-main's 560px content cap (2×276 + gap) */
+.live-foot > * { flex: 1 1 0; max-width: 276px; }
+/* ≥1024px the kit collapses `.rp-subbar` into a static inline strip, so
+   the foot simply becomes the takeover column's last flex child and
+   docks itself — drop the kit's trailing margin and the mobile scroll
+   clearance `.live-main` reserved for a *floating* bar. */
+@media (min-width: 1024px) {
+  .live-foot { margin-bottom: 0; }
+  .live-main { padding-bottom: 24px; }
+}
+
+/* Live-session footer action segments (Rest / Next round / Finish).
+   CSS-only reuse of the `.rp-subbar-seg` design-kit tokens (radius,
+   mono-uppercase label, accent-filled "active" treatment) rather than
+   the `<SubBarSeg>` component — that component's `aria-pressed` toggle
+   semantics don't fit one-shot session actions (Rest, Finish, Next
+   round aren't a persistent on/off state). Each button stays its own
+   `.live-foot` flex child (see `rest-live` above, which docks into the
+   same slot as the Rest segment), so this only reskins the buttons,
+   not the row's flex/positioning. */
+.live-foot-seg {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-nav);
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.live-foot-seg:hover { color: var(--ink); }
+.live-foot-seg:active { transform: translateY(1px); }
+.live-foot-seg:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.live-foot-seg.is-active {
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 92%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent);
+}
+
+/* rest timer overlay (slides up over the live screen) */
+/* Fully opaque backdrop — the previous 90% color-mix + blur let the
+   session view ghost through, which read as a washed-out box around
+   the countdown ring (most visible in light theme). */
+.rest { position: absolute; inset: 0; z-index: 70; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 24px; animation: rest-in 220ms ease-out; }
+@keyframes rest-in { from { opacity: 0; } to { opacity: 1; } }
+.rest .eyebrow { letter-spacing: 0.18em; }
+/* "rest-ring", not "ring" — Tailwind v4's bare `ring` utility (imported
+   app-wide via index.css) painted a 1px box-shadow square around the
+   countdown otherwise. */
+.rest .rest-ring { position: relative; width: 230px; height: 230px; display: flex; align-items: center; justify-content: center; }
+.rest .rest-ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+.rest .rest-ring .num { font-family: var(--font-display); font-size: 66px; color: var(--ink); line-height: 1; font-variant-numeric: tabular-nums; }
+.rest .nextup { text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ink-dim); }
+.rest .nextup b { color: var(--ink); font-weight: 700; }
+.rest-actions { display: flex; gap: 10px; width: 100%; max-width: 320px; }
+.rest-actions > * { flex: 1; }
+/* ± adjust row */
+.rest-adjust { display: flex; gap: 8px; width: 100%; max-width: 320px; }
+.rest-adjust button { all: unset; box-sizing: border-box; flex: 1; text-align: center; cursor: pointer; padding: 11px 0; border-radius: var(--radius-md); background: var(--surface-2); font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.02em; color: var(--ink); }
+.rest-adjust button:active { background: var(--accent-soft); }
+
+/* minimize control for the rest overlay */
+.rest-min { all: unset; box-sizing: border-box; position: absolute; top: 14px; right: 16px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.rest-min:active { color: var(--acid); }
+
+/* minimized rest countdown, docked into the .live-foot bar (replaces
+   the old floating .rest-pill, which covered the Finish button) */
+.rest-live { display: flex; align-items: stretch; border-radius: var(--radius-md); background: var(--accent-soft-2); box-shadow: var(--shadow-card); overflow: hidden; }
+.rest-live-main { all: unset; box-sizing: border-box; cursor: pointer; flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.04em; color: var(--acid); font-variant-numeric: tabular-nums; }
+.rest-live-skip { all: unset; box-sizing: border-box; cursor: pointer; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 9px 13px; border-left: 1px solid var(--hairline-soft); color: var(--ink-dim); font-size: 15px; }
+.rest-live-skip:active { color: var(--hot); }
+
+/* finished summary */
+.fin { display: grid; gap: 16px; }
+.fin-hero { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); padding: 22px 18px; text-align: center; }
+.fin-hero .big { font-family: var(--font-display); font-size: 52px; color: var(--ink); line-height: 1; }
+.fin-hero .lbl { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--acid); margin-top: 10px; }
+
+/* ── Start sheet (bottom sheet to pick a session) ──────────── */
+.sheet-scrim { position: absolute; inset: 0; z-index: 64; background: rgba(0,0,0,0.5); animation: rest-in 160ms ease-out; }
+.start-sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 65; background: var(--bg); border-radius: 16px 16px 0 0; padding: 10px 16px calc(20px + env(safe-area-inset-bottom, 18px)); box-shadow: 0 -12px 28px rgba(0,0,0,0.35); animation: sheet-up 220ms ease-out; max-height: 86%; overflow-y: auto; }
+@keyframes sheet-up { from { transform: translateY(100%); } to { transform: none; } }
+.sheet-grab { width: 40px; height: 4px; border-radius: 999px; background: var(--line); margin: 4px auto 14px; }
+/* The transparent left border is reserved on every option so promoting
+   one to `.primary` (accent rail) can't shift the row's contents. */
+.start-opt { display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); cursor: pointer; text-align: left; color: var(--ink); margin-bottom: 8px; border-left: var(--border-accent) solid transparent; }
+.start-opt:active { transform: translateY(1px); }
+.start-opt .si { width: 42px; height: 42px; flex: none; border-radius: var(--radius-md); background: var(--accent-soft); display: inline-flex; align-items: center; justify-content: center; color: var(--acid); }
+.start-opt.primary { border-left-color: var(--acid); }
+.start-opt .so-main { flex: 1; min-width: 0; }
+.start-opt .so-main .t { font-size: 15px; font-weight: 700; }
+.start-opt .so-main .d { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-dim); margin-top: 4px; letter-spacing: 0.02em; }
+
+/* empty hint — stays dashed (an invitation, not a card), just rounded */
+.fit-empty { border: 1.5px dashed var(--line); border-radius: var(--radius-xl); padding: 28px 18px; text-align: center; color: var(--ink-dim); }
+.fit-empty .t { font-family: var(--font-display); font-size: 18px; color: var(--ink); margin-bottom: 8px; }
+.fit-empty .b { font-size: 13px; line-height: 1.5; }
+
+/* ════════════════════════════════════════════════════════════
+   PLAN TAB — saved shelf + weekly schedule (drag & drop)
+   ════════════════════════════════════════════════════════════ */
+.plan-sub { margin-top: 8px; }
+
+/* "+ New plan" invitation — a dashed accent affordance, not a card. */
+.plan-pop-new { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; border: 1.5px dashed var(--acid); border-radius: var(--radius-md); color: var(--acid); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* saved workouts shelf (horizontal drag source) */
+.saved-shelf { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 4px; -webkit-overflow-scrolling: touch; }
+.saved-shelf::-webkit-scrollbar { height: 0; }
+.saved-card { flex: 0 0 auto; width: 134px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); padding: 11px 12px; cursor: grab; display: flex; flex-direction: column; gap: 5px; user-select: none; }
+.saved-card:active { cursor: grabbing; }
+.saved-card .sv-type { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--acid); }
+.saved-card .sv-name { font-size: 14px; font-weight: 700; color: var(--ink); line-height: 1.15; }
+.saved-card .sv-meta { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); min-height: 12px; }
+.saved-card .sv-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+.saved-card .sv-dur { font-family: var(--font-display); font-size: 14px; color: var(--ink); }
+.saved-card .sv-meta2 { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.04em; color: var(--ink-mute); }
+.saved-card .grip { color: var(--ink-mute); display: inline-flex; transform: rotate(90deg); }
+/* .saved-card lost its border in the sweep, so the dashed invitation
+   card declares its own. */
+.saved-new { align-items: center; justify-content: center; gap: 8px; border: 1.5px dashed var(--acid); box-shadow: none; color: var(--acid); cursor: pointer; }
+.saved-new .sn-ic { display: inline-flex; }
+.saved-new .sn-t { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; text-align: center; line-height: 1.3; }
+
+/* week list layout (vertical day rows) */
+.week-list-plan { display: grid; gap: 8px; }
+.day-block { border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow-panel); transition: box-shadow 120ms ease-out, background 120ms ease-out; }
+.day-block.over { background: var(--accent-soft-2); box-shadow: var(--shadow-panel); }
+.day-label { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--hairline-soft); }
+.day-label .dl { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-dim); }
+.day-label .dt { font-family: var(--font-mono); font-size: 10px; color: var(--acid); }
+/* Right side of a weekday header: the day-type chip + the date/count. */
+.day-label-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Weekday "day type" chip (opens DayTypeSheet). Muted "+ Type" when unset,
+   acid-outlined once a preset/custom label is set. Truncates long labels. */
+.day-type-chip {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 4px 9px; border-radius: var(--radius-badge); background: var(--surface-2); color: var(--ink-mute);
+  max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.day-type-chip.set { background: var(--accent-soft); color: var(--acid); }
+.day-type-chip:hover { color: var(--ink); }
+.day-type-chip.set:hover { color: var(--acid); }
+.day-type-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.day-drop { padding: 8px; display: grid; gap: 6px; min-height: 44px; }
+
+/* DayTypeSheet (per-day editor drawer): preset grid + free-text row. */
+.dtype-sheet-label {
+  display: block; margin-bottom: 8px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-mute);
+}
+.dtype-presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.dtype-presets button {
+  all: unset; box-sizing: border-box; cursor: pointer; text-align: center;
+  padding: 10px 8px; border-radius: var(--radius-md); background: var(--surface-2);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-mute);
+}
+.dtype-presets button.on { background: var(--acid); color: var(--accent-ink); }
+.dtype-presets button:hover { color: var(--ink); }
+.dtype-presets button.on:hover { color: var(--accent-ink); }
+.dtype-presets button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.dtype-custom-row { display: flex; gap: 8px; align-items: center; }
+.dtype-custom-row .pl-input { flex: 1; min-width: 0; }
+.day-empty { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em; color: var(--ink-mute); text-align: center; padding: 8px; border: 1.5px dashed var(--line); border-radius: var(--radius-lg); }
+
+/* inline-build search results (Plan tab) */
+/* `min-width: 0` must be re-declared AFTER `all: unset` — the reset puts
+   the automatic content-based minimum back, which is what let a long
+   result name blow this row past the viewport (it is nested, so the
+   `.page-pad > *` floor above never reached it). Any future `all: unset`
+   row holding a truncating `.nm` needs the same line. */
+.plan-search-row { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); min-width: 0; }
+.plan-search-row:hover, .plan-search-row:focus-visible { background: var(--accent-soft-2); }
+.plan-search-row .nm { font-size: 13.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-search-row .meta { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-mute); flex: none; }
+.plan-search-empty { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-mute); padding: 6px 2px; }
+
+/* "Add here" target shown on each day while a selection is staged */
+.day-add-here { all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border: 1.5px dashed var(--acid); border-radius: var(--radius-md); color: var(--acid); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+.day-add-here:hover, .day-add-here:focus-visible { background: var(--accent-soft-2); }
+
+/* scheduled item chip */
+.sch-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-lg); background: var(--surface-2); user-select: none; }
+/* Swipe-wrapped schedule chips: the chip is a flat surface-2 pill, not a
+   shadowed card — strip the wrapper's card chrome and match its rubber-
+   band backdrop to the chip. */
+.day-drop .rp-swipe { box-shadow: none; background: var(--surface-2); }
+.sch-item.over { box-shadow: inset 0 2px 0 var(--acid); }
+.sch-item .grip { color: var(--ink-mute); display: inline-flex; flex: none; transform: rotate(90deg); }
+.sch-item .sch-main { flex: 1; min-width: 0; }
+.sch-item .sch-main .nm { font-size: 13.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sch-item .sch-main .meta { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-mute); }
+.sch-dur { all: unset; box-sizing: border-box; cursor: pointer; flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); background: var(--surface); border-radius: var(--radius-badge); padding: 4px 8px; }
+.sch-dur:active { color: var(--acid); }
+.sch-go { all: unset; box-sizing: border-box; cursor: pointer; flex: none; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-md); background: var(--surface); color: var(--acid); }
+.sch-x { all: unset; box-sizing: border-box; cursor: pointer; flex: none; width: 24px; height: 28px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-mute); font-size: 18px; }
+.sch-x:hover { color: var(--hot); }
+
+/* board layout (horizontal day columns) */
+.board { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
+.board::-webkit-scrollbar { height: 0; }
+.day-block.col { flex: 0 0 168px; display: flex; flex-direction: column; min-height: 150px; }
+.day-block.col .day-drop { flex: 1; }
+.sch-item.compact { flex-wrap: wrap; gap: 6px; }
+.sch-item.compact .sch-main { flex-basis: 100%; }
+
+/* ════════════════════════════════════════════════════════════
+   WORKOUT HISTORY — previous attempts (pacing + weights)
+   ════════════════════════════════════════════════════════════ */
+/* Transparent rail reserved on every card so the `.best` promotion can't
+   reflow the stack — the same accent rail `.wkrow.pr` uses for a PR. */
+.hist-card { border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); padding: 13px 14px; margin-bottom: 8px; border-left: var(--border-accent) solid transparent; }
+.hist-card.best { border-left-color: var(--acid); }
+.hist-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.hist-when .d { font-size: 14px; font-weight: 700; color: var(--ink); }
+.hist-when .ago { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--ink-mute); margin-top: 3px; }
+.hist-score { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-size: 24px; color: var(--ink); line-height: 1; white-space: nowrap; }
+.hist-score .bb { font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em; color: var(--acid); background: var(--accent-soft); border-radius: var(--radius-badge); padding: 2px 6px; }
+.hist-pace { display: grid; gap: 6px; }
+.pace-row { display: flex; align-items: center; gap: 10px; }
+.pace-row .pl { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--ink-dim); width: 52px; flex: none; }
+.pace-row .pbar { flex: 1; height: 9px; background: var(--surface-2); border-radius: var(--radius-badge); overflow: hidden; position: relative; }
+.pace-row .pbar > i { position: absolute; inset: 0 auto 0 0; background: var(--acid); min-width: 3px; border-radius: var(--radius-badge); }
+.pace-row .ps { font-family: var(--font-display); font-size: 13px; color: var(--ink); width: 40px; text-align: right; flex: none; }
+.hist-sets { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em; color: var(--ink); padding: 6px 0; }
+.hist-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.hist-note { font-size: 11.5px; font-style: italic; color: var(--ink-dim); line-height: 1.4; }
+
+/* ════════════════════════════════════════════════════════════
+   COMPOSER — build/edit a workout (uses the .live takeover shell)
+   ════════════════════════════════════════════════════════════ */
+.cmp-label { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mute); margin-bottom: 7px; }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cmp-field { display: flex; flex-direction: column; }
+.cmp-stepper { display: flex; align-items: center; gap: 8px; }
+.cmp-stepper .pl-input { width: 72px; }
+.cmp-unit { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); letter-spacing: 0.04em; }
+/* superset bracket member: accent rail on the card's left edge — spans
+   consecutive grouped cards so the bracket reads as one visual unit */
+.cmp-ss-card { border-left: 2px solid var(--acid); }
+
+/* ── Exercise picker (typeahead over the catalog) ──────────────
+   Was a pre-token inline dropdown (hardcoded rgba borders against an
+   undefined `--edge` var). Now a soft flyout: surface panel, no border,
+   rows that tint on hover, and the "+ Create" affordance carrying its
+   own accent-soft pill instead of a divider rule above it. */
+/* `scroll-margin` gives the focus-time scrollIntoView room to leave the
+   popover clear of the on-screen keyboard; `overscroll-behavior` stops a
+   flick inside the results from chaining into the page behind it. */
+.ex-pick { position: relative; scroll-margin: 96px 0 260px; }
+.ex-pick-pop { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 4px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-flyout); }
+.ex-pick-row { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 8px 10px; border-radius: var(--radius-md); color: var(--ink); font-size: 14px; }
+.ex-pick-row:hover { background: var(--surface-2); }
+.ex-pick-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.ex-pick-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-pick-hint { display: block; font-size: 11px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-pick-create { all: unset; box-sizing: border-box; cursor: pointer; display: block; width: 100%; margin-top: 4px; padding: 10px; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--acid); text-align: center; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; }
+.ex-pick-create:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+/* Swipe wrappers on editor rows (composer / live session / sheets):
+   these rows sit inside cards or on the page chassis rather than being
+   cards themselves. The wrapper and the sliding row take the container's
+   background — an opaque row is what hides the tray behind it — and the
+   card shadow drops. `swipe-inline` = row inside a .fit-card/.live-block
+   (inherits the card bg, incl. .sel/.cmp-ss-card tints); `swipe-page` =
+   row directly on the page chassis. */
+.rp-swipe.swipe-inline { background: inherit; box-shadow: none; }
+.rp-swipe.swipe-inline > .rp-swipe-content { background: inherit; }
+.rp-swipe.swipe-page { background: var(--bg); box-shadow: none; }
+.rp-swipe.swipe-page > .rp-swipe-content { background: var(--bg); }
+/* The exercise-picker flyout is position:absolute inside the row —
+   .rp-swipe's overflow:hidden would clip it. Lift the clip while the
+   flyout is open (nothing is mid-drag while the user is typing). */
+.rp-swipe:has(.ex-pick-pop) { overflow: visible; }
+
+/* movement editor row */
+.mv-edit { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+/* Swipe-wrapped movement rows: hand the row's 8px bottom margin to the
+   wrapper (same recipe as .plan-row above). */
+.rp-swipe > .mv-edit { margin-bottom: 0; }
+.rp-swipe:has(> .mv-edit) { margin-bottom: 8px; }
+.mv-edit .mv-ix { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); width: 16px; padding-top: 12px; flex: none; }
+.mv-edit .mv-inputs { flex: 1; display: grid; grid-template-columns: 1.3fr 1fr; gap: 8px; min-width: 0; }
+.mv-edit .pl-input { font-size: 14px; }
+.mv-rm { all: unset; box-sizing: border-box; cursor: pointer; width: 38px; height: 38px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink-mute); }
+.mv-rm:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* day chips */
+.day-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.day-chip { all: unset; box-sizing: border-box; cursor: pointer; padding: 9px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ink-dim); }
+.day-chip.on { background: var(--accent-soft); color: var(--acid); }
+/* Compact variant for the specific-muscle rows nested under a group pick. */
+.day-chip.sm { padding: 6px 10px; font-size: 10px; }
+
+/* ── Whiteboard scan card ──────────────────────────────────── */
+.scan { margin-bottom: 18px; }
+.scan-zone { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: flex; align-items: center; gap: 13px; padding: 14px; border: 1.5px dashed var(--acid); border-radius: var(--radius-xl); background: var(--accent-soft-2); }
+.scan-zone.reading, .scan-zone.done { cursor: default; border-style: solid; }
+.scan-ic { width: 42px; height: 42px; flex: none; border-radius: var(--radius-md); background: var(--accent-soft); display: inline-flex; align-items: center; justify-content: center; color: var(--acid); }
+.scan-thumb { width: 42px; height: 42px; flex: none; object-fit: cover; border-radius: var(--radius-md); }
+.scan-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.scan-t { font-size: 12.5px; color: var(--ink-dim); }
+.scan-spin { width: 18px; height: 18px; flex: none; border: 2px solid var(--surface-2); border-top-color: var(--acid); border-radius: 999px; animation: scan-spin 0.7s linear infinite; }
+@keyframes scan-spin { to { transform: rotate(360deg); } }
+.scan-redo { all: unset; box-sizing: border-box; cursor: pointer; width: 34px; height: 34px; flex: none; border-radius: var(--radius-md); background: var(--surface); display: inline-flex; align-items: center; justify-content: center; color: var(--ink-dim); }
+
+/* ── Live barcode scanner (issue #702) ─────────────────────── */
+.live-scan { display: grid; gap: 12px; }
+/* The camera viewport keeps its accent border — a functional frame the
+   video would hide an inset ring behind — just rounded now. */
+.live-scan-view { position: relative; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border: 1.5px solid var(--acid); border-radius: var(--radius-xl); background: #000; }
+.live-scan-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Centered reticle band with a sweeping scan line, matching the acid theme. */
+.live-scan-reticle { position: absolute; inset: 18% 10%; border: 1.5px solid var(--acid); box-shadow: 0 0 0 100vmax rgba(0,0,0,0.28); pointer-events: none; }
+.live-scan-line { position: absolute; left: 0; right: 0; height: 2px; background: var(--acid); box-shadow: 0 0 8px var(--acid); animation: live-scan-sweep 1.8s ease-in-out infinite; }
+@keyframes live-scan-sweep { 0% { top: 4%; } 50% { top: 96%; } 100% { top: 4%; } }
+@media (prefers-reduced-motion: reduce) { .live-scan-line { animation: none; top: 50%; } }
+
+/* ── Upcoming plan rows ────────────────────────────────────── */
+.plan-row { display: flex; align-items: stretch; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); margin-bottom: 8px; overflow: hidden; }
+/* Swipe-wrapped rows: the row's own margin-bottom would sit inside the
+   clipped .rp-swipe card as a tray-height strip — hand the 8px spacing
+   to the wrapper instead so mixed lists keep their rhythm. */
+.rp-swipe > .plan-row { margin-bottom: 0; }
+.rp-swipe:has(> .plan-row) { margin-bottom: 8px; }
+.plan-day { flex: none; width: 52px; display: flex; align-items: center; justify-content: center; border-right: 1px solid var(--hairline-soft); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-mute); text-align: center; }
+.plan-main { flex: 1; min-width: 0; display: grid; gap: 4px; padding: 12px 14px; background: none; border: none; cursor: pointer; text-align: left; color: var(--ink); }
+/* min-width: 0 lets the nowrap `.nm` ellipsis-truncate. Without it the
+   grid cell's automatic minimum is the name's full width, which blows
+   `.plan-main` (and the whole `.page-pad` column, incl. the header and
+   button rows) past the viewport where the shell's overflow-x: hidden
+   clips it — the Food page's day-totals + "Add manually" clipping. */
+.plan-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.plan-top .nm { font-size: 14.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.plan-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-dim); letter-spacing: 0.02em; }
+.plan-go { all: unset; box-sizing: border-box; cursor: pointer; width: 50px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-left: 1px solid var(--hairline-soft); color: var(--acid); }
+.plan-go:active { background: var(--accent-soft); }
+.plan-main:focus-visible,
+.plan-go:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -4px; }
+
+/* ── Docked sub-tab bar (planner rp-subbar) + Start FAB ────── */
+.fit-subbar { padding: 7px 8px; gap: 8px; align-items: center; }
+.fit-subseg { flex: 1; display: flex; gap: 3px; min-width: 0; }
+.fit-subseg button { all: unset; box-sizing: border-box; flex: 1; min-width: 0; text-align: center; padding: 9px 4px; border-radius: 14px; font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-dim); cursor: pointer; }
+.fit-subseg button.on { background: color-mix(in srgb, var(--accent) 92%, transparent); color: var(--accent-ink); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent); }
+/* Prev/next day chevrons: fixed compact slots (44px tap target) so they
+   don't stretch into wide empty pills; the date segment absorbs the width. */
+.fit-subseg button.arrow { flex: 0 0 44px; display: inline-flex; align-items: center; justify-content: center; }
+
+/* ── Resume-session pill (AppChrome, floats above the sub-bar) ──
+   Rides the kit's `.rp-subbar` glass + positioning (safe-area-aware
+   bottom slot above the tab bar) instead of the old inline
+   `bottom: 86px`, which ignored the safe area and painted the pill
+   straight over each tab's docked SubBar (and into the tab bar on
+   notched phones). Only the deltas live here. */
+.fit-resume-pill {
+  z-index: 40;
+  padding: 10px 14px;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--ink);
+}
+@media (max-width: 1023px) {
+  /* When the page floats its own docked SubBar (section switcher + FAB,
+     ≈52px tall), stack the pill one slot ABOVE it (+8px gap) instead of
+     on top of it. `.live-foot` is excluded: the session takeover paints
+     over the pill anyway and must not shift it. The pill and the SubBar
+     are both inside `.plapp-content` (AppChrome renders the pill after
+     the page), so `:has()` sees them together. */
+  .plapp-content:has(.rp-subbar:not(.fit-resume-pill):not(.live-foot)) .fit-resume-pill {
+    bottom: calc(var(--rp-tabbar-clear, 88px) + env(safe-area-inset-bottom, 0px) + 64px);
+  }
+  /* Content must clear the extra stacked bar too: the shell's
+     `:has(.rp-subbar)` rule reserves 164px for ONE floating bar; with
+     the pill riding above the SubBar the stack tops out ≈60px higher. */
+  .plapp-main:has(.rp-subbar:not(.fit-resume-pill)):has(.fit-resume-pill) {
+    padding-bottom: calc(224px + env(safe-area-inset-bottom, 0px));
+  }
+}
+/* ≥1024px the kit collapses `.rp-subbar` into a static inline strip —
+   right for a section switcher, wrong for this pill (it renders after
+   the page content and would land below the fold). Keep it floating in
+   the kit's mobile slot; the desktop shell has no tab bar, so it reads
+   as a bottom toast. */
+@media (min-width: 1024px) {
+  .fit-resume-pill {
+    position: fixed;
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: 24px;
+    margin-bottom: 0;
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-tabbar);
+    /* Re-assert the kit's mobile glass — the ≥1024px `.rp-subbar`
+       collapse swaps it for an opaque inline strip (surface bg, no
+       blur, no slide-in), which is wrong for a still-floating pill. */
+    background: color-mix(in srgb, var(--surface) 78%, transparent);
+    backdrop-filter: var(--blur-glass);
+    -webkit-backdrop-filter: var(--blur-glass);
+    animation: rp-subin var(--dur-base) var(--ease-out);
+  }
+}
+
+/* tab-bar central start button override */
+.m-tab.tab-start { flex: 0 0 auto; }
+.tab-start-btn { all: unset; box-sizing: border-box; cursor: pointer; width: 56px; height: 56px; margin: -8px 4px 0; border-radius: var(--radius-round); background: var(--acid); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; box-shadow: var(--shadow-fab); }
+.tab-start-btn:active { transform: translateY(1px); }
+
+/* ── Mobile spacing fix (keep LAST — overrides base rules above) ──
+   The shared shell's `.plapp-main` already provides 18px top / 16px side
+   padding on phones (plus 164px bottom clearance for the floating bars).
+   Every fitness page also wraps in `.page-pad` (another 20px/16px), so
+   both gutters doubled — visibly airier than the other apps (planner
+   centers a padding-less `.content-cap` inside the same shell, so it gets
+   the shell's padding only). Drop page-pad's padding entirely on mobile
+   and tighten the vertical rhythm to planner's (~8–20px between blocks):
+   margins don't collapse with grid gaps, so the prototype's `.sec-rule` /
+   `.fit-head` margins were stacking on top of the 20px page gap (36–42px
+   voids). Desktop keeps the roomier spacing; the live-session overlay
+   (`.live`, position:absolute) has its own padding and is unaffected. */
+@media (max-width: 1023px) {
+  .page-pad {
+    padding: 0;
+    gap: 12px;
+  }
+  .fit-head { margin-bottom: 0; } /* page gap covers it → 12px */
+  .sec-rule { margin: 8px 0 0; } /* 20px above a section label, 8px below */
+  .fit-empty { padding: 18px 16px; }
+}
+
+/* ============================================================
+   SETTINGS PAGE (/settings) — .pref-section + .pref-row + .swatch
+   Ink kit's preference container (planner-web's .set-section/.set-row
+   block), renamed pref-* here because fitness already uses .set-row
+   for live-session exercise set rows.
+   ============================================================ */
+.pref-section {
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.pref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  flex-wrap: wrap; /* narrow phones: wide segs (rest alerts) drop below the label */
+  padding: 10px 0;
+}
+.pref-row + .pref-row {
+  margin-top: 4px;
+}
+.pref-row > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.pref-label {
+  font-size: 14px;
+  color: var(--ink);
+}
+.pref-sub {
+  font-size: 12px;
+  color: var(--ink-dim);
+  margin-top: 2px;
+}
+.swatch-row {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.swatch {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch.on { border-color: var(--ink); }
+.swatch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---- progress pictures (Body Stats) ---------------------------------- */
+/* Thumbnail cell shared by the BodyView filmstrip and the gallery grid:
+   fixed 3/4 aspect + object-fit cover so unloaded images reserve their
+   box (no layout shift); soft rounded corners (Soft Ink). */
+.pp-thumb {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  flex: none;
+  width: 96px;
+}
+.pp-thumb img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  display: block;
+}
+/* Wrapper so the multi-angle badge can overlay the image. */
+.pp-thumb-imgwrap { position: relative; display: block; }
+.pp-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 2px 5px;
+  border-radius: var(--radius-badge);
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.pp-thumb:focus-visible img { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.pp-thumb-k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Gallery grid wraps/shrinks — the shell clips horizontal overflow, so
+   the grid must never rely on it. */
+.pp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+.pp-grid .pp-thumb { width: auto; }
+/* Lightbox image: fit within the sheet, never force page scroll. */
+.pp-detail-img {
+  width: 100%;
+  max-height: 60dvh;
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  display: block;
+}
+.pp-empty { display: grid; gap: 10px; justify-items: start; }
+/* Multi-angle capture slots (ProgressPhotoSheet): one tile per pose,
+   tap to fill; wraps on narrow screens (never overflow-scrolls). */
+.pp-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 8px;
+}
+
+/* Nutrition capture/review layout. Picker/control visuals come from
+   @rallypoint/ui; Fitness owns only the meal-specific arrangement. */
+.food-flow { display: grid; gap: 14px; }
+.food-photo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.food-meal-summary { display: grid; gap: 8px; padding: 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.food-meal-name { font-family: var(--font-display); font-size: 20px; color: var(--ink); }
+.food-meal-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
+.food-component-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 520px) { .food-photo-grid { grid-template-columns: 1fr; } }
+
+/* ── RPE picker (shares .fit-seg geometry; .fill = at-or-below value,
+   .on = the selected value itself) ─────────────────────────── */
+.rpe-seg { display: flex; gap: 4px; }
+.rpe-seg button { all: unset; box-sizing: border-box; flex: 1; text-align: center; cursor: pointer; padding: 9px 0; border-radius: var(--radius-md); background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); }
+.rpe-seg button.fill { background: var(--accent-soft); }
+.rpe-seg button.on { color: var(--acid); font-weight: 700; }
+
+/* ── Coarse-pointer tap floor (mirrors the kit rule in shell.css)
+   for fitness's local controls: block-header edit/remove, rest
+   adjusters, segmented controls, icon buttons ───────────────── */
+@media (any-pointer: coarse) {
+  .live-iconbtn, .mv-rm { width: var(--tap-min); height: var(--tap-min); }
+  .live-edit-toggle { min-height: var(--tap-min); }
+  .rest-adjust button, .fit-seg button, .rpe-seg button { min-height: var(--tap-min); }
+}
+
+/* --- /log dashboard: the split hero -----------------------------------
+   The two things this app is opened to do, side by side. Deliberately
+   NOT accent-bordered: `.wod-card` stays the only accent rail on this
+   screen, since that rail means "the one thing to do right now" and the
+   food tile is always relevant rather than scheduled. */
+.fit-hero-wrap { display: grid; gap: 10px; margin: 14px 0 18px; }
+.fit-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.fit-hero-tile {
+  display: grid;
+  justify-items: start;
+  /* Both tiles stretch to the taller one's height (grid default). Without
+     this the shorter tile's rows share out the slack and its content
+     drifts apart vertically — the two stop reading as a pair. */
+  align-content: start;
+  gap: 0;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+  padding: 14px 13px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  min-width: 0;
+  transition: background var(--dur-base) ease-out, transform var(--dur-fast) ease-out;
+}
+.fit-hero-tile:hover { background: var(--surface-2); }
+.fit-hero-tile:active { transform: scale(0.98); }
+.fit-hero-tile .puck {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-round);
+  background: color-mix(in srgb, var(--acid) 18%, transparent);
+  color: var(--acid);
+  margin-bottom: 10px;
+}
+.fit-hero-tile .eyebrow { font-size: 9px; letter-spacing: 0.14em; }
+/* A long session name ("Upper Strength Accessory") must not blow out the
+   narrow column — clamp to two lines rather than wrap the tile taller
+   than its twin. */
+.fit-hero-tile .v {
+  font-family: var(--font-display);
+  font-size: 19px;
+  line-height: 1.15;
+  color: var(--ink);
+  margin-top: 7px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.fit-hero-tile .u {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Today's food detail, under the tiles. */
+.fit-food-line { display: grid; gap: 6px; }
+/* The shared bar is sized for FoodPage's compact header corner; here it
+   spans the row. Scoped so that usage is untouched. */
+.fit-food-line .cal-progress { width: auto; margin-left: 0; margin-top: 0; }
+.fit-food-line .foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fit-food-line .macros {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.fit-food-line .diary {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--acid);
+}
+
+/* --- /log dashboard: the tile pickers ---------------------------------- */
+.fit-picker { display: grid; gap: 6px; }
+.fit-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  padding: 13px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink);
+  text-align: left;
+  transition: background var(--dur-base) ease-out, transform var(--dur-fast) ease-out;
+}
+.fit-picker-row:hover { background: color-mix(in srgb, var(--acid) 12%, var(--surface-2)); }
+.fit-picker-row:active { transform: scale(0.99); }
+.fit-picker-row .ico { display: inline-flex; color: var(--acid); flex: 0 0 auto; }
+.fit-picker-row .txt { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.fit-picker-row .nm { font-weight: 600; font-size: 14px; }
+.fit-picker-row .hint { font-size: 11.5px; color: var(--ink-mute); line-height: 1.35; }
+.fit-picker-row .go { display: inline-flex; color: var(--ink-mute); flex: 0 0 auto; }

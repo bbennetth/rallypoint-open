@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Button,
@@ -10,6 +10,7 @@ import {
   type TableColumn,
   type TableRow,
 } from '@rallypoint/ui'
+import { useAsync } from '@rallypoint/web-kit'
 import {
   ApiError,
   createEventTicket,
@@ -35,30 +36,38 @@ export function TicketsPage() {
   const { event } = useEventOutlet()
   const toast = useToast()
   const [tickets, setTickets] = useState<TicketDto[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [editing, setEditing] = useState<EditTarget | null>(null)
   const [confirmTarget, setConfirmTarget] = useState<TicketDto | null>(null)
   const [removing, setRemoving] = useState(false)
   const isEditor =
     event.viewer_role === 'owner' || event.viewer_role === 'editor'
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const page = await listEventTickets(event.id)
-      setTickets(page.items)
-      setLoadError(null)
-    } catch (err) {
-      setLoadError(err instanceof ApiError ? err.message : 'Failed to load tickets.')
-    } finally {
-      setLoading(false)
-    }
-  }, [event.id])
-
+  // Tickets are mutated locally (optimistic setTickets calls below) after
+  // create/patch/delete/restore, so `tickets` is a local mirror seeded from
+  // the load — not re-derived from ticketsLoad.data on every render.
+  const ticketsLoad = useAsync<TicketDto[]>(
+    () => listEventTickets(event.id).then((page) => page.items),
+    [event.id],
+  )
   useEffect(() => {
-    void load()
-  }, [load])
+    if (ticketsLoad.data) setTickets(ticketsLoad.data)
+  }, [ticketsLoad.data])
+  const loading = ticketsLoad.loading
+  const loadError = ticketsLoad.error
+    ? ticketsLoad.error instanceof ApiError
+      ? ticketsLoad.error.message
+      : 'Failed to load tickets.'
+    : null
+
+  // `priceCents`/`quantityNum`/`soldCount`/`sortOrderNum` aren't table
+  // columns — they're sort-only raw numeric keys carried on each row
+  // alongside the formatted display values (price/quantity/sold/sortOrder).
+  interface RawSortFields {
+    priceCents?: number
+    quantityNum?: number | null
+    soldCount?: number
+    sortOrderNum?: number
+  }
 
   const columns: TableColumn<SortKey>[] = [
     { key: 'name', header: 'Tier', sortable: true, accessor: (r) => (r.name as string) ?? '' },
@@ -68,7 +77,7 @@ export function TicketsPage() {
       sortable: true,
       align: 'right',
       width: 110,
-      accessor: (r) => (r.priceCents as number) ?? 0,
+      accessor: (r) => (r as RawSortFields).priceCents ?? 0,
     },
     {
       key: 'quantity',
@@ -77,7 +86,7 @@ export function TicketsPage() {
       align: 'right',
       width: 110,
       accessor: (r) => {
-        const q = r.quantityNum
+        const q = (r as RawSortFields).quantityNum
         return typeof q === 'number' ? q : Number.POSITIVE_INFINITY
       },
     },
@@ -87,7 +96,7 @@ export function TicketsPage() {
       sortable: true,
       align: 'right',
       width: 80,
-      accessor: (r) => (r.soldCount as number) ?? 0,
+      accessor: (r) => (r as RawSortFields).soldCount ?? 0,
     },
     {
       key: 'sortOrder',
@@ -95,7 +104,7 @@ export function TicketsPage() {
       sortable: true,
       align: 'right',
       width: 70,
-      accessor: (r) => (r.sortOrderNum as number) ?? 0,
+      accessor: (r) => (r as RawSortFields).sortOrderNum ?? 0,
     },
     { key: 'actions', header: '', align: 'right', width: 160 },
   ]
@@ -188,11 +197,11 @@ export function TicketsPage() {
           <div
             className="p-3"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
-            <p className="text-sm text-white/80">{loadError}</p>
+            <p className="text-sm" style={{ color: 'var(--hot-text)' }}>{loadError}</p>
           </div>
         )}
 
@@ -212,9 +221,8 @@ export function TicketsPage() {
           />
         ) : (
           <div
+            className="pl-card"
             style={{
-              border: '1.5px solid var(--line)',
-              background: 'var(--surface)',
               padding: 4,
             }}
           >

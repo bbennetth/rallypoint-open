@@ -25,6 +25,14 @@ export interface UserInfo {
 
 export const TENANT_DEFAULT = 'rallypoint' as const
 
+// Reserved sentinel owner for system-owned resources (e.g. platform
+// events managed via the admin app). Shaped like a real user id so it
+// passes `user_<ulid>` guards, but no users row ever exists for it —
+// it cannot sign in, and id-api's batchLookupUsers resolves it
+// synthetically to the platform display name.
+export const SYSTEM_USER_ID: UserId = 'user_00000000000000000000000000'
+export const SYSTEM_USER_DISPLAY_NAME = 'Rallypoint'
+
 // Token prefix constants — referenced by every slice that issues
 // or validates one.
 export const TOKEN_PREFIXES = {
@@ -82,3 +90,8 @@ export * from './validators.js'
 export * from './avatar-constraints.js'
 export * from './avatar-geometry.js'
 export * from './file-type.js'
+export * from './timezone.js'
+
+// Data export/import (backup–restore) result contract, shared by the
+// Workers that build it and the web apps that render it.
+export type { ImportCounts, ImportWarning, ImportSummary } from './data-transfer.js'

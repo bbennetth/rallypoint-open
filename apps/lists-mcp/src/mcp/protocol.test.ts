@@ -8,6 +8,7 @@ function makeFakeClient(overrides: Partial<ListsClient> = {}): ListsClient {
     health: vi.fn(),
     listLists: vi.fn().mockResolvedValue([]),
     listItems: vi.fn().mockResolvedValue([]),
+    getItem: vi.fn().mockResolvedValue(null),
     listFieldDefs: vi.fn(),
     listStatuses: vi.fn().mockResolvedValue([]),
     listLabels: vi.fn(),
@@ -73,6 +74,30 @@ describe('handleMcpMessage', () => {
     expect(names).toContain('add_comment')
   })
 
+  it('tools/call list_lists skips planner-origin groups (RPL<->RPP separation, #675)', async () => {
+    // The filter lives HERE (MCP layer), not in lists-api's RPC core —
+    // planner-api resolves its personal scope through the same RPC, so a
+    // core-level filter broke Planner's shopping/notes/diary resolution.
+    const listLists = vi.fn().mockResolvedValue([{ id: 'lst_1', name: 'Groceries' }])
+    const ctx = makeCtx({
+      listGroups: vi.fn().mockResolvedValue([
+        { id: 'grp_user', name: 'My Stuff', origin: null, createdBy: 'user_test', createdAt: '2026-01-01' },
+        { id: 'grp_planner', name: 'Planner', origin: 'planner', createdBy: 'user_test', createdAt: '2026-01-02' },
+      ]),
+      listLists,
+    })
+    const res = await handleMcpMessage(
+      { jsonrpc: '2.0', method: 'tools/call', params: { name: 'list_lists', arguments: {} }, id: 40 },
+      ctx,
+    )
+    expect(res).not.toBeNull()
+    expect(listLists).toHaveBeenCalledTimes(1)
+    expect(listLists).toHaveBeenCalledWith(
+      { scopeType: 'list_group', scopeId: 'grp_user' },
+      'user_test',
+    )
+  })
+
   it('tools/call create_item calls createListItem with correct actor + args', async () => {
     const createListItem = vi.fn().mockResolvedValue({ id: 'lit_1', title: 'Buy milk' })
     const ctx = makeCtx({ createListItem })
@@ -97,7 +122,7 @@ describe('handleMcpMessage', () => {
     const fakeItem = { id: 'lit_42', listId: 'lst_x', title: 'Do thing' }
     const fakeComments = [{ id: 'cmt_1', body: 'hello' }]
     const ctx = makeCtx({
-      listItems: vi.fn().mockResolvedValue([fakeItem]),
+      getItem: vi.fn().mockResolvedValue(fakeItem),
       listComments: vi.fn().mockResolvedValue(fakeComments),
     })
     const res = await handleMcpMessage(
@@ -113,6 +138,50 @@ describe('handleMcpMessage', () => {
     const data = JSON.parse(text) as { id: string; comments: unknown[] }
     expect(data.id).toBe('lit_42')
     expect(data.comments).toHaveLength(1)
+  })
+
+  it('tools/call complete_item sets both completed and the terminal status id (#675)', async () => {
+    const updateListItem = vi.fn().mockResolvedValue({ id: 'lit_1', completed: true })
+    const ctx = makeCtx({
+      listStatuses: vi.fn().mockResolvedValue([
+        { id: 'lst_todo', category: 'todo', position: 0 },
+        { id: 'lst_done', category: 'done', position: 1 },
+      ]),
+      updateListItem,
+    })
+    await handleMcpMessage(
+      {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'complete_item', arguments: { listId: 'lst_abc', itemId: 'lit_1' } },
+        id: 6,
+      },
+      ctx,
+    )
+    expect(updateListItem).toHaveBeenCalledWith(
+      'lst_abc',
+      'lit_1',
+      { completed: true, statusId: 'lst_done' },
+      'user_test',
+    )
+  })
+
+  it('tools/call complete_item falls back to completed-only when the list has no custom statuses', async () => {
+    const updateListItem = vi.fn().mockResolvedValue({ id: 'lit_1', completed: true })
+    const ctx = makeCtx({
+      listStatuses: vi.fn().mockResolvedValue([]),
+      updateListItem,
+    })
+    await handleMcpMessage(
+      {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'complete_item', arguments: { listId: 'lst_abc', itemId: 'lit_1' } },
+        id: 7,
+      },
+      ctx,
+    )
+    expect(updateListItem).toHaveBeenCalledWith('lst_abc', 'lit_1', { completed: true }, 'user_test')
   })
 
   it('tools/call with unknown tool name returns isError: true', async () => {

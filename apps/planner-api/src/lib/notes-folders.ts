@@ -1,4 +1,4 @@
-import type { ListDto, ListItemDto } from '@rallypoint/lists-client'
+import type { DeletedListItemDto, ListDto, ListItemDto } from '@rallypoint/lists-client'
 
 // Pure helpers for the Planner notes-folders surface (#549). Folders are
 // multiple `notes`-type lists in the personal group; these decisions are
@@ -7,6 +7,7 @@ import type { ListDto, ListItemDto } from '@rallypoint/lists-client'
 // A note enriched with the id of the folder (notes list) it lives in, so the
 // UI can attribute + group notes even when fetching across all folders.
 export type NoteWithFolder = ListItemDto & { folderId: string }
+export type DeletedNoteWithFolder = DeletedListItemDto & { folderId: string }
 
 // Normalise a folder name for duplicate detection: trimmed + case-folded.
 // Two folders collide when their normalised names match.
@@ -35,5 +36,12 @@ export function defaultFolder(folders: ListDto[]): ListDto | null {
 
 // Tag a folder's items with its id for the cross-folder GET response.
 export function tagNotes(items: ListItemDto[], folderId: string): NoteWithFolder[] {
+  return items.map((it) => ({ ...it, folderId }))
+}
+
+export function tagDeletedNotes(
+  items: DeletedListItemDto[],
+  folderId: string,
+): DeletedNoteWithFolder[] {
   return items.map((it) => ({ ...it, folderId }))
 }

@@ -7,13 +7,17 @@ import {
 import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
+import { swSkipWaitingListener } from '@rallypoint/web-kit/sw'
 import { isCacheableImage } from './lib/swRoutes.js'
 
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: { url: string; revision: string | null }[]
 }
 
-self.skipWaiting()
+// Reload-to-update flow (#675): the new worker waits in `waiting` until
+// the app shell's useSwUpdatePrompt() → applyUpdate() posts SKIP_WAITING,
+// instead of blindly swapping the bundle under a running session.
+swSkipWaitingListener(self)
 clientsClaim()
 cleanupOutdatedCaches()
 

@@ -14,7 +14,8 @@
 #   DROP TABLE
 #   DROP COLUMN
 #   ALTER TABLE ... RENAME  (RENAME TO or RENAME COLUMN)
-#   ADD COLUMN ... NOT NULL  without a DEFAULT clause
+#   ALTER TABLE ... ADD [COLUMN] ... NOT NULL  without a DEFAULT clause
+#     (COLUMN optional — drizzle-kit's SQLite output omits it, #824)
 #
 # Any matching line fails the check (exit 1) unless it carries the
 # per-line opt-out comment:
@@ -32,13 +33,23 @@
 set -euo pipefail
 
 BASE_REF="${1:-origin/main}"
-MIGRATION_GLOB="packages/*/migrations/*.sql"
+# Both globs are scanned. CLAUDE.md and ARCHITECTURE.md advertise BOTH
+# locations as canonical migration paths:
+#   - packages/<scope>-db/migrations/   (drizzle-kit output for shared schemas)
+#   - apps/<app>-api/migrations/        (per-app migrations local to one Worker)
+# A previous version of this script only globbed packages/, so a destructive
+# migration committed under apps/<app>-api/migrations/ silently slipped past
+# the lint (false-clean) — audit E3 #21.
+MIGRATION_GLOBS=(
+  "packages/*/migrations/*.sql"
+  "apps/*/migrations/*.sql"
+)
 
 # ── Collect newly-added migration files ──────────────────────────────────────
 # git diff --name-only --diff-filter=A: only files with status A (Added)
 mapfile -t ADDED_FILES < <(
   git diff --name-only --diff-filter=A "${BASE_REF}...HEAD" \
-    -- "${MIGRATION_GLOB}" 2>/dev/null || true
+    -- "${MIGRATION_GLOBS[@]}" 2>/dev/null || true
 )
 
 if [[ ${#ADDED_FILES[@]} -eq 0 ]]; then
@@ -88,12 +99,30 @@ for FILE in "${ADDED_FILES[@]}"; do
       continue
     fi
 
-    # ADD COLUMN ... NOT NULL without a DEFAULT clause on the same line.
-    # This catches the most common mistake: a bare NOT NULL column added to
-    # an existing table will fail on D1 if any rows exist.
-    if echo "$LINE" | grep -qiE '\bADD[[:space:]]+COLUMN\b.*\bNOT[[:space:]]+NULL\b'; then
+    # ALTER TABLE ... ADD [COLUMN] ... NOT NULL without a DEFAULT clause on the
+    # same line. This catches the most common mistake: a bare NOT NULL column
+    # added to an existing table fails on D1 if any rows exist.
+    #
+    # The COLUMN keyword is OPTIONAL (#824): drizzle-kit's SQLite output almost
+    # always omits it (`ALTER TABLE \`t\` ADD \`c\` integer NOT NULL`), and the
+    # old regex — which required the literal `ADD COLUMN` — let that whole class
+    # slip through. Anchoring on `ALTER TABLE` keeps a CREATE TABLE line (or a
+    # column literally named `add`) from false-matching, and the second grep
+    # excludes table-level ADDs (CONSTRAINT/PRIMARY/UNIQUE/CHECK/FOREIGN), which
+    # aren't column adds.
+    #
+    # Limits (both fine for our SQLite/drizzle migrations, and consistent with
+    # the single-line assumption in the header disclaimer): the exclusion is a
+    # whole-line grep, so a line carrying BOTH an excluded clause and an
+    # unrelated bare column add would be spared — but drizzle emits one
+    # statement per line and SQLite's ALTER TABLE supports only ADD [COLUMN]
+    # (the excluded forms aren't valid SQLite and would fail at apply time
+    # first). Same-line `ALTER TABLE` is required, so a hand-written multi-line
+    # ADD isn't caught — the header already scopes this to single-line DDL.
+    if echo "$LINE" | grep -qiE '\bALTER[[:space:]]+TABLE\b.*\bADD\b([[:space:]]+COLUMN\b)?.*\bNOT[[:space:]]+NULL\b' \
+      && ! echo "$LINE" | grep -qiE '\bADD[[:space:]]+(CONSTRAINT|PRIMARY|UNIQUE|CHECK|FOREIGN)\b'; then
       if ! echo "$LINE" | grep -qiE '\bDEFAULT\b'; then
-        echo "  FAIL  ${FILE}:${LINE_NUM}: ADD COLUMN ... NOT NULL without DEFAULT"
+        echo "  FAIL  ${FILE}:${LINE_NUM}: ADD [COLUMN] ... NOT NULL without DEFAULT"
         echo "        ${LINE}"
         FINDINGS=$(( FINDINGS + 1 ))
         continue

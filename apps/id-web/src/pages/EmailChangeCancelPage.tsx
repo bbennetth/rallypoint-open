@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { AuthCard } from '../ui/AuthCard.js'
 import { Banner, Button } from '@rallypoint/ui'
 import { api } from '../api/client.js'
+import { useAsyncTask } from '@rallypoint/web-kit'
 
 // Cancel-email-change landing. The link comes via email to the
 // OLD address; the user might not be signed in on this device.
@@ -14,6 +15,7 @@ export function EmailChangeCancelPage() {
   const token = params.get('token') ?? ''
   const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle')
   const [message, setMessage] = useState<string | null>(null)
+  const run = useAsyncTask()
 
   const onSubmit = async (e?: FormEvent) => {
     e?.preventDefault()
@@ -23,16 +25,19 @@ export function EmailChangeCancelPage() {
       return
     }
     setStatus('submitting')
-    const res = await api.post<{ ok: true }>('/api/v1/ui/me/email-change/cancel', {
-      cancelToken: token,
+    await run(async (ctx) => {
+      const res = await api.post<{ ok: true }>('/api/v1/ui/me/email-change/cancel', {
+        cancelToken: token,
+      })
+      if (ctx.stale()) return
+      if (res.ok) {
+        setStatus('success')
+        setMessage(null)
+      } else {
+        setStatus('error')
+        setMessage(res.error.message)
+      }
     })
-    if (res.ok) {
-      setStatus('success')
-      setMessage(null)
-    } else {
-      setStatus('error')
-      setMessage(res.error.message)
-    }
   }
 
   useEffect(() => {
@@ -40,9 +45,13 @@ export function EmailChangeCancelPage() {
     // user's intent — the email they clicked said "click to cancel";
     // no second confirmation. onSubmit is not in the deps array
     // because it's a new closure every render and we DON'T want to
-    // re-fire the cancel on every state change.
+    // re-fire the cancel on every state change. `run` is stable, so
+    // it's safe to include (and StrictMode's double-mount / a token
+    // change re-firing the auto-cancel is exactly the race `run`
+    // guards against — the earlier resolution can't clobber the
+    // later one's state commit).
     if (token) void onSubmit()
-  }, [token])
+  }, [token, run])
 
   if (status === 'success') {
     return (

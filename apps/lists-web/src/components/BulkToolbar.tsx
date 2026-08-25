@@ -6,6 +6,8 @@ import {
   type GroupMemberDto,
   type ListStatusDto,
 } from '../lib/api.js'
+import { partitionBulkSelection, skippedNoticeText } from '../lib/bulk-selection.js'
+import { isTempId } from '../lib/offline/outbox-ops.js'
 import { CustomFieldsEditor } from './CustomFieldsEditor.js'
 
 type BulkAction =
@@ -28,6 +30,11 @@ interface BulkToolbarProps {
   statuses?: ListStatusDto[]
   onDone: () => void
   onError: (err: unknown) => void
+  // Fired with a plain human-readable notice (not an error) — e.g. when
+  // offline-created items are excluded from a bulk action. Routed through
+  // the same banner ListDetailPage already shows for onError so there's
+  // one notice surface, not a second bespoke UI element.
+  onNotice?: (message: string) => void
   onClear: () => void
 }
 
@@ -39,6 +46,7 @@ export function BulkToolbar({
   statuses,
   onDone,
   onError,
+  onNotice,
   onClear,
 }: BulkToolbarProps) {
   const [busy, setBusy] = useState(false)
@@ -49,11 +57,27 @@ export function BulkToolbar({
 
   async function run(action: BulkAction) {
     if (busy || selectedIds.length === 0) return
+    // Offline-created items still carry their client-minted tmp_… id until
+    // the outbox flushes and the server assigns a real one (#675). The bulk
+    // endpoint doesn't know that id, so excluding it here (rather than
+    // sending it and having the item silently revert once the real flush
+    // lands) is the only way the bulk action's outcome matches what the
+    // user sees settle.
+    const { synced, skipped } = partitionBulkSelection(action.itemIds, isTempId)
+    if (synced.length === 0) {
+      if (skipped.length > 0) onNotice?.(skippedNoticeText(skipped.length))
+      return
+    }
+    const scopedAction: BulkAction =
+      action.action === 'delete'
+        ? { action: 'delete', itemIds: synced }
+        : { action: 'update', itemIds: synced, patch: action.patch }
     setBusy(true)
     try {
-      await bulkItems(listId, action)
+      await bulkItems(listId, scopedAction)
       setSetFieldId(null)
       setStagedValue(undefined)
+      if (skipped.length > 0) onNotice?.(skippedNoticeText(skipped.length))
       onDone()
     } catch (err) {
       onError(err)

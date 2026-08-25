@@ -1,7 +1,15 @@
-import type { D1Database, ExecutionContext, Fetcher } from '@cloudflare/workers-types'
+/// <reference types="@cloudflare/workers-types" />
+import type { D1Database, ExecutionContext, Fetcher, Service } from '@cloudflare/workers-types'
+import type { IdRPC } from '@rallypoint/id-api'
+import type { ListsRPC } from '@rallypoint/lists-api'
+import type { EventsRPC } from '@rallypoint/events-api'
+import type { FitnessRPC } from '@rallypoint/fitness-api'
+import type { AiTracesRpc } from '@rallypoint/ai'
+import { createEventCapture, type CaptureEvent } from '@rallypoint/logger'
+import type { AiBinding } from './services/assist.js'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
-import { buildLogger, type Logger } from './logger.js'
+import { buildLoggerWithFlush, type Logger } from './logger.js'
 import { buildD1Repos, createDb } from './repos/d1/index.js'
 import { buildServices } from './services/index.js'
 import { runNotificationTick } from './lib/notifications.js'
@@ -15,11 +23,11 @@ import type { Services } from './services/types.js'
 //              non-/api paths; the Worker only handles /api/*
 //              (wrangler.toml `assets.run_worker_first`), so we never call
 //              ASSETS.fetch.
-//   - string vars/secrets (PLANNER_API_KEY, PLANNER_SESSION_KEY_V1,
-//     PLANNER_UI_ORIGIN, RPID_API_URL, LISTS_API_URL, EVENTS_API_URL, …)
+//   - string vars/secrets (PLANNER_SESSION_KEY_V1, PLANNER_UI_ORIGIN, …)
 //     that feed parseEnv.
 //
-// planner is a BFF: it proxies lists/events/RPID over HTTP. It has NO
+// planner is a BFF: it proxies lists/events/fitness/RPID via typed RPC
+// bindings. It has NO
 // realtime/Durable Object and NO object store. As the owner of its own push
 // notifications (each app owns its notifications), it DOES carry two infra
 // tables (push_subscriptions, scheduled_notifications) and a `scheduled` cron
@@ -29,20 +37,29 @@ import type { Services } from './services/types.js'
 interface WorkerEnv {
   DB: D1Database
   ASSETS?: Fetcher
-  // Cloudflare service bindings to the same-account producers
-  // (wrangler.toml [[env.<env>.services]]): RPID -> rallypoint-id-<env>,
-  // LISTS -> rallypoint-lists-<env>, EVENTS -> rallypoint-events-<env>.
-  // Present only in deployed envs; absent in local `wrangler dev`, where
-  // buildServices falls back to global fetch.
-  RPID?: Fetcher
-  LISTS?: Fetcher
-  EVENTS?: Fetcher
+  // Typed RPC bindings to the same-account producers (PR 2 of
+  // feat/rpc-bindings). The fetch-style fallback path is gone — services
+  // call binding methods directly.
+  RPID?: Service<IdRPC>
+  LISTS?: Service<ListsRPC>
+  EVENTS?: Service<EventsRPC>
+  FITNESS?: Service<FitnessRPC>
+  // AI Assist (routes/assist.ts): Workers AI binding + ai-api trace corpus.
+  // Read off `c.env` in the route rather than the Services bag. Absent AI →
+  // the assist route 503s; absent AI_TRACES → assist runs untraced.
+  AI?: AiBinding
+  AI_TRACES?: AiTracesRpc
   [key: string]: unknown
 }
 
 interface Deps {
   env: Env
   logger: Logger
+  // Drains the PostHog log-sink buffer (info+ PostHog Logs forwarding).
+  flushLogs: () => Promise<void>
+  // Named-event capture for semantic push-delivery events. No-op when
+  // POSTHOG_KEY is unset (dev/FOSS).
+  captureEvent: CaptureEvent
   repos: Repos
   services: Services
 }
@@ -62,21 +79,24 @@ function ensureDeps(env: WorkerEnv): Deps {
     if (typeof v === 'string') vars[k] = v
   }
   const parsed = parseEnv(vars as NodeJS.ProcessEnv)
-  const logger = buildLogger(parsed)
-  // Bind each service-binding fetcher when present (deployed envs); else
-  // undefined so buildServices uses the global fetch (local dev).
-  const rpidFetch = env.RPID ? (env.RPID.fetch.bind(env.RPID) as unknown as typeof fetch) : undefined
-  const listsFetch = env.LISTS
-    ? (env.LISTS.fetch.bind(env.LISTS) as unknown as typeof fetch)
-    : undefined
-  const eventsFetch = env.EVENTS
-    ? (env.EVENTS.fetch.bind(env.EVENTS) as unknown as typeof fetch)
-    : undefined
+  const { logger, flushLogs } = buildLoggerWithFlush(parsed)
+  const captureEvent = createEventCapture({
+    apiKey: parsed.POSTHOG_KEY,
+    host: parsed.POSTHOG_HOST,
+    service: 'rallypoint-planner',
+  })
   deps = {
     env: parsed,
     logger,
+    flushLogs,
+    captureEvent,
     repos: buildD1Repos(createDb(env.DB)),
-    services: buildServices(parsed, { rpidFetch, listsFetch, eventsFetch }),
+    services: buildServices(parsed, {
+      ...(env.RPID ? { rpid: env.RPID } : {}),
+      ...(env.LISTS ? { lists: env.LISTS } : {}),
+      ...(env.EVENTS ? { events: env.EVENTS } : {}),
+      ...(env.FITNESS ? { fitness: env.FITNESS } : {}),
+    }),
   }
   return deps
 }
@@ -88,6 +108,7 @@ export default {
       app = buildApp({
         env: d.env,
         logger: d.logger,
+        flushLogs: d.flushLogs,
         repos: d.repos,
         services: d.services,
       })
@@ -96,19 +117,36 @@ export default {
   },
 
   // Cron Trigger (wrangler.toml [triggers].crons, every minute) — drain the
-  // due push notifications and deliver them via Web Push. Idempotent and
-  // racy-safe: each row is marked sent once delivered, so overlapping ticks
-  // don't double-send the same notification to the same device twice in a way
-  // that matters (a row already sent drops out of listDue).
+  // due push notifications and deliver them via Web Push. Racy-safe: each row
+  // is atomically claimed (sent_at CAS) BEFORE its send, so when a slow tick
+  // overruns the minute and the next tick starts, the second tick loses the
+  // claim on any in-flight row and skips it — no double-send.
   async scheduled(_event: unknown, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
     const d = ensureDeps(env)
     ctx.waitUntil(
-      runNotificationTick(d.repos, d.services.webPush, new Date()).then(
-        (result) => {
-          if (result.due > 0) d.logger.info(result, 'notification tick')
-        },
-        (err: unknown) => d.logger.error({ err }, 'notification tick failed'),
-      ),
+      runNotificationTick(d.repos, d.services.webPush, new Date())
+        .then(
+          (result) => {
+            const { events, ...summary } = result
+            if (summary.due > 0) d.logger.info(summary, 'notification tick')
+            // Per-user delivery outcomes → PostHog, attributed to the real
+            // user (personProfile) so push health shows up in funnels.
+            const sends = events.map((e) =>
+              d.captureEvent(e.name, e.userId, e.properties, { personProfile: true }),
+            )
+            // Aggregate tick summary under the synthetic service person.
+            if (summary.due > 0) {
+              sends.push(d.captureEvent('notification_tick', 'server:rallypoint-planner', summary))
+            }
+            return Promise.all(sends).then(() => undefined)
+          },
+          (err: unknown) => {
+            d.logger.error({ err }, 'notification tick failed')
+          },
+        )
+        // Drain the warn+ log buffer for the cron path (no request middleware
+        // runs here), plus the semantic events queued above.
+        .finally(() => d.flushLogs()),
     )
   },
 }

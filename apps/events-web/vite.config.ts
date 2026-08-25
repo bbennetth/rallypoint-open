@@ -32,12 +32,17 @@ export default defineConfig({
     VitePWA({
       // injectManifest: we ship a hand-written sw.ts (src/sw.ts) so the
       // SSE stream + identity endpoints can be excluded from caching —
-      // see src/lib/swRoutes.ts. autoUpdate: a new deploy takes over
-      // installed clients on next launch without a manual prompt.
+      // see src/lib/swRoutes.ts. registerType: 'prompt' (#675 reload-
+      // to-update): 'autoUpdate' would have vite-plugin-pwa's injected
+      // register script call updateServiceWorker(true) — i.e. send
+      // SKIP_WAITING — the instant a new build is found, mid-session.
+      // 'prompt' just registers; AppChrome's useSwUpdatePrompt() (see
+      // @rallypoint/web-kit/sw-update.ts) owns telling the waiting
+      // worker to activate, gated on the user accepting the reload.
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       injectRegister: 'auto',
       devOptions: { enabled: false },
       manifest: {
@@ -78,7 +83,11 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // 'hidden' emits .map files locally but DOES NOT append the
+    // sourceMappingURL footer to the bundle, so Cloudflare Workers
+    // Assets won't serve a publicly-discoverable map URL. DevTools can
+    // still load the map manually for debugging. Audit E1 #10.
+    sourcemap: 'hidden',
   },
   test: {
     environment: 'jsdom',

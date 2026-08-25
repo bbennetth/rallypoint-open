@@ -57,15 +57,9 @@ interface FakeLists {
   // the legacy multi-list state the merge folds in. `createdAt` is overridable
   // so tests can control which list is the oldest (canonical).
   seedTaskListForActor(actor: string, opts?: { name?: string; createdAt?: string }): string
-  // Low-level seeders used by the merge tests to plant items / series / field
-  // defs on a specific (typically non-canonical) list.
+  // Plant a one-off item directly on a list (used by the opt-in pagination tests).
   seedItem(listId: string, over?: Partial<ListItemDto>): string
-  seedSeriesWithOccurrence(listId: string, over?: Partial<ListItemSeriesDto>): string
-  seedFieldDef(listId: string, over: Partial<FieldDefDto> & { label: string }): string
   listsSnapshot(): ListDto[]
-  itemsSnapshot(): ListItemDto[]
-  seriesSnapshot(): ListItemSeriesDto[]
-  fieldDefsSnapshot(): FieldDefDto[]
 }
 
 function isoNow(): string {
@@ -253,6 +247,23 @@ function makeFakeLists(): FakeLists {
       calls.push({ method: 'listItems', args: [listId] })
       return items.filter((i) => i.listId === listId)
     },
+    listItemsPage: async (listId, actor, page) => {
+      calls.push({ method: 'listItemsPage', actor, args: [listId, page] })
+      const all = items
+        .filter((i) => i.listId === listId)
+        .sort(
+          (a, b) =>
+            a.position - b.position ||
+            a.createdAt.localeCompare(b.createdAt) ||
+            a.id.localeCompare(b.id),
+        )
+      // Fake cursor = the boundary item id (a stand-in for lists-api's opaque token).
+      const start = page?.cursor ? all.findIndex((i) => i.id === page.cursor) + 1 : 0
+      const limit = page?.limit ?? 100
+      const slice = all.slice(start, start + limit)
+      const hasMore = start + limit < all.length
+      return { items: slice, nextCursor: hasMore && slice.length ? slice[slice.length - 1]!.id : null }
+    },
     createList: async (input, actor) => {
       calls.push({ method: 'createList', actor, args: [input] })
       if (input.scopeType === 'list_group' && !ownsGroup(actor, input.scopeId)) {
@@ -328,6 +339,14 @@ function makeFakeLists(): FakeLists {
       const idx = lists.findIndex((l) => l.id === listId)
       if (idx === -1) throw new ListsClientError(404, 'not_found', 'List not found.')
       lists.splice(idx, 1)
+    },
+    // Recording stub: the fold mechanics now live server-side in lists-api's
+    // mergeListsCore (tested there against real repos — rpc-core-merge*.test).
+    // Planner's job is only to CALL mergeLists with policy-correct args, so the
+    // planner suite asserts the recorded (target, sources, actor), not effects.
+    mergeLists: async (targetListId, sourceListIds, actor) => {
+      calls.push({ method: 'mergeLists', actor, args: [targetListId, sourceListIds] })
+      return { fieldDefsCreated: 0, seriesMoved: 0, itemsMoved: 0 }
     },
   }
 
@@ -503,73 +522,7 @@ function makeFakeLists(): FakeLists {
       items.push(it)
       return it.id
     },
-    seedSeriesWithOccurrence(listId, over = {}) {
-      const s: ListItemSeriesDto = {
-        id: `lse_seed_${series.length + 1}`,
-        listId,
-        title: 'Seeded series',
-        notes: null,
-        assignedTo: null,
-        priority: null,
-        freq: 'weekly',
-        interval: 1,
-        byDay: ['MO'],
-        dtstart: '2026-06-08',
-        until: null,
-        count: 4,
-        timeOfDay: null,
-        createdBy: 'system',
-        createdAt: isoNow(),
-        updatedAt: isoNow(),
-        ...over,
-      }
-      series.push(s)
-      // One materialized occurrence carrying the seriesId.
-      items.push({
-        id: `lit_occ_${items.length + 1}`,
-        listId,
-        title: s.title,
-        notes: null,
-        assignedTo: null,
-        completed: false,
-        completedAt: null,
-        status: 'todo',
-        statusId: null,
-        parentId: null,
-        priority: s.priority ?? 'medium',
-        dueDate: s.dtstart,
-        position: items.length,
-        customFields: {},
-        seriesId: s.id,
-        createdBy: 'system',
-        createdAt: isoNow(),
-        updatedAt: isoNow(),
-      })
-      return s.id
-    },
-    seedFieldDef(listId, over) {
-      const d: FieldDefDto = {
-        id: `lfd_seed_${fieldDefs.length + 1}`,
-        listId,
-        key: over.label.toLowerCase().replace(/\s+/g, '_'),
-        label: over.label,
-        fieldType: over.fieldType ?? 'text',
-        options: over.options ?? {},
-        required: over.required ?? false,
-        defaultValue: null,
-        position: fieldDefs.length,
-        createdBy: 'system',
-        createdAt: isoNow(),
-        updatedAt: isoNow(),
-        ...over,
-      }
-      fieldDefs.push(d)
-      return d.id
-    },
     listsSnapshot: () => lists.map((l) => ({ ...l })),
-    itemsSnapshot: () => items.map((i) => ({ ...i })),
-    seriesSnapshot: () => series.map((s) => ({ ...s })),
-    fieldDefsSnapshot: () => fieldDefs.map((d) => ({ ...d })),
   }
 }
 
@@ -630,6 +583,7 @@ describe('D1 integration — Planner Task Lists BFF', () => {
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       ...extra,
     }
   }
@@ -740,6 +694,87 @@ describe('D1 integration — Planner Task Lists BFF', () => {
       { headers: headers(bearer) },
     )
     expect((await listItems.json()) as ListItemDto[]).toEqual([])
+  })
+
+  it('opt-in pagination: no params → array; ?limit/?cursor → {items, next_cursor}', async () => {
+    const bearer = await loginAs('user_pager')
+    const listId = fake.seedTaskListForActor('user_pager', { name: 'Chores' })
+    for (let i = 0; i < 3; i++) fake.seedItem(listId, { title: `t${i}`, position: i })
+
+    // No paging params → legacy whole array (planner-web's shape).
+    const arrRes = await app.request(`http://localhost/api/v1/ui/lists/${listId}/items`, {
+      headers: headers(bearer),
+    })
+    const arr = (await arrRes.json()) as ListItemDto[]
+    expect(Array.isArray(arr)).toBe(true)
+    expect(arr).toHaveLength(3)
+
+    // Paging params → unified paged shape; walk to next_cursor: null.
+    const seen: string[] = []
+    let cursor: string | null = null
+    let guard = 0
+    do {
+      const url: string = `http://localhost/api/v1/ui/lists/${listId}/items?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const res = await app.request(url, { headers: headers(bearer) })
+      const body = (await res.json()) as { items: ListItemDto[]; next_cursor: string | null }
+      expect(Array.isArray(body.items)).toBe(true)
+      for (const it of body.items) seen.push(it.id)
+      cursor = body.next_cursor
+    } while (cursor && ++guard < 10)
+    expect(cursor).toBeNull()
+    expect(new Set(seen).size).toBe(3)
+    // The BFF used the paged SDK method when params were present.
+    expect(fake.calls.some((c) => c.method === 'listItemsPage')).toBe(true)
+  })
+
+  it('rejects an out-of-range limit with 400 (opt-in paging validates)', async () => {
+    const bearer = await loginAs('user_pager_bad')
+    const listId = fake.seedTaskListForActor('user_pager_bad', { name: 'Chores' })
+    const res = await app.request(`http://localhost/api/v1/ui/lists/${listId}/items?limit=0`, {
+      headers: headers(bearer),
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it('forwards a client-supplied ref (offline outbox idempotency key) to the Lists SDK', async () => {
+    const bearer = await loginAs('user_ref_task')
+    const listId = fake.seedTaskListForActor('user_ref_task', { name: 'Chores' })
+
+    const createRes = await app.request(
+      `http://localhost/api/v1/ui/lists/${listId}/items`,
+      {
+        method: 'POST',
+        headers: headers(bearer, { 'content-type': 'application/json' }),
+        body: JSON.stringify({ title: 'Take out trash', ref: 'tmp_task_abc123' }),
+      },
+    )
+    expect(createRes.status).toBe(201)
+    const call = fake.calls.find((c) => c.method === 'createListItem' && c.actor === 'user_ref_task')
+    expect(call?.args[1]).toMatchObject({ ref: 'tmp_task_abc123' })
+  })
+
+  it('forwards a client-supplied ref on series create to the Lists SDK', async () => {
+    const bearer = await loginAs('user_ref_series')
+    const listId = await createList(bearer, 'Habits')
+
+    const res = await app.request(`http://localhost/api/v1/ui/lists/${listId}/series`, {
+      method: 'POST',
+      headers: headers(bearer, { 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        title: 'Stretch',
+        freq: 'weekly',
+        interval: 1,
+        byDay: ['MO'],
+        dtstart: '2026-06-08',
+        count: 4,
+        ref: 'tmp_series_abc123',
+      }),
+    })
+    expect(res.status).toBe(201)
+    const call = fake.calls.find(
+      (c) => c.method === 'createListItemSeries' && c.actor === 'user_ref_series',
+    )
+    expect(call?.args[1]).toMatchObject({ ref: 'tmp_series_abc123' })
   })
 
   it('GET items leaves a one-off task’s genuine timed instant untouched in any tz', async () => {
@@ -1182,13 +1217,26 @@ describe('D1 integration — Planner Task Lists BFF', () => {
 
   // --- single-list merge (#543) ------------------------------------------
   // GET /lists resolves the single canonical Tasks list and folds any legacy
-  // extra task lists into it. These tests drive the merge end-to-end through
-  // the BFF + fake SDK: fresh user, multi-list fold-in (items + series +
-  // custom fields preserved), and idempotency.
+  // extra task lists into it. The fold MECHANICS (items/series/field-defs
+  // transplant, remap, idempotency) now live server-side in lists-api's
+  // mergeListsCore and are covered against real repos by rpc-core-merge*.test.
+  // Planner's job here is the POLICY + WIRING: pick the canonical target +
+  // the non-canonical task sources (excluding notes/shopping/chores/diary,
+  // unit-tested in personal-scope.test.ts) and call mergeLists with them.
 
-  it('merge: a multi-list user is folded into one canonical list, nothing lost', async () => {
+  function lastMergeCall(): { targetListId: string; sourceListIds: string[]; actor?: string } | null {
+    const call = [...fake.calls].reverse().find((c) => c.method === 'mergeLists')
+    if (!call) return null
+    return {
+      targetListId: call.args[0] as string,
+      sourceListIds: call.args[1] as string[],
+      actor: call.actor,
+    }
+  }
+
+  it('merge: GET /lists calls mergeLists with the canonical target + non-canonical task sources', async () => {
     const bearer = await loginAs('user_m1')
-    // Canonical = oldest task list; two extra lists to fold in.
+    // Canonical = oldest task list; two newer extra lists to fold in.
     const canonicalId = fake.seedTaskListForActor('user_m1', {
       name: 'Tasks',
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -1201,141 +1249,58 @@ describe('D1 integration — Planner Task Lists BFF', () => {
       name: 'Work',
       createdAt: '2026-03-01T00:00:00.000Z',
     })
-    fake.seedItem(canonicalId, { title: 'Already here' })
-    fake.seedItem(srcA, { title: 'Milk', priority: 'high' })
-    fake.seedItem(srcA, { title: 'Done thing', completed: true, status: 'done' })
-    fake.seedItem(srcB, { title: 'Report', dueDate: '2026-04-01' })
-    // A duplicate title across canonical and a source — merge keeps both.
-    fake.seedItem(srcB, { title: 'Already here' })
 
     const res = await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
     const rows = (await res.json()) as ListDto[]
+    // The BFF returns only the single canonical list.
     expect(rows).toHaveLength(1)
     expect(rows[0].id).toBe(canonicalId)
 
-    // All source items now live on the canonical list; sources are empty.
-    const canonItems = fake.itemsSnapshot().filter((i) => i.listId === canonicalId)
-    const titles = canonItems.map((i) => i.title).sort()
-    expect(titles).toEqual(['Already here', 'Already here', 'Done thing', 'Milk', 'Report'].sort())
-    expect(fake.itemsSnapshot().filter((i) => i.listId === srcA)).toHaveLength(0)
-    expect(fake.itemsSnapshot().filter((i) => i.listId === srcB)).toHaveLength(0)
+    // The fold is delegated to lists-api: one mergeLists call, canonical target,
+    // both newer task lists as sources (oldest-first), as this actor.
+    const merge = lastMergeCall()
+    expect(merge).not.toBeNull()
+    expect(merge!.targetListId).toBe(canonicalId)
+    expect(merge!.sourceListIds).toEqual([srcA, srcB])
+    expect(merge!.actor).toBe('user_m1')
 
-    // Field-level preservation: priority, dueDate, completion all survive.
-    expect(canonItems.find((i) => i.title === 'Milk')?.priority).toBe('high')
-    expect(canonItems.find((i) => i.title === 'Report')?.dueDate).toBe('2026-04-01')
-    expect(canonItems.find((i) => i.title === 'Done thing')?.completed).toBe(true)
-
-    // The source LIST rows remain (visible in the Lists app per #543).
+    // Planner never deletes the source LIST rows (they stay visible in Lists).
     const listIds = fake.listsSnapshot().map((l) => l.id)
     expect(listIds).toEqual(expect.arrayContaining([canonicalId, srcA, srcB]))
   })
 
-  it('merge: a recurring series on a source list is rebuilt on the canonical list', async () => {
-    const bearer = await loginAs('user_m2')
-    const canonicalId = fake.seedTaskListForActor('user_m2', {
-      name: 'Tasks',
-      createdAt: '2026-01-01T00:00:00.000Z',
-    })
-    const src = fake.seedTaskListForActor('user_m2', {
-      name: 'Habits',
-      createdAt: '2026-02-01T00:00:00.000Z',
-    })
-    fake.seedSeriesWithOccurrence(src, { title: 'Stretch', freq: 'weekly', byDay: ['MO', 'WE'], count: 4 })
-
-    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-
-    // The series now lives on the canonical list (rebuilt), and its occurrence
-    // items carry the NEW canonical series id. The source series is gone.
-    const canonSeries = fake.seriesSnapshot().filter((s) => s.listId === canonicalId)
-    expect(canonSeries).toHaveLength(1)
-    expect(canonSeries[0].title).toBe('Stretch')
-    expect(canonSeries[0].byDay).toEqual(['MO', 'WE'])
-    expect(fake.seriesSnapshot().filter((s) => s.listId === src)).toHaveLength(0)
-
-    const canonOccurrences = fake.itemsSnapshot().filter((i) => i.listId === canonicalId && i.seriesId)
-    expect(canonOccurrences.length).toBeGreaterThan(0)
-    expect(canonOccurrences.every((i) => i.seriesId === canonSeries[0].id)).toBe(true)
-    // Source list emptied of items + series.
-    expect(fake.itemsSnapshot().filter((i) => i.listId === src)).toHaveLength(0)
-  })
-
-  it('merge: differing custom-field defs are unified by (label, type) and item values remapped', async () => {
-    const bearer = await loginAs('user_m3')
-    const canonicalId = fake.seedTaskListForActor('user_m3', {
-      name: 'Tasks',
-      createdAt: '2026-01-01T00:00:00.000Z',
-    })
-    const src = fake.seedTaskListForActor('user_m3', {
-      name: 'Project',
-      createdAt: '2026-02-01T00:00:00.000Z',
-    })
-    // Canonical already has an "Effort" number field; source has its own
-    // "Effort" (same label+type → reused) plus a unique "Tag" text field.
-    const canonEffort = fake.seedFieldDef(canonicalId, { label: 'Effort', fieldType: 'number' })
-    const srcEffort = fake.seedFieldDef(src, { label: 'Effort', fieldType: 'number' })
-    const srcTag = fake.seedFieldDef(src, { label: 'Tag', fieldType: 'text' })
-    fake.seedItem(src, {
-      title: 'Design',
-      customFields: { [srcEffort]: 5, [srcTag]: 'ui' },
-    })
-
-    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-
-    // Canonical defs: the reused Effort (one only — not duplicated) + a new Tag.
-    const canonDefs = fake.fieldDefsSnapshot().filter((d) => d.listId === canonicalId)
-    const effortDefs = canonDefs.filter((d) => d.label === 'Effort' && d.fieldType === 'number')
-    expect(effortDefs).toHaveLength(1) // not duplicated
-    expect(effortDefs[0].id).toBe(canonEffort)
-    const tagDef = canonDefs.find((d) => d.label === 'Tag')
-    expect(tagDef).toBeTruthy()
-
-    // The moved item's customFields are remapped to the canonical def ids.
-    const moved = fake.itemsSnapshot().find((i) => i.listId === canonicalId && i.title === 'Design')
-    expect(moved?.customFields[canonEffort]).toBe(5)
-    expect(moved?.customFields[tagDef!.id]).toBe('ui')
-    // The stale source def ids must not leak into the canonical item.
-    expect(moved?.customFields[srcEffort]).toBeUndefined()
-    expect(moved?.customFields[srcTag]).toBeUndefined()
-  })
-
-  it('merge is idempotent: running GET /lists twice does not duplicate items', async () => {
-    const bearer = await loginAs('user_m4')
-    const canonicalId = fake.seedTaskListForActor('user_m4', {
-      name: 'Tasks',
-      createdAt: '2026-01-01T00:00:00.000Z',
-    })
-    const src = fake.seedTaskListForActor('user_m4', {
-      name: 'Extra',
-      createdAt: '2026-02-01T00:00:00.000Z',
-    })
-    fake.seedItem(src, { title: 'A' })
-    fake.seedItem(src, { title: 'B' })
-
-    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-    const afterFirst = fake.itemsSnapshot().filter((i) => i.listId === canonicalId).map((i) => i.title).sort()
-    expect(afterFirst).toEqual(['A', 'B'])
-
-    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
-    const afterSecond = fake.itemsSnapshot().filter((i) => i.listId === canonicalId).map((i) => i.title).sort()
-    // No duplication on the second pass.
-    expect(afterSecond).toEqual(['A', 'B'])
-  })
-
-  it('merge: notes + shopping lists are never treated as task sources', async () => {
+  it('merge: notes lists are never passed as task sources (planner policy)', async () => {
     const bearer = await loginAs('user_m5')
     const canonicalId = fake.seedTaskListForActor('user_m5', {
       name: 'Tasks',
       createdAt: '2026-01-01T00:00:00.000Z',
     })
-    // Seed a notes list (under the same legacy-named personal group) with an item.
+    const extraTaskId = fake.seedTaskListForActor('user_m5', {
+      name: 'Errands',
+      createdAt: '2026-02-01T00:00:00.000Z',
+    })
+    // A notes list under the same personal group must NOT become a merge source.
     const notesId = fake.seedNotesListForActor('user_m5')
-    fake.seedItem(notesId, { title: 'a private note' })
 
     await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
 
-    // The note stays on the notes list; it is NOT folded into Tasks.
-    expect(fake.itemsSnapshot().filter((i) => i.listId === notesId)).toHaveLength(1)
-    expect(fake.itemsSnapshot().filter((i) => i.listId === canonicalId)).toHaveLength(0)
+    const merge = lastMergeCall()
+    expect(merge).not.toBeNull()
+    expect(merge!.targetListId).toBe(canonicalId)
+    expect(merge!.sourceListIds).toEqual([extraTaskId])
+    expect(merge!.sourceListIds).not.toContain(notesId)
+  })
+
+  it('merge: a single-list user triggers no mergeLists call', async () => {
+    const bearer = await loginAs('user_m6')
+    fake.seedTaskListForActor('user_m6', {
+      name: 'Tasks',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    await app.request('http://localhost/api/v1/ui/lists', { headers: headers(bearer) })
+
+    expect(fake.calls.some((c) => c.method === 'mergeLists')).toBe(false)
   })
 
   // --- RPL↔RPP separation (#531): no shared lists in Planner ----------

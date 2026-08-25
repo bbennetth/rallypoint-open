@@ -4,6 +4,7 @@ import { AuthCard } from '../ui/AuthCard.js'
 import { Banner, Button, Field } from '@rallypoint/ui'
 import { Turnstile } from '../ui/Turnstile.js'
 import { api } from '../api/client.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 export function PasswordResetRequestPage() {
   const [email, setEmail] = useState('')
@@ -33,6 +34,7 @@ export function PasswordResetRequestPage() {
       setFormError(res.error.message)
       return
     }
+    captureEvent('password_reset_requested')
     setSubmitted(true)
   }
 

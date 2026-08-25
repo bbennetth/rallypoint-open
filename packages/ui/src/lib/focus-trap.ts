@@ -27,7 +27,11 @@ export function nextFocusAfterTrap(
 ): HTMLElement | null {
   const nodes = Array.from(
     container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ).filter((n) => n.offsetParent !== null) // skip display:none / visibility:hidden
+  ).filter(
+    // offsetParent is null for display:none, but visibility:hidden
+    // elements keep their offsetParent — check computed style too.
+    (n) => n.offsetParent !== null && getComputedStyle(n).visibility !== 'hidden',
+  )
   if (nodes.length === 0) return null
   if (current === null || !container.contains(current)) {
     return direction === 'forward' ? nodes[0]! : nodes[nodes.length - 1]!

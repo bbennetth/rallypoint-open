@@ -1,6 +1,6 @@
 import { asc, eq } from 'drizzle-orm'
 import { expenseCategories } from '@rallypoint/money-db'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
 import type {
   CreateExpenseCategoryInput,

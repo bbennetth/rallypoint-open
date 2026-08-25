@@ -25,25 +25,9 @@ export const SendChatSchema = z.object({
 })
 export type SendChatBody = z.infer<typeof SendChatSchema>
 
-// List/pagination query for GET .../chat. `before` is a message id to
-// page backwards from (load-older); absent → newest page. `limit` is
-// clamped into [1, 100], defaulting to 50 — a malformed/out-of-range
-// value falls back rather than 400ing a read.
-export const chatListQuery = z.object({
-  before: z
-    .string()
-    .trim()
-    .min(1)
-    .max(64)
-    .optional()
-    .catch(undefined),
-  limit: z.coerce
-    .number()
-    .int()
-    .catch(CHAT_PAGE_DEFAULT)
-    .default(CHAT_PAGE_DEFAULT)
-    // Clamp into range rather than reject: an over-large limit is capped,
-    // not 400'd.
-    .transform((n) => Math.min(Math.max(n, 1), CHAT_PAGE_MAX)),
-})
-export type ChatListQuery = z.infer<typeof chatListQuery>
+// GET .../chat pagination now uses the shared api-kit toolkit at the route:
+// `paginationQuery({ defaultLimit: CHAT_PAGE_DEFAULT, maxLimit: CHAT_PAGE_MAX,
+// mode: 'clamp' })` for the tolerant limit, and an opaque cursor codec
+// (apps/events-api/src/lib/chat-cursor.ts) that also accepts the legacy bare
+// `before` message id. The old `chatListQuery` validator was retired with that
+// migration — the CHAT_PAGE_* constants above are still the source of truth.

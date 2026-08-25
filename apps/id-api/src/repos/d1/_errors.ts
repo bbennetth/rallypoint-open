@@ -1,4 +1,4 @@
-import { UniqueConstraintError } from '../memory.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 
 // Map D1/SQLite unique-violation errors to our typed
 // UniqueConstraintError. SQLite raises SQLITE_CONSTRAINT_UNIQUE with the

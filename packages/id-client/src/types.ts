@@ -36,3 +36,18 @@ export interface UserBatchEntry {
   last_name: string | null
   picture_url: string | null
 }
+
+// Error shape used by settings-related RPC error handling. Kept here
+// (rather than deleted with the retired fetch-based settings.ts) since
+// ~20 consumer apps import it to type their own RPC-based settings
+// error handling against the same `{status, code}` shape.
+export class SettingsError extends Error {
+  readonly status: number
+  readonly code: string
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'SettingsError'
+    this.status = status
+    this.code = code
+  }
+}

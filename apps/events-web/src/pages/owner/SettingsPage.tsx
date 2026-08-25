@@ -284,8 +284,8 @@ function DetailsSection({ event, onSaved }: { event: EventDto; onSaved: () => vo
         {error && (
           <div
             role="alert"
-            className="p-3 text-sm text-[color:var(--ink)]"
-            style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+            className="p-3 text-sm"
+            style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
           >
             {error}
           </div>
@@ -354,8 +354,7 @@ function FeaturesSection({ event, onSaved }: { event: EventDto; onSaved: () => v
           return (
             <li
               key={key}
-              className="flex items-center gap-3 p-3"
-              style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+              className="flex items-center gap-3 p-3 pl-card"
             >
               <div className="flex-1 space-y-0.5">
                 <p className="text-sm font-medium">{label}</p>
@@ -380,10 +379,11 @@ function FeaturesSection({ event, onSaved }: { event: EventDto; onSaved: () => v
       {error && (
         <div
           role="alert"
-          className="p-3 text-sm text-[color:var(--ink)]"
+          className="p-3 text-sm"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            color: 'var(--hot-text)',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           {error}

@@ -1,0 +1,1 @@
+CREATE INDEX `exercises_movement_pattern_idx` ON `exercises` (`movement_pattern`);

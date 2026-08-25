@@ -7,7 +7,7 @@
 // State-changing requests bootstrap a CSRF token (GET /csrf) and echo
 // it in X-RP-CSRF — the double-submit half the server checks.
 
-import { ApiError, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
+import { ApiError, captureEvent, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
 import type { SessionProfile } from '@rallypoint/web-kit'
 import { hydrateThemeFromServer } from '@rallypoint/ui'
 
@@ -229,7 +229,9 @@ export async function signout(): Promise<void> {
 // --- lists ----------------------------------------------------------
 
 export async function createList(input: CreateListInput): Promise<ListDto> {
-  return request<ListDto>('POST', '/api/v1/ui/lists', input)
+  const list = await request<ListDto>('POST', '/api/v1/ui/lists', input)
+  captureEvent('list_created', { list_type: input.listType, scope_type: input.scopeType })
+  return list
 }
 
 export async function getList(listId: string): Promise<ListDto> {
@@ -276,7 +278,9 @@ export async function createItem(
   listId: string,
   input: CreateListItemInput,
 ): Promise<ListItemDto> {
-  return request<ListItemDto>('POST', `/api/v1/ui/lists/${listId}/items`, input)
+  const item = await request<ListItemDto>('POST', `/api/v1/ui/lists/${listId}/items`, input)
+  captureEvent('list_item_added')
+  return item
 }
 
 export async function updateItem(
@@ -620,11 +624,13 @@ export async function createListInvite(
   listId: string,
   invitedEmail: string,
 ): Promise<ListInviteWithCode> {
-  return request<ListInviteWithCode>(
+  const invite = await request<ListInviteWithCode>(
     'POST',
     `/api/v1/ui/lists/${listId}/invites`,
     { invitedEmail },
   )
+  captureEvent('list_invite_created')
+  return invite
 }
 
 export async function listListInvites(listId: string): Promise<ListInviteCollection> {
@@ -639,7 +645,9 @@ export async function revokeListInvite(
 }
 
 export async function acceptListInvite(code: string): Promise<{ list_id: string }> {
-  return request<{ list_id: string }>('POST', '/api/v1/ui/lists/invites/accept', { code })
+  const res = await request<{ list_id: string }>('POST', '/api/v1/ui/lists/invites/accept', { code })
+  captureEvent('list_invite_accepted')
+  return res
 }
 
 export async function listListShares(listId: string): Promise<ListShareCollection> {

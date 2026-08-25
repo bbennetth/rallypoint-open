@@ -15,7 +15,17 @@ function hm(time: string | null | undefined): string {
   return m ? `${m[1]}:${m[2]}` : time
 }
 
-export function TodayAgenda({ day, max = 3 }: { day: GroupDayDto; max?: number }) {
+export function TodayAgenda({
+  day,
+  max = 3,
+  title = 'Up next',
+}: {
+  day: GroupDayDto
+  max?: number
+  // "Up next" only reads right on today's view. The Now tab passes a
+  // different heading when the picked day is further out.
+  title?: string
+}) {
   const entries: AgendaEntry[] = []
   for (const r of day.rallies) {
     if (r.status === 'cancelled') continue
@@ -52,11 +62,10 @@ export function TodayAgenda({ day, max = 3 }: { day: GroupDayDto; max?: number }
 
   return (
     <section
-      className="p-4"
-      style={{ border: '1px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 pl-card"
     >
       <h2 className="text-xs font-medium" style={{ color: 'var(--ink-mute)' }}>
-        Up next
+        {title}
       </h2>
       <ul className="mt-2 space-y-1">
         {visible.map((e) => (

@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:test'
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { ulid } from 'ulid'
 import type { Hono } from 'hono'
 import { parseEnv, type Env } from '../env.js'
@@ -9,12 +9,23 @@ import type { HonoApp } from '../context.js'
 import type { Repos } from '../repos/types.js'
 import type { Services } from '../services/types.js'
 import type {
-  BalanceDto,
-  EnsureGroupLedgerInput,
-  EnsureGroupLedgerResult,
-  ExpenseDto,
-  LedgerDto,
-} from '@rallypoint/money-client'
+  EventsMoneyBalanceDto as BalanceDto,
+  EventsMoneyExpenseDto as ExpenseDto,
+  EventsMoneyLedgerDto as LedgerDto,
+} from '../services/types.js'
+
+// Re-define the input/output shapes the test was importing from
+// @rallypoint/money-client; they're now redeclared from the narrowed
+// EventsMoneyClient surface so the test isn't tied to the old SDK
+// package's wire types (PR 2 of feat/rpc-bindings).
+type EnsureGroupLedgerInput = {
+  groupId: string
+  ownerUserId: string
+  name?: string
+  currency?: string
+  description?: string | null
+}
+type EnsureGroupLedgerResult = LedgerDto & { created: boolean }
 import { makeNoopMoneyClient, makeNoopListsClient, makeStubObjectStore } from './_test-services.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { encryptBearer } from '../crypto/encryption.js'
@@ -35,7 +46,7 @@ const CSRF = 'csrf_token_value_aaaaaaaaaaaaaaaaaaaaaaaaaa'
 const moneyHandlers: {
   ensureGroupLedger?: (input: EnsureGroupLedgerInput) => Promise<EnsureGroupLedgerResult>
   listLedgers?: (scope: { scopeType: 'group' | 'ledger_group' | 'personal'; scopeId: string }) => Promise<LedgerDto[]>
-  listExpenses?: (ledgerId: string) => Promise<ExpenseDto[]>
+  listExpenses?: (ledgerId: string, viewerUserId: string) => Promise<ExpenseDto[]>
   getBalances?: (ledgerId: string, viewerUserId: string) => Promise<BalanceDto>
 } = {}
 
@@ -47,8 +58,8 @@ function makeProxiedMoneyClient() {
       (moneyHandlers.ensureGroupLedger ?? noop.ensureGroupLedger)(input),
     listLedgers: async (scope: { scopeType: 'group' | 'ledger_group' | 'personal'; scopeId: string }) =>
       (moneyHandlers.listLedgers ?? noop.listLedgers)(scope),
-    listExpenses: async (ledgerId: string) =>
-      (moneyHandlers.listExpenses ?? noop.listExpenses)(ledgerId),
+    listExpenses: async (ledgerId: string, viewerUserId: string) =>
+      (moneyHandlers.listExpenses ?? noop.listExpenses)(ledgerId, viewerUserId),
     getBalances: async (ledgerId: string, viewerUserId: string) =>
       (moneyHandlers.getBalances ?? noop.getBalances)(ledgerId, viewerUserId),
   }
@@ -59,11 +70,25 @@ describe('D1 integration — groups + members + invites', () => {
   let envVars: Env
   let app: Hono<HonoApp>
 
+  // Stubbed id-service display names, keyed by userId — used to resolve
+  // display_name on the group detail member list and the group
+  // artist-favorites overlay. Unlisted ids resolve to no record.
+  let cannedDisplayNames: Record<string, string> = {}
+
   const services: Services = {
     idClient: {
       verifyRpidBearer: async (bearer: string) => ({ ok: true as const, userId: bearer }),
       signoutRpidBearer: async () => {},
-      batchLookupUsers: async () => [],
+      batchLookupUsers: async (userIds) =>
+        userIds
+          .filter((id) => cannedDisplayNames[id])
+          .map((id) => ({
+            userId: id,
+            email: `${id}@example.test`,
+            emailVerified: true,
+            displayName: cannedDisplayNames[id]!,
+            pictureUrl: null,
+          })),
     },
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
@@ -90,6 +115,12 @@ describe('D1 integration — groups + members + invites', () => {
     repos = buildD1Repos(createDb(env.DB))
     envVars = parseEnv({ NODE_ENV: 'test', LOG_LEVEL: 'fatal' })
     app = buildApp({ env: envVars, logger: undefined, repos, services })
+  })
+
+  // Keep the id-service stub order-independent: a test that sets no
+  // names must see none, not whatever the previous test left behind.
+  beforeEach(() => {
+    cannedDisplayNames = {}
   })
 
 
@@ -120,6 +151,7 @@ describe('D1 integration — groups + members + invites', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -146,7 +178,11 @@ describe('D1 integration — groups + members + invites', () => {
   it('rejects an unauthenticated group request', async () => {
     const res = await app.request('http://localhost/api/v1/ui/groups/join', {
       method: 'POST',
-      headers: { 'x-rp-csrf': CSRF, cookie: `${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}` },
+      headers: {
+        'x-rp-csrf': CSRF,
+        cookie: `${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
+        origin: envVars.EVENTS_UI_ORIGIN,
+      },
       body: JSON.stringify({ code: 'rpj_abc' }),
     })
     expect(res.status).toBe(401)
@@ -177,6 +213,47 @@ describe('D1 integration — groups + members + invites', () => {
     expect(activity.map((a) => a.eventType)).toContain('group.created')
   })
 
+  // The attendee shell reads these two off the group detail to label
+  // itself and to drive the per-event PWA head tags. They were added
+  // for the per-event install feature; the store field they feed was
+  // previously always null, which silently dead-ended that whole path —
+  // hence explicit coverage here.
+  it('returns the parent event name + app-icon flag on group detail', async () => {
+    const owner = `user_${Date.now()}_pev`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Harvest Moon Festival')
+
+    const created = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, {
+      name: 'Night Owls',
+    })
+    expect(created.status).toBe(201)
+    const groupId = ((await created.json()) as { id: string }).id
+
+    const before = await req(bearer, 'GET', `/api/v1/ui/groups/${groupId}`)
+    expect(before.status).toBe(200)
+    const beforeBody = (await before.json()) as Record<string, unknown>
+    expect(beforeBody.event_name).toBe('Harvest Moon Festival')
+    expect(beforeBody.event_has_app_icon).toBe(false)
+
+    // Set an app icon key on the parent event; the flag must flip. The
+    // key is written directly rather than via the upload route because
+    // this suite runs on a stub object store — what's under test here is
+    // the flag derivation on group detail, not the upload path (that's
+    // covered end-to-end against real R2 in pwa.d1.test.ts).
+    await repos.events.patch(eventId, {
+      publicPageConfig: {
+        enabled: false,
+        theme: { icon_image_key: `events/${eventId}/app-icon/01ABC.png` },
+      },
+    })
+
+    const after = await req(bearer, 'GET', `/api/v1/ui/groups/${groupId}`)
+    expect(after.status).toBe(200)
+    const afterBody = (await after.json()) as Record<string, unknown>
+    expect(afterBody.event_has_app_icon).toBe(true)
+    expect(afterBody.event_name).toBe('Harvest Moon Festival')
+  })
+
   it('409s on a duplicate group name within an event', async () => {
     const owner = `user_${Date.now()}_dup`
     const bearer = await loginAs(owner)
@@ -204,6 +281,169 @@ describe('D1 integration — groups + members + invites', () => {
     expect(body.items.every((i) => i.member_count === 1)).toBe(true)
     // The join code must not leak in the list.
     expect(body.items.every((i) => !('join_code' in i))).toBe(true)
+  })
+
+  // ── "my groups in this event" (the attendee Group tab) ────────────
+  // This endpoint is what makes a second group reachable. The event
+  // payload's `my_group_id` only ever carries the FIRST-joined group,
+  // so anything the list drops is invisible in the UI.
+
+  it('lists EVERY group the caller is in, not just the first-joined one', async () => {
+    const owner = `user_${Date.now()}_mg_all`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Two Groups Event')
+
+    await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'First Crew' })
+    await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Second Crew' })
+
+    const res = await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { items: Array<{ name: string; viewer_role: string }> }
+    expect(body.items.map((i) => i.name).sort()).toEqual(['First Crew', 'Second Crew'])
+    expect(body.items.every((i) => i.viewer_role === 'owner')).toBe(true)
+
+    // …while my_group_id still resolves to only the first one. That
+    // asymmetry is exactly why the list has to carry both.
+    const ids = await repos.groups.listUserGroupIdsByEvent(owner, [eventId])
+    expect(ids.size).toBe(1)
+  })
+
+  it("excludes groups in the event the caller hasn't joined", async () => {
+    const owner = `user_${Date.now()}_mg_ex_o`
+    const other = `user_${Date.now()}_mg_ex_x`
+    const ownerBearer = await loginAs(owner)
+    const otherBearer = await loginAs(other)
+    const eventId = await createEvent(ownerBearer, 'Private Groups Event')
+
+    const mine = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Mine' })
+    ).json()) as { id: string; join_code: string }
+    await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Not Mine' })
+
+    await req(otherBearer, 'POST', '/api/v1/ui/groups/join', { code: mine.join_code })
+
+    const res = await req(otherBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { items: Array<{ id: string; viewer_role: string }> }
+    expect(body.items).toHaveLength(1)
+    expect(body.items[0]!.id).toBe(mine.id)
+    expect(body.items[0]!.viewer_role).toBe('member')
+  })
+
+  // Joining by group code writes group_members + event_attendees but NOT
+  // event_members, so the event-role gate alone would 404 exactly the
+  // people whose groups this endpoint exists to list.
+  it('serves an attendee who joined by group code and has no event_members row', async () => {
+    const owner = `user_${Date.now()}_mg_cj_o`
+    const joiner = `user_${Date.now()}_mg_cj_j`
+    const ownerBearer = await loginAs(owner)
+    const joinerBearer = await loginAs(joiner)
+    const eventId = await createEvent(ownerBearer, 'Code Join Event')
+
+    const created = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Code Crew' })
+    ).json()) as { id: string; join_code: string }
+    await req(joinerBearer, 'POST', '/api/v1/ui/groups/join', { code: created.join_code })
+
+    // Precondition: the join really did not make them an event member.
+    expect(await repos.members.findByEventAndUser(eventId, joiner)).toBeNull()
+
+    const res = await req(joinerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { items: Array<{ id: string }> }
+    expect(body.items.map((i) => i.id)).toEqual([created.id])
+  })
+
+  it('404s a soft-removed attendee (event revocation closes their groups)', async () => {
+    const owner = `user_${Date.now()}_mg_rm_o`
+    const joiner = `user_${Date.now()}_mg_rm_j`
+    const ownerBearer = await loginAs(owner)
+    const joinerBearer = await loginAs(joiner)
+    const eventId = await createEvent(ownerBearer, 'Revoked Event')
+
+    const created = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Revoked Crew' })
+    ).json()) as { join_code: string }
+    await req(joinerBearer, 'POST', '/api/v1/ui/groups/join', { code: created.join_code })
+
+    const before = await req(joinerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(before.status).toBe(200)
+
+    await repos.attendees.softRemove(eventId, joiner, new Date())
+
+    const after = await req(joinerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(after.status).toBe(404)
+  })
+
+  // The removed_at check only runs on the group-membership-only arm now
+  // (a non-null event role means actorRole already applied it). This
+  // pins the other arm: an invited collaborator who is soft-removed but
+  // still holds group_members rows must still lose the list.
+  it('404s a soft-removed event member who still has group rows', async () => {
+    const owner = `user_${Date.now()}_mg_rm2_o`
+    const viewer = `user_${Date.now()}_mg_rm2_v`
+    const ownerBearer = await loginAs(owner)
+    const viewerBearer = await loginAs(viewer)
+    const eventId = await createEvent(ownerBearer, 'Revoked Member Event')
+
+    const invite = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/invites`, { role: 'viewer' })
+    ).json()) as { code: string }
+    await req(viewerBearer, 'POST', '/api/v1/ui/invites/accept', { code: invite.code })
+    await req(viewerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Revoked Member Crew' })
+
+    // They are a real event member, unlike the code-join case above.
+    expect(await repos.members.findByEventAndUser(eventId, viewer)).not.toBeNull()
+    const before = await req(viewerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(before.status).toBe(200)
+    expect(((await before.json()) as { items: unknown[] }).items).toHaveLength(1)
+
+    await repos.attendees.softRemove(eventId, viewer, new Date())
+
+    const after = await req(viewerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(after.status).toBe(404)
+  })
+
+  it('lets a soft-removed event OWNER still see their groups (exempt by identity)', async () => {
+    const owner = `user_${Date.now()}_mg_rm3_o`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Owner Exempt Event')
+    await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Owner Crew' })
+
+    // "Not attending" for an owner must not read as "no access".
+    await repos.attendees.upsert({ id: `eva_${ulid()}`, eventId, userId: owner })
+    await repos.attendees.softRemove(eventId, owner, new Date())
+
+    const res = await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { items: unknown[] }).items).toHaveLength(1)
+  })
+
+  it('404s a stranger with no event access and no groups', async () => {
+    const owner = `user_${Date.now()}_mg_st_o`
+    const stranger = `user_${Date.now()}_mg_st_s`
+    const ownerBearer = await loginAs(owner)
+    const strangerBearer = await loginAs(stranger)
+    const eventId = await createEvent(ownerBearer, 'Strangers Event')
+    await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Secret' })
+
+    const res = await req(strangerBearer, 'GET', `/api/v1/ui/events/${eventId}/groups`)
+    expect(res.status).toBe(404)
+  })
+
+  it('returns the parent event slug on group detail (link back to the Group tab)', async () => {
+    const owner = `user_${Date.now()}_mg_slug`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Slug Carrier')
+    const created = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Sluggers' })
+    ).json()) as { id: string }
+
+    const res = await req(bearer, 'GET', `/api/v1/ui/groups/${created.id}`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { event_slug: string | null }
+    const event = await repos.events.findById(eventId)
+    expect(body.event_slug).toBe(event!.slug)
   })
 
   it('lets another user join via the standing join code', async () => {
@@ -431,6 +671,112 @@ describe('D1 integration — groups + members + invites', () => {
     expect(activity.map((a) => a.eventType)).toContain('group.member_left')
   })
 
+  // #675: a sidekick may remove a plain member, but removing another
+  // sidekick (or the owner) still requires group ownership.
+  it('sidekick removes a plain member OK; sidekick removing sidekick/owner is forbidden', async () => {
+    const owner = `user_${Date.now()}_sk`
+    const sidekick = `${owner}_sidekick`
+    const otherSidekick = `${owner}_sidekick2`
+    const plain = `${owner}_plain`
+    const ownerBearer = await loginAs(owner)
+    const sidekickBearer = await loginAs(sidekick)
+    const otherSidekickBearer = await loginAs(otherSidekick)
+    const plainBearer = await loginAs(plain)
+    const eventId = await createEvent(ownerBearer, 'Group Sidekick Removal Event')
+    const group = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Sidekicks' })
+    ).json()) as { id: string; join_code: string }
+
+    await req(sidekickBearer, 'POST', '/api/v1/ui/groups/join', { code: group.join_code })
+    await req(otherSidekickBearer, 'POST', '/api/v1/ui/groups/join', { code: group.join_code })
+    await req(plainBearer, 'POST', '/api/v1/ui/groups/join', { code: group.join_code })
+    await req(ownerBearer, 'POST', `/api/v1/ui/groups/${group.id}/members/${sidekick}/role`, {
+      role: 'sidekick',
+    })
+    await req(ownerBearer, 'POST', `/api/v1/ui/groups/${group.id}/members/${otherSidekick}/role`, {
+      role: 'sidekick',
+    })
+
+    // Sidekick removes a plain member — allowed.
+    const removePlain = await req(
+      sidekickBearer,
+      'DELETE',
+      `/api/v1/ui/groups/${group.id}/members/${plain}`,
+    )
+    expect(removePlain.status).toBe(204)
+    expect(await repos.groupMembers.findByGroupAndUser(group.id, plain)).toBeNull()
+
+    // Sidekick removes another sidekick — forbidden.
+    const removeSidekick = await req(
+      sidekickBearer,
+      'DELETE',
+      `/api/v1/ui/groups/${group.id}/members/${otherSidekick}`,
+    )
+    expect(removeSidekick.status).toBe(403)
+    expect(await repos.groupMembers.findByGroupAndUser(group.id, otherSidekick)).not.toBeNull()
+
+    // Sidekick removes the owner — forbidden (also blocked by the
+    // owner-transfer guard, but the role check must reject it too).
+    const removeOwner = await req(
+      sidekickBearer,
+      'DELETE',
+      `/api/v1/ui/groups/${group.id}/members/${owner}`,
+    )
+    expect(removeOwner.status).toBe(409)
+
+    // Owner is unaffected: can still remove a sidekick.
+    const ownerRemovesSidekick = await req(
+      ownerBearer,
+      'DELETE',
+      `/api/v1/ui/groups/${group.id}/members/${otherSidekick}`,
+    )
+    expect(ownerRemovesSidekick.status).toBe(204)
+    expect(await repos.groupMembers.findByGroupAndUser(group.id, otherSidekick)).toBeNull()
+  })
+
+  it('GET /groups/:id/attendees returns only members of the caller\'s group, not the whole event roster', async () => {
+    const owner = `user_${Date.now()}_gscope`
+    const memberA = `${owner}_a`
+    const memberB = `${owner}_b`
+    const ownerBearer = await loginAs(owner)
+    const memberABearer = await loginAs(memberA)
+    const memberBBearer = await loginAs(memberB)
+    const eventId = await createEvent(ownerBearer, 'Group Scoped Attendees Event')
+    // attendees defaults off (#216); enable it so non-owner members
+    // can hit the group-attendees route at all.
+    await req(ownerBearer, 'PATCH', `/api/v1/ui/events/${eventId}`, {
+      features: { attendees: true },
+    })
+
+    const groupA = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Group A' })
+    ).json()) as { id: string; join_code: string }
+    const groupB = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Group B' })
+    ).json()) as { id: string; join_code: string }
+
+    // memberA joins group A; memberB joins group B. Both are event
+    // attendees (via the group-join attendee upsert), so the pre-fix
+    // bug (listForEvent with no group filter) would leak memberB into
+    // group A's attendee list and vice versa.
+    await req(memberABearer, 'POST', '/api/v1/ui/groups/join', { code: groupA.join_code })
+    await req(memberBBearer, 'POST', '/api/v1/ui/groups/join', { code: groupB.join_code })
+
+    const resA = await req(memberABearer, 'GET', `/api/v1/ui/groups/${groupA.id}/attendees`)
+    expect(resA.status).toBe(200)
+    const bodyA = (await resA.json()) as { items: Array<{ user_id: string }> }
+    const userIdsA = bodyA.items.map((i) => i.user_id).sort()
+    expect(userIdsA).toEqual([memberA].sort())
+    expect(userIdsA).not.toContain(memberB)
+
+    const resB = await req(memberBBearer, 'GET', `/api/v1/ui/groups/${groupB.id}/attendees`)
+    expect(resB.status).toBe(200)
+    const bodyB = (await resB.json()) as { items: Array<{ user_id: string }> }
+    const userIdsB = bodyB.items.map((i) => i.user_id).sort()
+    expect(userIdsB).toEqual([memberB].sort())
+    expect(userIdsB).not.toContain(memberA)
+  })
+
   it('transfers ownership and demotes the old owner to sidekick', async () => {
     const owner = `user_${Date.now()}_xfer`
     const successor = `${owner}_next`
@@ -498,6 +844,34 @@ describe('D1 integration — groups + members + invites', () => {
 
     const activity = await repos.activity.listForEvent(eventId)
     expect(activity.map((a) => a.eventType)).toContain('group.deleted')
+  })
+
+  it('group detail resolves member display names from RPID, null when unknown', async () => {
+    const owner = `user_${Date.now()}_gdn_o`
+    const joiner = `user_${Date.now()}_gdn_j`
+    const ownerBearer = await loginAs(owner)
+    const joinerBearer = await loginAs(joiner)
+    const eventId = await createEvent(ownerBearer, 'Group Names Event')
+    const created = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Named Crew' })
+    ).json()) as { id: string; join_code: string }
+    await req(joinerBearer, 'POST', '/api/v1/ui/groups/join', { code: created.join_code })
+
+    // The joiner has no RPID record here → display_name must be null
+    // rather than a stray id, so the UI can fall back on its own.
+    cannedDisplayNames = { [owner]: 'Owner Name' }
+
+    const res = await req(ownerBearer, 'GET', `/api/v1/ui/groups/${created.id}`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      members: Array<{ user_id: string; display_name: string | null }>
+    }
+    expect(body.members).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ user_id: owner, display_name: 'Owner Name' }),
+        expect.objectContaining({ user_id: joiner, display_name: null }),
+      ]),
+    )
   })
 
   it('404s a group detail for a user with no access (no existence leak)', async () => {
@@ -747,8 +1121,10 @@ describe('D1 integration — groups + members + invites', () => {
       },
     ]
     let calledFor: string | null = null
-    moneyHandlers.listExpenses = async (ledgerId) => {
+    let calledViewer: string | null = null
+    moneyHandlers.listExpenses = async (ledgerId, viewerUserId) => {
       calledFor = ledgerId
+      calledViewer = viewerUserId
       return [cannedExpense]
     }
     try {
@@ -759,6 +1135,8 @@ describe('D1 integration — groups + members + invites', () => {
       expect(res.status).toBe(200)
       const body = (await res.json()) as { items: Array<{ id: string; description: string }> }
       expect(calledFor).toBe('led_for_group')
+      // E1 #4 follow-up: events-api now passes session userId as viewerUserId.
+      expect(calledViewer).toBe(owner)
       expect(body.items).toHaveLength(1)
       expect(body.items[0]!.id).toBe('exp_test_1')
       expect(body.items[0]!.description).toBe('Test dinner')
@@ -911,6 +1289,79 @@ describe('D1 integration — groups + members + invites', () => {
     expect(editorAttendee).not.toBeNull()
   })
 
+  // ── viewer create (any attendee can start a group) ───────────────
+
+  it('viewer attendee can create a group and becomes its owner', async () => {
+    const owner = `user_${Date.now()}_vc_o`
+    const viewer = `user_${Date.now()}_vc_v`
+    const ownerBearer = await loginAs(owner)
+    const viewerBearer = await loginAs(viewer)
+    const eventId = await createEvent(ownerBearer, 'Viewer Create')
+    const invite = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/invites`, {
+        role: 'viewer',
+      })
+    ).json()) as { code: string }
+    await req(viewerBearer, 'POST', '/api/v1/ui/invites/accept', { code: invite.code })
+
+    const res = await req(viewerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, {
+      name: 'Viewer Started',
+    })
+    expect(res.status).toBe(201)
+    const group = (await res.json()) as { id: string; viewer_role: string; owner_user_id: string }
+    expect(group.viewer_role).toBe('owner')
+    expect(group.owner_user_id).toBe(viewer)
+
+    // Creator gets the group-owner member row; the attendee row from
+    // the invite-accept is upserted, not duplicated (removedAt clear).
+    const memberRow = await repos.groupMembers.findByGroupAndUser(group.id, viewer)
+    expect(memberRow?.role).toBe('owner')
+    const attendeeRow = await repos.attendees.findByEventAndUser(eventId, viewer)
+    expect(attendeeRow).not.toBeNull()
+    expect(attendeeRow?.removedAt).toBeNull()
+  })
+
+  it('a logged-in non-member cannot create a group (404, no existence leak)', async () => {
+    const owner = `user_${Date.now()}_vc_no_o`
+    const stranger = `user_${Date.now()}_vc_no_s`
+    const ownerBearer = await loginAs(owner)
+    const strangerBearer = await loginAs(stranger)
+    const eventId = await createEvent(ownerBearer, 'Members Only')
+
+    const res = await req(strangerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, {
+      name: 'Gatecrash',
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('group create is rate limited per user (11th in the window → 429)', async () => {
+    const owner = `user_${Date.now()}_vc_rl_o`
+    const viewer = `user_${Date.now()}_vc_rl_v`
+    const ownerBearer = await loginAs(owner)
+    const viewerBearer = await loginAs(viewer)
+    const eventId = await createEvent(ownerBearer, 'Rate Limited')
+    const invite = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/invites`, {
+        role: 'viewer',
+      })
+    ).json()) as { code: string }
+    await req(viewerBearer, 'POST', '/api/v1/ui/invites/accept', { code: invite.code })
+
+    for (let i = 0; i < 10; i += 1) {
+      const res = await req(viewerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, {
+        name: `Spam Wave ${i}`,
+      })
+      expect(res.status).toBe(201)
+    }
+    const blocked = await req(viewerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, {
+      name: 'Spam Wave 10',
+    })
+    expect(blocked.status).toBe(429)
+    expect(((await blocked.json()) as { error: { code: string } }).error.code).toBe(
+      'rate_limited',
+    )
+  })
+
   it('group join writes group_members + event_attendees + invite consumption atomically', async () => {
     const owner = `user_${Date.now()}_171_j_o`
     const joiner = `user_${Date.now()}_171_j_j`
@@ -991,5 +1442,75 @@ describe('D1 integration — groups + members + invites', () => {
 
     const activity = await repos.activity.listForEvent(eventId)
     expect(activity.map((a) => a.eventType)).toContain('group.rejoined')
+  })
+
+  // --- group artist-favorites overlay ---------------------------------
+
+  it('GET /groups/:id/artist-favorites returns every member\'s favorites, including the requester\'s own', async () => {
+    const owner = `user_${Date.now()}_gaf_o`
+    const memberB = `${owner}_b`
+    const ownerBearer = await loginAs(owner)
+    const eventId = await createEvent(ownerBearer, 'Group Favorites Event')
+    const group = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Favoriters' })
+    ).json()) as { id: string }
+    await repos.groupMembers.add({ id: `grm_${Date.now()}_b`, groupId: group.id, userId: memberB, role: 'member' })
+
+    const artistA = await repos.artists.create({ id: `art_gaf_${Date.now()}_a`, name: 'Artist A' })
+    const artistB = await repos.artists.create({ id: `art_gaf_${Date.now()}_b`, name: 'Artist B' })
+    await repos.eventArtists.upsert({
+      eventId,
+      artistId: artistA.id,
+      dayId: null,
+      stageId: null,
+      tier: null,
+      genre: null,
+      startTime: null,
+      endTime: null,
+      displayName: null,
+    })
+    await repos.eventArtists.upsert({
+      eventId,
+      artistId: artistB.id,
+      dayId: null,
+      stageId: null,
+      tier: null,
+      genre: null,
+      startTime: null,
+      endTime: null,
+      displayName: null,
+    })
+
+    cannedDisplayNames = { [owner]: 'Owner Name', [memberB]: 'Member B Name' }
+
+    await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/lineup/favorites`, { artistId: artistA.id })
+    await repos.eventArtistFavorites.favorite(memberB, { eventId, artistId: artistB.id })
+
+    const res = await req(ownerBearer, 'GET', `/api/v1/ui/groups/${group.id}/artist-favorites`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      items: Array<{ artist_id: string; user_id: string; display_name: string | null }>
+    }
+    expect(body.items).toHaveLength(2)
+    expect(body.items).toEqual(
+      expect.arrayContaining([
+        { artist_id: artistA.id, user_id: owner, display_name: 'Owner Name' },
+        { artist_id: artistB.id, user_id: memberB, display_name: 'Member B Name' },
+      ]),
+    )
+  })
+
+  it('GET /groups/:id/artist-favorites 404s a non-member (no existence leak)', async () => {
+    const owner = `user_${Date.now()}_gaf_leak_o`
+    const stranger = `${owner}_stranger`
+    const ownerBearer = await loginAs(owner)
+    const strangerBearer = await loginAs(stranger)
+    const eventId = await createEvent(ownerBearer, 'Group Favorites Leak Event')
+    const group = (await (
+      await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/groups`, { name: 'Private Favoriters' })
+    ).json()) as { id: string }
+
+    const res = await req(strangerBearer, 'GET', `/api/v1/ui/groups/${group.id}/artist-favorites`)
+    expect(res.status).toBe(404)
   })
 })

@@ -10,6 +10,7 @@ import type { Services } from '../services/types.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { encryptBearer } from '../crypto/encryption.js'
 import { LISTS_SESSION_BEARER_PREFIX } from '../middleware/session.js'
+import { mergeListsCore } from '../services/rpc-core.js'
 
 // D1 integration tests for the lists UI surface. Replaces lists.it.test.ts.
 // Runs inside a workerd isolate (Miniflare D1), migrations applied by
@@ -71,6 +72,7 @@ describe('D1 integration — lists UI surface', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -178,6 +180,99 @@ describe('D1 integration — lists UI surface', () => {
     expect(item.status).toBeNull()
     expect(item.priority).toBeNull()
     expect(item.completed).toBe(false)
+  })
+
+  it('creates a braindump-type list, round-trips customFields on its items, and tolerates merge/move', async () => {
+    const owner = `user_${Date.now()}_bd`
+    const bearer = await loginAs(owner)
+    const scopeId = await seedListGroup(bearer, 'Braindump Group')
+
+    const createRes = await req(bearer, 'POST', '/api/v1/ui/lists', {
+      name: 'Brain Dump',
+      listType: 'braindump',
+      scopeType: 'list_group',
+      scopeId,
+    })
+    expect(createRes.status).toBe(201)
+    const created = (await createRes.json()) as Record<string, unknown>
+    expect(created.list_type).toBe('braindump')
+
+    const row = await repos.lists.findById(created.id as string)
+    expect(row!.listType).toBe('braindump')
+
+    // Seed a Category custom field so an item can carry customFields.
+    const fieldRes = await req(bearer, 'POST', `/api/v1/ui/lists/${created.id as string}/fields`, {
+      label: 'Category',
+      fieldType: 'single_select',
+      choices: [{ label: 'Ideas' }, { label: 'Work' }],
+    })
+    expect(fieldRes.status).toBe(201)
+    const field = (await fieldRes.json()) as Record<string, unknown>
+    const choiceId = (
+      (field.options as { choices: { id: string; label: string }[] }).choices.find(
+        (c) => c.label === 'Ideas',
+      ) as { id: string }
+    ).id
+
+    const itemRes = await req(bearer, 'POST', `/api/v1/ui/lists/${created.id as string}/items`, {
+      title: 'A late-night idea',
+      customFields: { [field.id as string]: choiceId },
+    })
+    expect(itemRes.status).toBe(201)
+    const item = (await itemRes.json()) as Record<string, unknown>
+    expect((item.custom_fields as Record<string, unknown>)[field.id as string]).toBe(choiceId)
+
+    // A second braindump list, with an item to fold in — mergeListsCore (the
+    // engine behind planner's canonical-Tasks fold, RPC-only) tolerates a
+    // braindump list as both target and source; no listType gate.
+    const otherRes = await req(bearer, 'POST', '/api/v1/ui/lists', {
+      name: 'Second Brain Dump',
+      listType: 'braindump',
+      scopeType: 'list_group',
+      scopeId,
+    })
+    const other = (await otherRes.json()) as Record<string, unknown>
+    const otherItemRes = await req(bearer, 'POST', `/api/v1/ui/lists/${other.id as string}/items`, {
+      title: 'From the other dump',
+    })
+    expect(otherItemRes.status).toBe(201)
+
+    const deps = { env: {} as unknown as Env, logger: undefined, repos } as unknown as Parameters<
+      typeof mergeListsCore
+    >[3]
+    const mergeResult = await mergeListsCore(
+      owner,
+      created.id as string,
+      [other.id as string],
+      deps,
+    )
+    expect(mergeResult.kind).toBe('ok')
+    if (mergeResult.kind === 'ok') expect(mergeResult.data.itemsMoved).toBe(1)
+
+    const itemsRes = await req(bearer, 'GET', `/api/v1/ui/lists/${created.id as string}/items`)
+    const itemsPage = (await itemsRes.json()) as { items: Array<Record<string, unknown>> }
+    expect(itemsPage.items.map((i) => i.title)).toEqual(
+      expect.arrayContaining(['A late-night idea', 'From the other dump']),
+    )
+
+    // moveListItem (the generic PATCH-listId path) also tolerates a
+    // braindump list as the destination.
+    const otherList2Res = await req(bearer, 'POST', '/api/v1/ui/lists', {
+      name: 'Third Brain Dump',
+      listType: 'braindump',
+      scopeType: 'list_group',
+      scopeId,
+    })
+    const otherList2 = (await otherList2Res.json()) as Record<string, unknown>
+    const moveRes = await req(
+      bearer,
+      'PATCH',
+      `/api/v1/ui/lists/${created.id as string}/items/${item.id as string}`,
+      { listId: otherList2.id },
+    )
+    expect(moveRes.status).toBe(200)
+    const moved = (await moveRes.json()) as Record<string, unknown>
+    expect(moved.listId ?? moved.list_id).toBe(otherList2.id)
   })
 
   it('fetches a single list by id, and 404s for unknown/deleted ids', async () => {

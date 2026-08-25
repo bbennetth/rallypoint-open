@@ -7,7 +7,7 @@ import {
   type LabeledSet,
   type DueThing,
 } from '@rallypoint/events-shared'
-import type { ListItemDto } from '@rallypoint/lists-client'
+import type { ListItemDto } from '../services/types.js'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
@@ -35,13 +35,19 @@ function serializeDayRally(r: RallyRecord): Record<string, unknown> {
   }
 }
 
-function serializeSet(s: EventArtistRecord, label: string): Record<string, unknown> {
+function serializeSet(
+  s: EventArtistRecord,
+  label: string,
+  fav: { favorited: boolean; favoritedBy: { user_id: string; display_name: string | null }[] },
+): Record<string, unknown> {
   return {
     artist_id: s.artistId,
     label,
     stage_id: s.stageId,
     start_time: s.startTime,
     end_time: s.endTime,
+    favorited: fav.favorited,
+    favorited_by: fav.favoritedBy,
   }
 }
 
@@ -94,15 +100,52 @@ export const groupDayRoutes = new Hono<HonoApp>().get(
     }
     const labelFor = (s: EventArtistRecord): string => s.displayName ?? labelByArtist.get(s.artistId) ?? s.artistId
 
+    // Artist-favorite overlay for this day's sets: the requester's own
+    // favorites flag the row; other members' favorites are listed with
+    // display names. Skipped entirely when the day has no sets.
+    const requesterId = c.var.session!.userId
+    const myFavorites = new Set<string>()
+    const favoritedBy = new Map<string, { user_id: string; display_name: string | null }[]>()
+    if (daySlots.length > 0) {
+      const members = await c.var.repos.groupMembers.listForGroup(group.id)
+      const favRows = await c.var.repos.eventArtistFavorites.listForUsersEvent(
+        members.map((m) => m.userId),
+        group.eventId,
+      )
+      const dayArtists = new Set(daySlots.map((s) => s.artistId))
+      const relevant = favRows.filter((f) => dayArtists.has(f.artistId))
+      const otherIds = Array.from(
+        new Set(relevant.filter((f) => f.userId !== requesterId).map((f) => f.userId)),
+      )
+      const lookup = otherIds.length
+        ? await c.var.services.idClient.batchLookupUsers(otherIds)
+        : []
+      const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
+      for (const f of relevant) {
+        if (f.userId === requesterId) {
+          myFavorites.add(f.artistId)
+          continue
+        }
+        const list = favoritedBy.get(f.artistId) ?? []
+        list.push({ user_id: f.userId, display_name: nameById.get(f.userId) ?? null })
+        favoritedBy.set(f.artistId, list)
+      }
+    }
+    const favFor = (s: EventArtistRecord) => ({
+      favorited: myFavorites.has(s.artistId),
+      favoritedBy: favoritedBy.get(s.artistId) ?? [],
+    })
+
     // Group task items due this day, pulled across the group's lists via the
     // lists SDK. due_date is a real timestamptz; match on its UTC date-part.
+    const actor = c.var.session!.userId
     const lists = await c.var.services.listsClient.listLists({
       scopeType: 'group',
       scopeId: group.id,
-    })
+    }, actor)
     const dueTasks: ListItemDto[] = []
     for (const list of lists) {
-      const items = await c.var.services.listsClient.listItems(list.id)
+      const items = await c.var.services.listsClient.listItems(list.id, actor)
       for (const item of items) {
         if (item.dueDate && item.dueDate.slice(0, 10) === date) dueTasks.push(item)
       }
@@ -134,7 +177,7 @@ export const groupDayRoutes = new Hono<HonoApp>().get(
       date,
       day: day ? { id: day.id, day_label: day.dayLabel, date: day.date } : null,
       rallies: dayRallies.map(serializeDayRally),
-      lineup: daySlots.map((s) => serializeSet(s, labelFor(s))),
+      lineup: daySlots.map((s) => serializeSet(s, labelFor(s), favFor(s))),
       tasks: dueTasks.map(serializeTask),
       conflicts,
     })

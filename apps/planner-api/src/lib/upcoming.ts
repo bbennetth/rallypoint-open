@@ -1,6 +1,6 @@
 import type { ListItemDto } from '@rallypoint/lists-client'
 import type { PersonalEventDto, UserEventDto } from '@rallypoint/events-client'
-import { dayInstant } from './day-window.js'
+import { dayInstant } from '@rallypoint/shared'
 import { expandEventDays, isAllDay, type EventDayItem } from './event-days.js'
 
 // Pure Upcoming composition: merge the actor's tasks and personal events into
@@ -12,7 +12,7 @@ import { expandEventDays, isAllDay, type EventDayItem } from './event-days.js'
 // shared SDK package.
 //
 // Boundary: only the lower bound matters — Upcoming is open-ended forward — so
-// the caller passes the start of the local day (from day-window's
+// the caller passes the start of the local day (from @rallypoint/shared's
 // zonedDayWindow). Items strictly before it are dropped (past), which means
 // today's items are included (My Day and Upcoming intentionally overlap on
 // today, the first row of the list).

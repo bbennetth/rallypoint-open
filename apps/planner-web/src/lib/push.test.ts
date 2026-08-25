@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { urlBase64ToUint8Array } from './push.js'
+import { serverKeyMatches, testPushStatusMessage, urlBase64ToUint8Array } from './push.js'
 
 describe('urlBase64ToUint8Array', () => {
   it('decodes a base64url VAPID key to the expected 65-byte point', () => {
@@ -24,5 +24,49 @@ describe('urlBase64ToUint8Array', () => {
     for (const b of original) binary += String.fromCharCode(b)
     const base64url = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
     expect([...urlBase64ToUint8Array(base64url)]).toEqual([...original])
+  })
+})
+
+describe('serverKeyMatches', () => {
+  const expected = new Uint8Array([4, 10, 20, 30])
+
+  it('matches identical bytes', () => {
+    expect(serverKeyMatches(new Uint8Array([4, 10, 20, 30]).buffer, expected)).toBe(true)
+  })
+
+  it('rejects differing bytes of the same length', () => {
+    expect(serverKeyMatches(new Uint8Array([4, 10, 20, 31]).buffer, expected)).toBe(false)
+  })
+
+  it('rejects a different-length key', () => {
+    expect(serverKeyMatches(new Uint8Array([4, 10, 20]).buffer, expected)).toBe(false)
+  })
+
+  it('treats a null/undefined applicationServerKey as a match', () => {
+    // Deliberate: Safari can report null for a valid subscription, so a
+    // mismatch is unprovable — never force-resubscribe on null (the server
+    // reaps genuinely dead subscriptions on send).
+    expect(serverKeyMatches(null, expected)).toBe(true)
+    expect(serverKeyMatches(undefined, expected)).toBe(true)
+  })
+})
+
+describe('testPushStatusMessage', () => {
+  it('prompts to register when the user has no devices', () => {
+    expect(testPushStatusMessage({ ok: true, registered: false, delivered: false })).toBe(
+      'No devices registered yet — turn notifications on first.',
+    )
+  })
+
+  it('confirms delivery when at least one device accepted the push', () => {
+    expect(testPushStatusMessage({ ok: true, registered: true, delivered: true })).toBe(
+      'Sent — check for the notification.',
+    )
+  })
+
+  it('reports failure when devices exist but none accepted the push', () => {
+    expect(testPushStatusMessage({ ok: true, registered: true, delivered: false })).toBe(
+      'Couldn’t reach any device. Try turning notifications off and on again.',
+    )
   })
 })

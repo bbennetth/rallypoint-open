@@ -22,13 +22,38 @@ body {
 }
 
 /* ============================================================
+   DESKTOP WIDE-CONTENT OPT-IN (planner-scoped)
+
+   The shared shell caps every page at .plapp-content{max-width:880px}
+   and re-centers it against the 220px sidebar (shell.css:73-86). On a
+   wide monitor that leaves most of the width empty. A planner page that
+   actually uses the width (tiled card/list grids, the My Day dashboard)
+   marks its header with `pl-wide`; the shell's own :has() escape-hatch
+   pattern (identical to .plapp-full at shell.css:90-95) then lifts the
+   cap to 1200px for just that route. index.css loads AFTER shell.css and
+   `:has(.pl-wide)` outranks the bare `.plapp-content` rule, so this wins
+   cleanly. Desktop-only — inert below 1024px, so mobile is unchanged.
+   Settings deliberately opts out (its sections self-cap at 560px). */
+@media (min-width: 1024px) {
+  .plapp-content:has(.pl-wide) {
+    max-width: 1200px;
+    /* Same sidebar-compensation trick as shell.css:82-86, 880 → 1200. */
+    margin-left: max(0px, calc((100% - 1200px) / 2 - 110px));
+    margin-right: auto;
+  }
+}
+
+/* ============================================================
    MY DAY
    ============================================================ */
 
 /* View-switcher toolbar row (Agenda/Month/Week). Lives below the title on
    its own row so the switcher never moves between views. The agenda status
    line sits on the right; in calendar views the row is just the seg control,
-   but its height is unchanged, so toggling views causes no layout shift. */
+   but its height is unchanged, so toggling views causes no layout shift.
+   Hidden on mobile — the kit's floating glass `.rp-subbar` takes over the
+   view-switching role there. The page renders both; CSS picks the active
+   one by viewport. */
 .md-toolbar {
   display: flex;
   align-items: center;
@@ -36,6 +61,53 @@ body {
   flex-wrap: wrap;
   margin-bottom: 14px;
 }
+@media (max-width: 1023.98px) {
+  .md-toolbar { display: none; }
+}
+/* Compact My Day summary strip (kit) — sits where .md-stats used to. One
+   thin row: `<b>N</b> tasks left · dot · <b>N</b> events today · next chip`.
+   The next chip floats right via `margin-left: auto`; on narrow widths it
+   wraps to its own line so it stays readable on phones. */
+/* Plain text row per the Soft Ink frame (`.summ`) — no box. */
+.md-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 2px 0;
+  margin-bottom: 14px;
+}
+.md-summary .s {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-dim);
+}
+.md-summary .s b {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 16px;
+  color: var(--ink);
+}
+.md-summary .dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--ink-mute);
+  flex: 0 0 3px;
+}
+.md-summary .s.next {
+  margin-left: auto;
+  color: var(--acid);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+@media (max-width: 480px) {
+  .md-summary .s.next { margin-left: 0; flex-basis: 100%; }
+}
+
 .md-status {
   margin-left: auto;
   min-width: 0;
@@ -76,7 +148,12 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 10px 16px;
+}
+@media (min-width: 1024px) {
+  .wx-summary {
+    padding: 10px 20px;
+  }
 }
 /* Compact the summary row's icon buttons (ready-state expand +
    change-location, and the manual form's "use my location" pin) and tighten
@@ -102,11 +179,11 @@ body {
 .wx-error {
   padding: 0 14px 10px;
   font-size: 12px;
-  color: var(--hot, #b3261e);
+  color: var(--hot-text);
 }
 /* Expanded hourly area: the metric selector + a horizontal scroll of hours. */
 .wx-hourly-wrap {
-  border-top: 1.5px solid var(--line);
+  border-top: 1px solid var(--hairline-soft);
   padding: 10px 14px;
   display: flex;
   flex-direction: column;
@@ -144,8 +221,9 @@ body {
   margin-bottom: 14px;
 }
 .pl-stat {
-  border: 1.5px solid var(--line);
   background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   padding: 13px 14px;
 }
 .pl-stat .v {
@@ -197,7 +275,7 @@ body {
 .pl-timeline {
   position: relative;
   display: grid;
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 54px 1fr;
 }
 .pl-tl-time {
   font-family: var(--font-mono);
@@ -206,28 +284,24 @@ body {
   letter-spacing: 0.04em;
   transform: translateY(-6px);
 }
+/* Soft Ink: no rail line — the mono time column alone carries the grid. */
 .pl-tl-rail {
   position: relative;
-  border-left: 1.5px solid var(--line);
-  padding: 0 0 0 16px;
+  padding: 0;
 }
 .pl-tl-tick {
-  position: absolute;
-  left: -1.5px;
-  top: 0;
-  width: 9px;
-  height: 1.5px;
-  background: var(--line);
+  display: none;
 }
 .pl-ev {
-  border: 1.5px solid var(--line);
   border-left: 3px solid var(--acid);
+  border-radius: var(--radius-lg);
   background: var(--surface);
-  padding: 9px 12px;
+  box-shadow: var(--shadow-card);
+  padding: 13px 16px;
   margin-bottom: 8px;
 }
 .pl-ev.task {
-  border-left-color: var(--ink-mute);
+  border-left-color: var(--line);
 }
 .pl-ev.done .t {
   opacity: 0.55;
@@ -236,6 +310,42 @@ body {
   font-size: 13.5px;
   color: var(--ink);
   font-weight: 500;
+}
+
+/* Desktop two-pane agenda dashboard (My Day). The .md-agenda-grid /
+   .md-today / .md-upnext wrappers are plain blocks below 1024px, so the
+   two panes stack in source order (today stack, 14px gap, then "Coming
+   up") — byte-for-byte the pre-change agenda. At ≥1024px, and only when a
+   .md-upnext rail is actually present (:has — no empty right column when
+   there's no upcoming data), it becomes a today-stack + sticky "Coming up"
+   rail. The embedded UpcomingFeed's own 1fr+272px backlog split can't fit
+   the narrow rail, so it collapses to a single column there (the same
+   layout it already uses on mobile). */
+.md-upnext {
+  margin-top: 14px;
+}
+@media (min-width: 1024px) {
+  .md-agenda-grid:has(.md-upnext) {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(340px, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+  .md-today {
+    min-width: 0;
+  }
+  .md-upnext {
+    position: sticky;
+    top: 0;
+    margin-top: 0;
+    min-width: 0;
+  }
+  .md-upnext .up-grid {
+    grid-template-columns: 1fr;
+  }
+  .md-upnext .up-backlog {
+    position: static;
+  }
 }
 
 /* ============================================================
@@ -335,14 +445,17 @@ body {
 .cal-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 2px;
+  gap: 4px;
 }
 /* In week mode the cells can be taller since there's only one row. */
 .cal-grid--week .cal-cell {
   height: 140px;
 }
 
-/* Day-of-week header cells (Sun/Mon/Tue…). */
+/* Day-of-week header cells (Sun/Mon/Tue…). `.cal-dow` is the kit's
+   spelling and `.cal-dow-hdr` is planner-web's; both resolve to the
+   same style so future call sites can use either. */
+.cal-dow,
 .cal-dow-hdr {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -360,7 +473,7 @@ body {
    whole row. Overflow is clipped; the "+N more" badge signals hidden items. */
 .cal-cell {
   background: var(--surface);
-  border: 1.5px solid var(--line);
+  border-radius: var(--radius-md);
   padding: 6px 7px;
   height: 108px;
   overflow: hidden;
@@ -368,10 +481,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  transition: border-color 0.1s ease;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 .cal-cell:hover {
-  border-color: var(--ink-dim);
+  background: var(--surface-2);
 }
 .cal-cell:focus-visible {
   outline: 2px solid var(--acid);
@@ -382,9 +495,9 @@ body {
   background: var(--bg);
   opacity: 0.5;
 }
-/* Today's cell has an accent border. */
+/* Today's cell carries an accent ring. */
 .cal-cell.is-today {
-  border-color: var(--acid);
+  box-shadow: inset 0 0 0 1.5px var(--accent-ring);
 }
 .cal-cell.is-today .cal-day-num {
   color: var(--acid);
@@ -451,6 +564,247 @@ body {
   cursor: default;
 }
 
+/* Outer wrappers for the month grid + week strip. These pair the .cal-nav
+   header with the .cal-grid below. Marked `data-noswipe` so the AppChrome's
+   swipe-nav handler ignores horizontal gestures inside (the calendar steals
+   them for its own prev/next-month navigation). */
+.cal-month,
+.cal-week {
+  display: grid;
+  gap: 12px;
+}
+
+/* Inner label span of `.cal-chip` — separate selector so the chip's
+   ellipsis truncation can be retargeted without affecting the chip's
+   data-attribute color/strike rules. Currently inherits the chip's
+   overflow / text-overflow / nowrap so this is naming + future-proofing. */
+.cal-chip-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   WEEK VIEW (Ink kit) — vertical list of day cards
+   ============================================================ */
+/* `<WeekStrip>` renders one `.wk-day` row per day of the week, each
+   showing a left rail (dow label + large day number) and a right items
+   list. The today row is accent-bordered + accent-soft tinted. The
+   layout is intentionally NOT a 7-column grid — it's a vertical list,
+   so the day number reads big and the items don't shrink. */
+.wk-list {
+  display: grid;
+  gap: 8px;
+}
+.wk-day {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-panel);
+  padding: 13px 16px;
+}
+.wk-day.is-today {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+.wk-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+.wk-dow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.wk-day.is-today .wk-dow { color: var(--acid); }
+.wk-dnum {
+  font-family: var(--font-display, var(--font-body));
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink);
+}
+.wk-items {
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  min-width: 0;
+}
+.wk-item {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.wk-item:hover { background: color-mix(in srgb, var(--ink) 6%, var(--surface-2)); }
+.wk-item:focus-visible,
+.wk-rail:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.wk-item[data-completed] {
+  color: var(--ink-mute);
+  text-decoration: line-through;
+}
+.wk-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--ink-mute);
+}
+.wk-item.ev .wk-dot { background: var(--acid); }
+.wk-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.03em;
+  padding: 4px 0;
+}
+
+/* ============================================================
+   MONTH VIEW — MOBILE COMPACT (Ink kit's iOS-Calendar pattern)
+   ============================================================ */
+/* `.cal-mini` is the dot grid (one square per day with up to two
+   colored dots: gray for tasks, accent for events) and `.cal-agenda`
+   is the selected day's items list below. Lives behind a viewport
+   media query so the existing `.cal-grid` desktop view is unchanged. */
+.cal-mini {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+.cal-mini-dow {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--ink-mute);
+  padding-bottom: 4px;
+}
+.cal-day {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  position: relative;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border-radius: var(--radius-lg);
+  color: var(--ink);
+}
+.cal-day .n { font-size: 14px; font-weight: 600; line-height: 1; }
+.cal-day.out { visibility: hidden; pointer-events: none; }
+.cal-day:hover:not(.out) {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.cal-day.today .n { color: var(--acid); font-weight: 800; }
+.cal-day.sel {
+  background: var(--accent);
+  box-shadow: var(--glow-accent);
+}
+.cal-day.sel .n { color: var(--accent-ink); }
+.cal-day-dots {
+  display: flex;
+  gap: 3px;
+  height: 5px;
+  align-items: center;
+}
+.cal-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ink-mute);
+}
+.cal-dot.ev { background: var(--acid); }
+.cal-day.sel .cal-dot {
+  background: color-mix(in srgb, var(--accent-ink) 70%, transparent);
+}
+.cal-day.sel .cal-dot.ev { background: var(--accent-ink); }
+
+.cal-agenda { margin-top: 18px; }
+.cal-agenda-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.cal-agenda-hd .d {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.cal-agenda-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink-mute);
+  padding: 6px 0;
+}
+.cal-agenda-list { display: grid; gap: 8px; }
+.cal-agenda-item {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.cal-agenda-item:hover { background: var(--surface-2); }
+.cal-agenda-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.cal-agenda-item .cal-dot { width: 8px; height: 8px; }
+.cal-agenda-item .t { font-size: 14px; color: var(--ink); }
+.cal-agenda-item .k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* The two month-view variants live behind a viewport switch. Desktop
+   (>=601px) shows the full `.cal-grid` matrix; phones get the compact
+   `.cal-mini` dot grid + `.cal-agenda` below. CalendarView.tsx renders
+   BOTH variants; CSS hides whichever isn't appropriate. */
+.cal-month-mobile { display: none; }
+@media (max-width: 600px) {
+  .cal-month-desktop { display: none; }
+  .cal-month-mobile { display: block; }
+}
+
 /* Mobile: compress the calendar to single-column. */
 @media (max-width: 600px) {
   .cal-grid {
@@ -463,6 +817,7 @@ body {
   .cal-chip {
     font-size: 9px;
   }
+  .cal-dow,
   .cal-dow-hdr {
     font-size: 8px;
   }
@@ -507,14 +862,14 @@ body {
     padding-bottom: 4px;
   }
   .tk-lists .pl-navlink {
-    border: 1.5px solid var(--line);
-    border-radius: 999px;
+    background: var(--surface-2);
+    border-radius: var(--radius-round);
     white-space: nowrap;
     padding: 9px 14px;
   }
   .tk-lists .pl-navlink.is-sel {
-    border-color: var(--acid);
-    background: var(--accent-soft);
+    background: var(--accent-soft-strong);
+    box-shadow: inset 0 0 0 1px var(--accent-ring);
     color: var(--ink);
   }
   .tk-lists .pl-navlink .meta {
@@ -540,8 +895,9 @@ body {
   height: 28px;
   min-height: 28px;
   color: var(--ink-mute);
-  border-radius: 2px;
-  transition: color 0.12s ease, background 0.12s ease;
+  border-radius: var(--radius-sm);
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
 }
 .tk-list-more-btn:hover {
   color: var(--ink);
@@ -569,10 +925,10 @@ body {
   background: var(--surface-2, rgba(0,0,0,0.06));
 }
 .tk-list-menu-item.is-destructive {
-  color: var(--hot, #d4504e);
+  color: var(--hot-text);
 }
 .tk-list-menu-item.is-destructive:hover {
-  background: color-mix(in srgb, var(--hot, #d4504e) 8%, transparent);
+  background: var(--hot-soft);
 }
 /* Inline confirm chip shown in place of the ··· trigger */
 .tk-list-confirm-chip {
@@ -581,19 +937,20 @@ body {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  padding: 4px 9px;
-  border: 1.5px solid var(--hot, #d4504e);
-  color: var(--hot, #d4504e);
+  padding: 5px 10px;
+  background: var(--hot-soft);
+  color: var(--hot-text);
+  border-radius: var(--radius-round);
   font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   white-space: nowrap;
-  transition: background 0.12s ease;
+  transition: filter var(--dur-fast) var(--ease-out);
 }
 .tk-list-confirm-chip:hover {
-  background: color-mix(in srgb, var(--hot, #d4504e) 10%, transparent);
+  filter: brightness(1.15);
 }
 .tk-list-confirm-cancel {
   all: unset;
@@ -626,33 +983,12 @@ body {
 /* ============================================================
    EVENTS
    ============================================================ */
-.ev-grid {
+/* Single full-width chronological list; rows open a detail drawer. */
+.ev-list {
   display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: 26px;
-  align-items: start;
+  gap: 7px;
 }
-/* Reserve a floor for the detail pane (all three variants — EventDetail,
-   HolidayDetail, and the empty/select state — render a <section>) so the
-   pane doesn't collapse to a single line while loading or when nothing is
-   selected, which would jump the mobile single-column stack. */
-.ev-grid > section {
-  min-height: 200px;
-}
-@media (max-width: 1023px) {
-  .ev-grid {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-  .ev-rail {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 78%;
-    gap: 10px;
-    overflow-x: auto;
-  }
-}
-/* ── Events rail items (#418) ── */
+/* ── Events list items (#418) ── */
 /* CSS class for rail buttons replacing inline styles. The .is-active variant
    mirrors .pl-navlink.is-active pattern. Also the hook for #415 focus ring. */
 .ev-rail-item {
@@ -661,31 +997,32 @@ body {
   cursor: pointer;
   display: grid;
   gap: 5px;
-  padding: 10px 12px;
-  border: 1.5px solid var(--line);
-  border-left: 1.5px solid var(--line);
+  padding: 11px 14px;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-lg);
   background: var(--surface);
+  box-shadow: var(--shadow-card);
   min-height: 52px;
   width: 100%;
   text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 .ev-rail-item:hover {
-  border-color: var(--ink-mute);
+  background: var(--surface-2);
 }
 .ev-rail-item.is-active {
-  border-left: 3px solid var(--accent);
-  border-color: var(--accent);
+  border-left-color: var(--accent);
   background: var(--accent-soft);
 }
 /* Holiday rows share the event-row shape but are read-only: no hover
    highlight (they aren't selectable), with a faintly tinted left edge to
    distinguish them from events at a glance. */
 .ev-rail-item.is-holiday {
-  border-left: 3px solid var(--line);
+  border-left-color: var(--line);
   background: var(--surface-2, var(--surface));
 }
 .ev-rail-item.is-holiday:hover {
-  border-color: var(--line);
+  background: var(--surface-2, var(--surface));
 }
 .ev-rail-name {
   font-size: 13.5px;
@@ -701,16 +1038,18 @@ body {
 }
 
 .pl-ticket {
-  border: 1.5px solid var(--line);
   background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   display: flex;
   align-items: stretch;
   overflow: hidden;
 }
+/* The dashed perforation is the ticket motif — keep it, softened. */
 .pl-ticket .stub {
   width: 70px;
   flex: 0 0 70px;
-  border-right: 1.5px dashed var(--line);
+  border-right: 1.5px dashed color-mix(in srgb, var(--ink) 14%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -722,10 +1061,26 @@ body {
   flex: 1;
   min-width: 0;
 }
+/* The clickable "view this ticket" area: an unstyled real <button> wrapping
+   the stub + metadata so the row activates from the keyboard without ARIA
+   role hacks. The sibling Get button sits outside it. */
+.pl-ticket-open {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 
 /* scrollbars */
-.tk-lists::-webkit-scrollbar,
-.ev-rail::-webkit-scrollbar {
+.tk-lists::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
@@ -821,4 +1176,604 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-mute);
+}
+
+/* Folder filter rail at the top of NotesPage. Defined as a class anchor so
+   the layout details (flex / flex-wrap / gap / margin-bottom) can move out
+   of NotesPage.tsx's inline style block without behavior change. The page
+   currently sets the inline styles too — having a real class definition
+   lets future styling (e.g. a hairline border under the rail) land here
+   without re-touching the JSX. */
+.pl-note-folders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+/* ============================================================
+   DIARY (Ink kit)
+   ============================================================ */
+/* Each diary entry sits in a bordered surface with a header row
+   (mood circle + date + trailing chip) and a body. Replaces the
+   prior generic `.pl-card` + inline-style approach so the entry
+   shape is named (no inline date `fontSize`, no inline body color). */
+.pl-diary {
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  padding: 14px 16px;
+  display: grid;
+  gap: 8px;
+}
+.pl-diary-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pl-diary-date {
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--ink);
+}
+/* `.pl-mood` is the kit's emoji-circle for the entry's mood. The Ink
+   kit data carries a single emoji glyph (e.g. '😄'); planner-web's
+   seeded mood choices store the label with a leading emoji (e.g.
+   "😄 Great"), so DiaryPage's first-character slice renders the emoji
+   for free. `text-transform: uppercase` handles the degraded case
+   (custom field with a plain-text label) by uppercasing the lone
+   letter so it still reads as an indicator. The accent-soft background
+   paints with the live accent. */
+.pl-mood {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--accent-soft);
+  flex: 0 0 26px;
+  text-transform: uppercase;
+}
+/* Body paragraph of a diary entry — replaces the inline style block
+   on DiaryPage's `<p>`. */
+.pl-diary-body {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--ink-dim);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* ============================================================
+   SETTINGS (Ink kit) — .set-section + .set-row + .set-toggle + .swatch
+   ============================================================ */
+/* The kit's preference container: a soft surface panel with rows
+   separated by hairlines, each row carrying a label + sub-text on
+   the left and a control on the right. */
+.set-section {
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+.set-row + .set-row {
+  border-top: 1px solid var(--hairline-soft);
+}
+.set-label {
+  font-size: 14px;
+  color: var(--ink);
+}
+.set-sub {
+  font-size: 12px;
+  color: var(--ink-dim);
+  margin-top: 2px;
+}
+.swatch-row {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.swatch {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch.on { border-color: var(--ink); }
+.swatch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* Kit's animated pill toggle. Background tinted live accent when on;
+   the knob is a circle that slides via transform (so the animation
+   composites on the GPU). */
+.set-toggle {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  position: relative;
+  transition: background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+  flex: 0 0 auto;
+}
+.set-toggle.on {
+  background: var(--accent);
+  box-shadow: var(--glow-accent);
+}
+.set-toggle .knob {
+  /* Borderless track: 3px inset centers the 18px knob in the 24px pill
+     (the old 2px assumed a 1.5px border eating into the box). Travel is
+     44 - 18 - 3 - 3 = 20px, so the .on transform below is unchanged. */
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform var(--dur-base) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.set-toggle.on .knob {
+  transform: translateX(20px);
+  background: var(--accent-ink);
+}
+.set-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.set-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===== MORNING CHECK-IN =====
+ * One-shot modal that opens on first My Day visit each calendar day.
+ * Ported from the design handoff (design_handoff_morning_checkin/planner.css);
+ * tokens (--surface, --line, --accent, --ink) come from the app theme so the
+ * accent picker re-tints this surface like the rest of Planner. Soft Ink
+ * shapes: rounded card, hairline section dividers, surface-step fields. */
+@keyframes mc-in {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.mc-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.mc-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  animation: mc-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
+}
+.mc-head {
+  padding: 28px 28px 22px;
+  border-bottom: 1px solid var(--hairline-soft);
+  flex: 0 0 auto;
+}
+.mc-greeting {
+  font-family: var(--font-display);
+  font-size: 28px;
+  color: var(--ink);
+  line-height: 1;
+  margin-bottom: 5px;
+}
+.mc-date {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.mc-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.mc-section {
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--hairline-soft);
+  display: grid;
+  gap: 11px;
+}
+.mc-sec-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.mc-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.mc-input {
+  /* `all: unset` strips the UA box; flex/width/min-width MUST follow it or the
+   * reset wipes the grow and the input collapses to ~half width. */
+  all: unset;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  background: var(--bg);
+  border-radius: var(--radius-nav);
+  box-shadow: inset 0 0 0 1.5px var(--line);
+  padding: 15px 16px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.mc-input:focus {
+  box-shadow: inset 0 0 0 1.5px var(--accent-ring);
+  outline: none;
+}
+.mc-input::placeholder {
+  color: var(--ink-mute);
+}
+.mc-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.mc-addbtn {
+  all: unset;
+  box-sizing: border-box;
+  width: 52px;
+  flex: 0 0 52px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius-md);
+  box-shadow: var(--glow-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.mc-addbtn:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+.mc-addbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.mc-addedlist {
+  display: grid;
+  gap: 5px;
+}
+.mc-addeditem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+.mc-addeddot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--acid);
+  flex: 0 0 auto;
+}
+.mc-addedtitle {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc-rmv {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--ink-mute);
+  flex: 0 0 auto;
+}
+.mc-rmv:hover {
+  color: var(--ink);
+}
+.mc-rmv:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.mc-chorelist {
+  display: grid;
+  gap: 5px;
+}
+.mc-chore {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  transition: background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.mc-chore:hover:not(.done) {
+  background: color-mix(in srgb, var(--ink) 6%, var(--surface-2));
+}
+.mc-chore.done {
+  background: var(--accent-soft-strong);
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+.mc-chore:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.mc-choretitle {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.mc-chore.done .mc-choretitle {
+  color: var(--ink-mute);
+  text-decoration: line-through;
+}
+.mc-choremark {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.mc-choredue {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-mute);
+  flex: 0 0 auto;
+}
+.mc-foot {
+  padding: 16px 28px;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline-soft);
+}
+.mc-startbtn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 13px 20px;
+  background: var(--ink);
+  color: var(--bg);
+  border-radius: var(--radius-nav);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mc-startbtn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.mc-startbtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Chores visibility toggle on the My Day desktop toolbar. */
+.chores-toggle {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  background: var(--surface-2);
+  border-radius: var(--radius-round);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+  margin-left: auto;
+}
+.chores-toggle:hover:not(.on) {
+  color: var(--ink);
+}
+.chores-toggle.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: var(--glow-accent);
+}
+.chores-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Mobile chores toggle in the My Day sub-bar (Week/Month only). */
+.pm-choretog {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  background: var(--surface-2);
+  border-radius: var(--radius-round);
+  color: var(--ink-mute);
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.pm-choretog:hover:not(.on) {
+  color: var(--ink);
+}
+.pm-choretog.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: var(--glow-accent);
+}
+.pm-choretog:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   DESKTOP MULTI-COLUMN REFLOW (planner-scoped, desktop-only)
+
+   The list/card views ship a single mobile-width column. Paired with the
+   .pl-wide 1200px opt-in near the top of this file, they reflow into an
+   auto-fitting card grid on desktop so the extra width becomes columns of
+   content instead of one over-wide column of short rows. Each base
+   (non-media) rule reproduces the inline `style={{display:'grid',…}}` it
+   replaced verbatim, so below 1024px the markup renders byte-for-byte as
+   before; only the @media (min-width:1024px) blocks add columns. Plain CSS
+   Grid (not column-count) with align-items:start — a card never splits
+   across a column break; the trade is minor row-height raggedness,
+   standard for auto-fit grids. Non-row direct children (empty <p>, the
+   SkeletonRows role="status" wrapper, the Events "show past" .pl-btn) span
+   every column via grid-column:1/-1 so they read as their own full-width
+   line rather than being sized to one card's column.
+   ============================================================ */
+
+/* Events — the .ev-list base (single-column grid) lives in the EVENTS
+   section above; this only adds the desktop columns + stray-child spans. */
+@media (min-width: 1024px) {
+  .ev-list {
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    align-items: start;
+    gap: var(--space-3);
+  }
+  .ev-list > p,
+  .ev-list > [role='status'],
+  .ev-list > .pl-btn {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Notes — keeps its original 640px reading cap below 1024px, lifts it on
+   desktop and tiles the note cards. */
+.nt-list {
+  display: grid;
+  gap: 10px;
+  max-width: 640px;
+}
+@media (min-width: 1024px) {
+  .nt-list {
+    max-width: none;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    align-items: start;
+    gap: var(--space-3);
+  }
+  .nt-list > p,
+  .nt-list > [role='status'] {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Shopping — tile the category BLOCKS; the item rows inside each block
+   stay single-column (their fixed-width category <select> leaves too
+   little room for the item name in a narrow tile). */
+.shop-groups {
+  display: grid;
+  gap: 18px;
+}
+@media (min-width: 1024px) {
+  .shop-groups {
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    align-items: start;
+    gap: var(--space-5);
+  }
+}
+
+/* Diary — widest min (2-up at the 1200 cap): entries render long prose, so
+   a full-width single column would run well past a readable line length. */
+.diary-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+@media (min-width: 1024px) {
+  .diary-grid {
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    align-items: start;
+    gap: var(--space-4);
+  }
+}
+
+/* Tasks + Chores — shared by both Tasks <ul>s (open + completed) and the
+   Chores SeriesList <ul>. Their `1fr auto` rows would only stretch dead
+   space between title and trailing control if the column were widened
+   without tiling, so they tile instead. */
+.tk-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+@media (min-width: 1024px) {
+  .tk-rows {
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    align-items: start;
+    gap: var(--space-3);
+  }
 }

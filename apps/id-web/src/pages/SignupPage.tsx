@@ -2,11 +2,13 @@ import { useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SignupRequestSchema } from '@rallypoint/shared'
 import { AuthCard } from '../ui/AuthCard.js'
+import { AuthAlternatives } from '../ui/AuthAlternatives.js'
 import { Banner, Button, Field } from '@rallypoint/ui'
 import { Turnstile } from '../ui/Turnstile.js'
 import { api } from '../api/client.js'
 import { apiValidationToFieldErrors, type FieldErrors, zodToFieldErrors } from '../lib/zod-errors.js'
 import { returnToLabel, safeReturnTo } from '../lib/return-to.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 export function SignupPage() {
   const [params] = useSearchParams()
@@ -53,6 +55,7 @@ export function SignupPage() {
       }
       return
     }
+    captureEvent('sign_up_succeeded')
     setSubmitted(true)
   }
 
@@ -109,6 +112,7 @@ export function SignupPage() {
       }
     >
       {formError ? <Banner tone="error">{formError}</Banner> : null}
+      <AuthAlternatives returnTo={returnTo} onError={setFormError} />
       <form onSubmit={onSubmit} noValidate className="space-y-4">
         <Field
           label="Email"

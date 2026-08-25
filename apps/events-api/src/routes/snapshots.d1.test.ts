@@ -12,6 +12,7 @@ import type { Services } from '../services/types.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { encryptBearer } from '../crypto/encryption.js'
 import { EVENTS_SESSION_BEARER_PREFIX } from '../middleware/session.js'
+import { captureSnapshot } from './_snapshots.js'
 
 // Integration tests for the snapshot/version-history surface (#191
 // Phase 2) against a real Postgres. Same stub harness as
@@ -101,6 +102,7 @@ describe('D1 integration — snapshots (version history / restore)', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -235,6 +237,50 @@ describe('D1 integration — snapshots (version history / restore)', () => {
     expect(activity).toContain('event.snapshot_restored')
   })
 
+  it('round-trips an unscheduled (TBA) slot through snapshot capture + restore', async () => {
+    const owner = `user_${Date.now()}_ltba`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'TBA Snap Fest')
+    const day = await makeDay(bearer, eventId, 'Day 1', '2026-09-03')
+    const scheduled = await makeArtist(bearer, `TSnap Sched ${Date.now()}`)
+    const tba = await makeArtist(bearer, `TSnap TBA ${Date.now()}`)
+
+    // State 1: one scheduled + one TBA slot.
+    await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/lineup/bulk`, {
+      slots: [
+        { artistId: scheduled, dayId: day },
+        { artistId: tba, dayId: null, tier: 'support' },
+      ],
+    })
+
+    // Destructive bulk: drop the TBA slot → captures a snapshot of state 1.
+    await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/lineup/bulk`, {
+      deletes: [{ artistId: tba, dayId: null }],
+    })
+    expect(await lineupCount(bearer, eventId)).toBe(1)
+
+    const snaps = await listSnaps(bearer, eventId, 'lineup')
+    const target = snaps.find((s) => s.item_count === 2)!
+    expect(target).toBeDefined()
+
+    const restore = await req(
+      bearer,
+      'POST',
+      `/api/v1/ui/events/${eventId}/snapshots/${target.id}/restore`,
+    )
+    expect(restore.status).toBe(200)
+
+    // The TBA slot is back with a REAL null day (the deserializer must not
+    // corrupt it to the string "null" — the _snapshots.ts regression).
+    const lineup = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/lineup`)
+    ).json()) as { items: { artist_id: string; day_id: string | null; tier: string | null }[] }
+    expect(lineup.items).toHaveLength(2)
+    const restored = lineup.items.find((s) => s.artist_id === tba)!
+    expect(restored.day_id).toBeNull()
+    expect(restored.tier).toBe('support')
+  })
+
   it('captures and restores a sessions snapshot (revives a delete, drops a later create)', async () => {
     const owner = `user_${Date.now()}_srest`
     const bearer = await loginAs(owner)
@@ -279,6 +325,55 @@ describe('D1 integration — snapshots (version history / restore)', () => {
     const ids = live.items.map((s) => s.id)
     expect(ids).toContain(s1.id)
     expect(ids).not.toContain(s2.id)
+  })
+
+  // Regression for "D1_ERROR: too many SQL variables": restoreActive
+  // computes a delete-delta (active sessions not present in the restored
+  // snapshot) and soft-deletes them, one bound param per id — an event
+  // with >100 active sessions blows past D1's cap in a single statement.
+  it('restoring an empty sessions snapshot soft-deletes >100 currently-active sessions', async () => {
+    const owner = `user_${Date.now()}_srest200`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Sessions Mass Restore Fest')
+
+    // Capture an empty pre-state snapshot while there are zero sessions.
+    const snapshotId = await captureSnapshot(
+      repos,
+      eventId,
+      'sessions',
+      'before mass create (test)',
+      owner,
+    )
+
+    // Create 120 sessions in one bulk-create call (pure create isn't
+    // destructive, so it doesn't auto-snapshot — the empty snapshot above
+    // is still the target).
+    const creates = Array.from({ length: 120 }, (_, i) => ({
+      title: `Session ${i}`,
+      visibility: 'admin' as const,
+    }))
+    const createRes = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions/bulk`, {
+      creates,
+    })
+    expect(createRes.status).toBe(200)
+    expect(((await createRes.json()) as { items: unknown[] }).items).toHaveLength(120)
+
+    const before = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/sessions`)
+    ).json()) as { items: Array<{ id: string }> }
+    expect(before.items).toHaveLength(120)
+
+    const restore = await req(
+      bearer,
+      'POST',
+      `/api/v1/ui/events/${eventId}/snapshots/${snapshotId}/restore`,
+    )
+    expect(restore.status).toBe(200)
+
+    const after = (await (
+      await req(bearer, 'GET', `/api/v1/ui/events/${eventId}/sessions`)
+    ).json()) as { items: Array<{ id: string }> }
+    expect(after.items).toHaveLength(0)
   })
 
   it('rejects restoring a snapshot that belongs to another event (404)', async () => {

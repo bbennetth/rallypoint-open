@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { ConfirmDialog, SwipeActions } from '@rallypoint/ui'
+import { useAsync } from '@rallypoint/web-kit'
 import { ApiError, createStage, deleteStage, listStages, type StageDto } from '../lib/api.js'
 
 // Stage list + add/delete for an event. Lives on the owner Settings tab
@@ -9,20 +11,19 @@ export function StagesEditor({ eventId }: { eventId: string }) {
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // Swipe/hover Delete stages the row here; the ConfirmDialog commits it.
+  const [confirmDelete, setConfirmDelete] = useState<StageDto | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
+  const stagesLoad = useAsync<StageDto[]>(() => listStages(eventId), [eventId])
   useEffect(() => {
-    let cancelled = false
-    listStages(eventId)
-      .then((s) => {
-        if (!cancelled) setStages(s)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : 'Failed to load stages.')
-      })
-    return () => {
-      cancelled = true
+    if (stagesLoad.data) setStages(stagesLoad.data)
+  }, [stagesLoad.data])
+  useEffect(() => {
+    if (stagesLoad.error) {
+      setError(stagesLoad.error instanceof ApiError ? stagesLoad.error.message : 'Failed to load stages.')
     }
-  }, [eventId])
+  }, [stagesLoad.error])
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault()
@@ -53,20 +54,23 @@ export function StagesEditor({ eventId }: { eventId: string }) {
     <section className="space-y-3">
       <h2 className="text-sm font-medium text-[color:var(--ink)]">Stages</h2>
       {stages.length > 0 && (
-        <ul className="space-y-1">
+        <ul className="space-y-2">
           {stages.map((s) => (
-            <li key={s.id} className="flex items-center gap-2 text-sm">
+            <SwipeActions
+              key={s.id}
+              as="li"
+              contentClassName="ev-editrow text-sm"
+              actions={[
+                {
+                  key: 'delete',
+                  label: `Delete stage ${s.name}`,
+                  icon: <>✕</>,
+                  onAction: () => setConfirmDelete(s),
+                },
+              ]}
+            >
               <span className="flex-1">{s.name}</span>
-              <button
-                type="button"
-                onClick={() => void handleDelete(s.id)}
-                className="ml-auto btn-hot"
-                style={{ width: 'auto' }}
-                aria-label={`Delete stage ${s.name}`}
-              >
-                ×
-              </button>
-            </li>
+            </SwipeActions>
           ))}
         </ul>
       )}
@@ -87,12 +91,31 @@ export function StagesEditor({ eventId }: { eventId: string }) {
       {error && (
         <div
           role="alert"
-          className="p-3 text-sm text-[color:var(--ink)]"
-          style={{ border: '1.5px solid var(--hot)', background: 'color-mix(in srgb, var(--hot) 12%, transparent)' }}
+          className="p-3 text-sm"
+          style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)', borderRadius: 'var(--radius-lg)' }}
         >
           {error}
         </div>
       )}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete stage?"
+        body={confirmDelete ? `Remove “${confirmDelete.name}” from this event.` : undefined}
+        confirmLabel="Delete"
+        confirmVariant="hot"
+        busy={deleting}
+        onConfirm={async () => {
+          if (!confirmDelete) return
+          setDeleting(true)
+          try {
+            await handleDelete(confirmDelete.id)
+          } finally {
+            setDeleting(false)
+            setConfirmDelete(null)
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </section>
   )
 }

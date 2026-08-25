@@ -26,11 +26,37 @@ function build() {
 }
 
 describe('Origin middleware — /api/v1/ui/*', () => {
-  it('allows requests without an Origin header (curl, server-side)', async () => {
+  it('allows GET requests without an Origin header (curl, server-side)', async () => {
     const app = build()
     const res = await app.request('/api/v1/ui/csrf')
     expect(res.status).toBe(200)
   })
+
+  it('rejects POST without an Origin header (E1 #19 — closes CSRF defense-in-depth gap)', async () => {
+    const app = build()
+    const res = await app.request('/api/v1/ui/signout', {
+      method: 'POST',
+    })
+    expect(res.status).toBe(403)
+    const body = (await res.json()) as { error?: { code?: string; message?: string } }
+    expect(body.error?.code).toBe('forbidden')
+    expect(body.error?.message).toMatch(/origin/i)
+  })
+
+  it.each(['PUT', 'PATCH', 'DELETE'] as const)(
+    'rejects %s without an Origin header',
+    async (method) => {
+      const app = build()
+      // Use a route that's mounted under /api/v1/ui/ — /api/v1/ui/csrf is GET
+      // and /api/v1/ui/signout is POST; for PUT/PATCH/DELETE we hit a path
+      // that doesn't exist on a real route. The origin middleware fires
+      // BEFORE routing, so the 403 is still observable.
+      const res = await app.request('/api/v1/ui/does-not-exist', {
+        method,
+      })
+      expect(res.status).toBe(403)
+    },
+  )
 
   it('allows requests with Origin matching UI_ORIGIN', async () => {
     const app = build()

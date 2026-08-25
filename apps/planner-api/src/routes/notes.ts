@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { itemNotesField, itemTitleField } from '@rallypoint/lists-shared'
+import { itemNotesField, itemTitleField, refField } from '@rallypoint/lists-shared'
 import { ListsClientError } from '@rallypoint/lists-client'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
@@ -16,7 +16,9 @@ import {
   defaultFolder,
   folderNameTaken,
   isOwnedFolder,
+  tagDeletedNotes,
   tagNotes,
+  type DeletedNoteWithFolder,
   type NoteWithFolder,
 } from '../lib/notes-folders.js'
 
@@ -39,9 +41,14 @@ import {
 // priority / dueDate stay null because the list isn't a task list.
 
 // A note's heading is required; the body is optional (empty → null).
+// `ref` is the offline-outbox idempotency key (mirrors lists-shared's
+// CreateListItemSchema.ref) — this schema is planner-local (notes have no
+// dedicated lists-shared create schema), so it must declare the field
+// itself or safeParse silently strips it before the create spread below.
 const CreateNoteSchema = z.object({
   title: itemTitleField,
   notes: itemNotesField,
+  ref: refField.nullable().optional(),
 })
 
 // Sparse edit: title/notes/folderId may change, but at least one must be
@@ -51,9 +58,15 @@ const UpdateNoteSchema = z
     title: itemTitleField.optional(),
     notes: itemNotesField,
     folderId: z.string().trim().min(1).max(64).optional(),
+    completed: z.boolean().optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.title === undefined && v.notes === undefined && v.folderId === undefined) {
+    if (
+      v.title === undefined &&
+      v.notes === undefined &&
+      v.folderId === undefined &&
+      v.completed === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [],
@@ -92,13 +105,34 @@ export const notesRoutes = new Hono<HonoApp>()
       if (folderId !== undefined) {
         const folder = folders.find((f) => f.id === folderId)
         if (!folder) throw errors.notFound('Folder not found.')
-        return tagNotes(await lists.listItems(folder.id), folder.id)
+        return tagNotes(await lists.listItems(folder.id, actor), folder.id)
       }
       // Across-all: fan out per folder, tagging each note with its folder.
       const perFolder = await Promise.all(
-        folders.map(async (f) => tagNotes(await lists.listItems(f.id), f.id)),
+        folders.map(async (f) => tagNotes(await lists.listItems(f.id, actor), f.id)),
       )
       return perFolder.flat()
+    })
+    return c.json(rows)
+  })
+
+  // Restorable notes across every live notes folder. Lists owns the
+  // 30-day cutoff; Planner adds folder attribution and a single global
+  // newest-deleted-first ordering for the Deleted sub-view.
+  .get('/api/v1/ui/notes/deleted', requireSession(), async (c) => {
+    const actor = c.var.session!.userId
+    const lists = c.var.services.listsClient
+    const rows = await proxyLists(async (): Promise<DeletedNoteWithFolder[]> => {
+      const folders = await listNotesFolders(lists, actor)
+      if (folders.length === 0) return []
+      const perFolder = await Promise.all(
+        folders.map(async (f) =>
+          tagDeletedNotes(await lists.listDeletedItems(f.id, actor), f.id),
+        ),
+      )
+      return perFolder
+        .flat()
+        .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime())
     })
     return c.json(rows)
   })
@@ -175,9 +209,15 @@ export const notesRoutes = new Hono<HonoApp>()
       if (defaultFolder(folders)?.id === folder.id) {
         throw errors.conflict('default_folder_undeletable', 'The default Notes folder cannot be deleted.')
       }
-      const items = await lists.listItems(folder.id)
-      if (items.length > 0) {
-        throw errors.conflict('folder_not_empty', 'Move or delete the folder’s notes first.')
+      const [items, deletedItems] = await Promise.all([
+        lists.listItems(folder.id, actor),
+        lists.listDeletedItems(folder.id, actor),
+      ])
+      if (items.length > 0 || deletedItems.length > 0) {
+        throw errors.conflict(
+          'folder_not_empty',
+          'Move live notes and restore deleted notes before deleting this folder.',
+        )
       }
       await lists.deleteList(folder.id, actor)
     })
@@ -261,6 +301,30 @@ export const notesRoutes = new Hono<HonoApp>()
       return { ...result, folderId: finalFolderId }
     })
     return c.json(updated)
+  })
+
+  // Restore a deleted note to its original folder. Resolve the item only
+  // among the actor's restorable notes; a live, expired, foreign, or
+  // non-note item remains opaque as 404 at the Planner boundary.
+  .post('/api/v1/ui/notes/:itemId/restore', requireSession(), async (c) => {
+    const actor = c.var.session!.userId
+    const itemId = c.req.param('itemId')
+    const lists = c.var.services.listsClient
+    const restored = await proxyLists(async (): Promise<NoteWithFolder> => {
+      const folders = await listNotesFolders(lists, actor)
+      if (folders.length === 0) throw errors.notFound('Note not found.')
+      const perFolder = await Promise.all(
+        folders.map(async (f) => ({
+          folder: f,
+          items: await lists.listDeletedItems(f.id, actor),
+        })),
+      )
+      const hit = perFolder.find(({ items }) => items.some((item) => item.id === itemId))
+      if (!hit) throw errors.notFound('Note not found.')
+      const item = await lists.restoreListItem(hit.folder.id, itemId, actor)
+      return { ...item, folderId: hit.folder.id }
+    })
+    return c.json(restored)
   })
 
   // --- delete a note -----------------------------------------------

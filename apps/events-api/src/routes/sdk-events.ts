@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import {
   PublicPageConfigSchema,
+  isEventScopedObjectKey,
   resolveEventFeatures,
   type PublicPageConfig,
 } from '@rallypoint/events-shared'
@@ -126,6 +127,7 @@ function serializeArtistDto(a: ArtistRecord): Record<string, unknown> {
     appleMusic: a.appleMusic,
     youtubeMusic: a.youtubeMusic,
     instagram: a.instagram,
+    genre: a.genre,
   }
 }
 
@@ -198,7 +200,10 @@ export const sdkEventsRoutes = new Hono<HonoApp>()
     // SDK consumers need no client-side changes.
     const origin = new URL(c.req.url).origin
     let backgroundImageUrl: string | null = null
-    if (config.theme?.background_image_key) {
+    if (
+      config.theme?.background_image_key &&
+      isEventScopedObjectKey(config.theme.background_image_key, event!.id)
+    ) {
       // Public background-image serve route (below) applies the same
       // public-page-config gate before streaming bytes from R2.
       backgroundImageUrl = `${origin}/api/v1/sdk/events/${event!.id}/background-image`
@@ -317,6 +322,12 @@ export const sdkEventsRoutes = new Hono<HonoApp>()
     const config = gate(event)
     const key = config.theme?.background_image_key
     if (!key) throw errors.notFound('No background image.')
+    // The key is owner-editable jsonb, not a server-constructed key like
+    // the map route's — refuse anything outside this event's namespace
+    // or this public route becomes an arbitrary R2 read (audit 1.1).
+    if (!isEventScopedObjectKey(key, event!.id)) {
+      throw errors.notFound('No background image.')
+    }
     const obj = await c.var.services.objectStore.get(key)
     if (!obj) throw errors.notFound('Background image not found.')
     c.header('Content-Type', obj.contentType ?? 'application/octet-stream')

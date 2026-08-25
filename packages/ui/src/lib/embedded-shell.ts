@@ -34,6 +34,18 @@ export function appendEmbeddedParam(href: string): string {
   return url.toString()
 }
 
+// True when an app-switcher target href navigates over http(s). The
+// origins come from build-time config, but a misconfigured value must
+// never turn a switcher tap into a javascript:/data: navigation. Pure.
+export function isSafeAppHref(href: string): boolean {
+  try {
+    const protocol = new URL(href).protocol
+    return protocol === 'https:' || protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 // True for iOS / iPadOS — including iPadOS 13+, which reports a desktop UA but
 // a touch-capable MacIntel platform. Pure given its three inputs.
 export function isIOSAgent(ua: string, platform: string, maxTouchPoints: number): boolean {

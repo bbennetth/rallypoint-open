@@ -8,8 +8,8 @@ import { D1LedgerActivityRepo } from './ledger-activity.js'
 import { D1ExpenseRepo } from './expenses.js'
 import { D1ExpenseCategoryRepo } from './expense-categories.js'
 import { D1SettlementRepo } from './settlements.js'
-import { D1MoneySessionRepo } from './sessions.js'
-import { D1RateLimitRepo } from './rate-limit.js'
+import { createSessionsRepo } from './sessions.js'
+import { createRateLimitRepo } from './rate-limit.js'
 
 export function buildD1Repos(db: Db): Repos {
   return {
@@ -21,8 +21,8 @@ export function buildD1Repos(db: Db): Repos {
     expenses: new D1ExpenseRepo(db),
     expenseCategories: new D1ExpenseCategoryRepo(db),
     settlements: new D1SettlementRepo(db),
-    sessions: new D1MoneySessionRepo(db),
-    rateLimit: new D1RateLimitRepo(db),
+    sessions: createSessionsRepo(db),
+    rateLimit: createRateLimitRepo(db),
   }
 }
 

@@ -6,6 +6,7 @@ import {
   CreateZoneSchema,
   PatchPoiSchema,
   PatchZoneSchema,
+  MAP_MAX_BYTES,
   MAP_MIME_EXTENSIONS,
   MAP_MIME_TYPES,
   validateMapDimensions,
@@ -15,12 +16,18 @@ import {
 import { matchesDeclaredType } from '@rallypoint/shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type { MapRecord, PoiRecord, ZoneRecord } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity } from './_access.js'
 import { publish } from '../realtime/publish.js'
 import { eventChannel, envelope } from '../realtime/channels.js'
+
+// Headroom over the file cap for the multipart envelope (boundaries +
+// the small text fields) when pre-checking the declared Content-Length.
+// The gate is a coarse "don't buffer an absurd body" guard; the precise
+// size check is still file.size after the parse.
+const MULTIPART_OVERHEAD_BYTES = 16 * 1024
 
 // Object keys are opaque + PII-free: event-maps/<eventId>/<mapId>.<ext>.
 // Reconstructed server-side from trusted ids + the declared mime's
@@ -35,7 +42,7 @@ function objectKeyFor(eventId: string, mapId: string, contentType: MapMimeType):
 // for rendering (images are served via the /image redirect, not direct
 // object storage access). Avoids bucket-path enumeration from the
 // viewer-gated GET /maps endpoint.
-function serializeMap(m: MapRecord, opts: { includeObjectKey: boolean } = { includeObjectKey: true }): Record<string, unknown> {
+export function serializeMap(m: MapRecord, opts: { includeObjectKey: boolean } = { includeObjectKey: true }): Record<string, unknown> {
   const base: Record<string, unknown> = {
     id: m.id,
     event_id: m.eventId,
@@ -53,7 +60,7 @@ function serializeMap(m: MapRecord, opts: { includeObjectKey: boolean } = { incl
   return base
 }
 
-function serializePoi(p: PoiRecord): Record<string, unknown> {
+export function serializePoi(p: PoiRecord): Record<string, unknown> {
   return {
     id: p.id,
     event_id: p.eventId,
@@ -71,7 +78,7 @@ function serializePoi(p: PoiRecord): Record<string, unknown> {
   }
 }
 
-function serializeZone(z: ZoneRecord): Record<string, unknown> {
+export function serializeZone(z: ZoneRecord): Record<string, unknown> {
   return { id: z.id, event_id: z.eventId, map_id: z.mapId, polygon: z.polygon }
 }
 
@@ -100,8 +107,20 @@ export const mapsRoutes = new Hono<HonoApp>()
   .post('/api/v1/ui/events/:id/maps', async (c) => {
     const { event } = await loadForAction(c, c.req.param('id'), 'editor')
 
+    // Reject an over-cap body by its declared length before buffering the
+    // whole multipart payload into memory. file.size is still validated
+    // precisely after the parse below.
+    const declaredLength = Number(c.req.header('content-length') ?? '')
+    if (Number.isFinite(declaredLength) && declaredLength > MAP_MAX_BYTES + MULTIPART_OVERHEAD_BYTES) {
+      throw errors.imageTooLarge({ field: 'contentLength' })
+    }
+
     const formData = await c.req.formData()
-    const file = formData.get('file')
+    // `@cloudflare/workers-types` and `@types/node` both declare a global
+    // FormData; their merge drops File from FormData.get()'s return type (it
+    // resolves to `string | null`). The runtime value is a real File for
+    // uploads, so widen the type back before the instanceof guard below.
+    const file = formData.get('file') as File | string | null
     const layer = formData.get('layer')
     const widthPxRaw = formData.get('widthPx')
     const heightPxRaw = formData.get('heightPx')

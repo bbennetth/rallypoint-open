@@ -492,7 +492,9 @@ function makeGroupMap(groups: UpcomingGroup[]): Map<string, UpcomingItem[]> {
 // correct calendar date (no UTC drift on the date parts).
 function addDays(ymd: string, days: number): string {
   const [y, m, d] = ymd.split('-').map(Number)
-  const dt = new Date(y, (m ?? 1) - 1, (d ?? 1) + days)
+  // A malformed ymd leaves y as undefined; NaN propagates to an Invalid Date
+  // rather than silently anchoring at year 0.
+  const dt = new Date(y ?? NaN, (m ?? 1) - 1, (d ?? 1) + days)
   const yr = dt.getFullYear()
   const mo = String(dt.getMonth() + 1).padStart(2, '0')
   const da = String(dt.getDate()).padStart(2, '0')
@@ -508,7 +510,7 @@ function firstOfMonth(year: number, month: number): string {
 // calendar (same system the rest of the helpers use).
 function dow(ymd: string): number {
   const [y, m, d] = ymd.split('-').map(Number)
-  return new Date(y, (m ?? 1) - 1, d ?? 1).getDay()
+  return new Date(y ?? NaN, (m ?? 1) - 1, d ?? 1).getDay()
 }
 
 // Build the month grid for a given year + month (1-based).

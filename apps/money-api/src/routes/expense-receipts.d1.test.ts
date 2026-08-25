@@ -38,6 +38,9 @@ describe('D1 integration — expense receipts', () => {
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
     },
+    profiles: {
+      lookup: async () => null,
+    },
     settings: {
       get: async () => ({}),
       patch: async (_u, _n, p) => p,
@@ -87,6 +90,9 @@ describe('D1 integration — expense receipts', () => {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': contentType,
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. All req() calls here are UI writes; supply the configured origin.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 
@@ -331,5 +337,55 @@ describe('D1 integration — expense receipts', () => {
       'image/png',
     )
     expect(res.status).toBe(200)
+  })
+
+  // --- P3 fix: clearReceipt atomicity (batch select+update) -------------
+
+  it('clearReceipt returns the prior key and clears all receipt columns', async () => {
+    // Exercises the D1ExpenseRepo.clearReceipt path directly, verifying
+    // that the batch([select, update]) implementation returns the correct
+    // prior key (the batch SELECT sees the pre-update state) and that all
+    // receipt columns are null after the call.
+    const owner = `user_${Date.now()}_clr_receipt`
+    const bearer = await loginAs(owner)
+    const { ledgerId, expenseId } = await setupExpense(owner, bearer)
+
+    // Upload a receipt first so there is a key to clear.
+    await uploadReq(
+      bearer,
+      `/api/v1/ui/ledgers/${ledgerId}/expenses/${expenseId}/receipt`,
+      PNG_BYTES,
+      'image/png',
+    )
+    const expectedKey = `expense-receipts/${ledgerId}/${expenseId}.png`
+
+    // Call clearReceipt directly via repo (also exercised by the DELETE
+    // route, but repo-level verifies the returned priorObjectKey).
+    const result = await repos.expenses.clearReceipt(expenseId)
+    expect(result).not.toBeNull()
+    expect(result!.priorObjectKey).toBe(expectedKey)
+
+    // All receipt columns are now null in the DB.
+    const expense = await repos.expenses.findByIdActive(expenseId)
+    expect(expense).not.toBeNull()
+    expect(expense!.receiptObjectKey).toBeNull()
+    expect(expense!.receiptContentType).toBeNull()
+    expect(expense!.receiptBytes).toBeNull()
+  })
+
+  it('clearReceipt on an expense with no receipt returns priorObjectKey=null', async () => {
+    const owner = `user_${Date.now()}_clr_no_receipt`
+    const bearer = await loginAs(owner)
+    const { expenseId } = await setupExpense(owner, bearer)
+
+    // No receipt uploaded — prior key should be null (row exists, columns null).
+    const result = await repos.expenses.clearReceipt(expenseId)
+    expect(result).not.toBeNull()
+    expect(result!.priorObjectKey).toBeNull()
+  })
+
+  it('clearReceipt on a missing expense id returns null', async () => {
+    const result = await repos.expenses.clearReceipt('exp_nonexistent_000000')
+    expect(result).toBeNull()
   })
 })

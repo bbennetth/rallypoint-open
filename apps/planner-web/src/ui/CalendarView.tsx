@@ -1,6 +1,19 @@
-// Calendar views for the Upcoming page: a month grid and a week strip.
+// Calendar views for the Upcoming page: a month grid and a week list.
 // Pure presentational — all data comes through props; no fetches, no state
-// beyond the +N-more overflow expansion (local per-cell).
+// beyond the +N-more overflow expansion (local per-cell) and the mobile
+// month-view's selected day (local per-render of MonthMini).
+//
+// Three exports, two variants:
+//   MonthGrid  — desktop full grid (>=601px) + delegates to MonthMini on mobile
+//   MonthMini  — phone-only iOS-Calendar pattern (dot grid + agenda below)
+//   WeekStrip  — vertical list of day cards (`.wk-list` / `.wk-day` / etc.)
+//
+// Both month variants live behind a `@media (max-width: 600px)` switch in
+// apps/planner-web/src/index.css that hides whichever variant isn't
+// appropriate; React renders both wrapped in `.cal-month-desktop` /
+// `.cal-month-mobile` so the swap is paint-only (no layout thrash).
+
+import { useEffect, useMemo, useState, type ReactElement } from 'react'
 
 import type { CalendarCell, UpcomingGroup } from '../lib/planner-helpers.js'
 import {
@@ -154,47 +167,264 @@ export function MonthGrid({
     else onMonthChange(year, month + 1)
   }
 
+  const navHeader = (
+    <div className="cal-nav">
+      <button
+        type="button"
+        className="pl-iconbtn"
+        onClick={prevMonth}
+        aria-label="Previous month"
+      >
+        <span style={{ display: 'flex', transform: 'rotate(180deg)' }}>
+          <Icon name="chevron" size={14} />
+        </span>
+      </button>
+      <span className="cal-nav-title">
+        {MONTH_NAMES[(month - 1) % 12]} {year}
+      </span>
+      <button
+        type="button"
+        className="pl-iconbtn"
+        onClick={nextMonth}
+        aria-label="Next month"
+      >
+        <Icon name="chevron" size={14} />
+      </button>
+    </div>
+  )
+
   return (
     <div className="cal-month" data-noswipe>
-      <div className="cal-nav">
-        <button
-          type="button"
-          className="pl-iconbtn"
-          onClick={prevMonth}
-          aria-label="Previous month"
-        >
-          <span style={{ display: 'flex', transform: 'rotate(180deg)' }}>
-            <Icon name="chevron" size={14} />
-          </span>
-        </button>
-        <span className="cal-nav-title">
-          {MONTH_NAMES[(month - 1) % 12]} {year}
-        </span>
-        <button
-          type="button"
-          className="pl-iconbtn"
-          onClick={nextMonth}
-          aria-label="Next month"
-        >
-          <Icon name="chevron" size={14} />
-        </button>
+      {/* Desktop variant: the full `.cal-grid` matrix. Hidden by CSS
+          below 601px. */}
+      <div className="cal-month-desktop">
+        {navHeader}
+        <div className="cal-grid">
+          {dowLabels.map((lbl) => (
+            <div key={lbl} className="cal-dow-hdr">
+              {lbl}
+            </div>
+          ))}
+          {rows.flat().map((cell) => (
+            <CalCell
+              key={cell.date}
+              cell={cell}
+              todayYmd={todayYmd}
+              onDayClick={onDayClick}
+              onItemClick={onItemClick}
+            />
+          ))}
+        </div>
       </div>
-      <div className="cal-grid">
-        {dowLabels.map((lbl) => (
-          <div key={lbl} className="cal-dow-hdr">
-            {lbl}
+      {/* Phone-only variant: dot grid + agenda below. Hidden by CSS
+          above 600px. */}
+      <div className="cal-month-mobile">
+        <MonthMini
+          rows={rows}
+          dowLabels={dowLabels}
+          todayYmd={todayYmd}
+          onItemClick={onItemClick}
+          navHeader={navHeader}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ── Mobile compact month view ─────────────────────────────────────
+
+/**
+ * iOS-Calendar pattern: a tight 7-column dot grid (each cell shows day
+ * number + up to two colored dots: gray for tasks, accent for events)
+ * with a `.cal-agenda` panel below that lists the selected day's items.
+ * Selecting a day re-renders the agenda; the selection is local-state
+ * so it survives swiping between months only as long as the component
+ * stays mounted (intentional — a fresh month should start at today /
+ * the first day with items).
+ */
+function MonthMini({
+  rows,
+  dowLabels,
+  todayYmd,
+  onItemClick,
+  navHeader,
+}: {
+  rows: CalendarCell[][]
+  dowLabels: string[]
+  todayYmd: string
+  onItemClick: (item: UpcomingItem) => void
+  navHeader: ReactElement
+}) {
+  const flat = useMemo(() => rows.flat(), [rows])
+  // Identify the rendered month by its first in-current-month YMD's
+  // year-month prefix (`'YYYY-MM'`). Changes when the user navigates
+  // prev/next; the selection effect below resets `selDate` to a sane
+  // default for the new month so the agenda doesn't go blank.
+  const monthKey = useMemo(() => {
+    const firstInMonth = flat.find((c) => c.inCurrentMonth)
+    return firstInMonth?.date.slice(0, 7) ?? ''
+  }, [flat])
+
+  // Pick a sensible default selection for a given grid: today if it's
+  // in the current month, else the first in-month day with items, else
+  // the first in-month day.
+  function defaultSelFor(cells: CalendarCell[]): string {
+    const todayInMonth = cells.find(
+      (c) => c.date === todayYmd && c.inCurrentMonth,
+    )
+    if (todayInMonth) return todayInMonth.date
+    const firstWithItems = cells.find(
+      (c) => c.inCurrentMonth && c.items.length > 0,
+    )
+    if (firstWithItems) return firstWithItems.date
+    const firstInMonth = cells.find((c) => c.inCurrentMonth)
+    return firstInMonth?.date ?? todayYmd
+  }
+
+  const [selDate, setSelDate] = useState<string>(() => defaultSelFor(flat))
+
+  // When the rendered month changes (prev/next nav), reset the
+  // selection so the agenda stays in sync. Local-state edits within
+  // the same month don't reset (only the monthKey transition does).
+  // `flat` is rebuilt on every render but only re-derives when `rows`
+  // changes; we intentionally gate on `monthKey` (and not `flat`) so
+  // selection only resets when the user navigates to a different
+  // month, not on every render.
+  useEffect(() => {
+    setSelDate(defaultSelFor(flat))
+  }, [monthKey, flat])
+
+  const selCell = flat.find((c) => c.date === selDate) ?? null
+  const dowMini = dowLabels.map((d) => d.slice(0, 1))
+
+  return (
+    <>
+      {navHeader}
+      <div className="cal-mini" role="grid">
+        {dowMini.map((d, i) => (
+          <div key={`${d}-${i}`} className="cal-mini-dow">
+            {d}
           </div>
         ))}
-        {rows.flat().map((cell) => (
-          <CalCell
-            key={cell.date}
-            cell={cell}
-            todayYmd={todayYmd}
-            onDayClick={onDayClick}
-            onItemClick={onItemClick}
-          />
-        ))}
+        {flat.map((cell) => {
+          if (!cell.inCurrentMonth) {
+            return <div key={cell.date} className="cal-day out" />
+          }
+          const isToday = cell.date === todayYmd
+          const isSel = cell.date === selDate
+          const hasEv = cell.items.some(
+            (i) => i.kind === 'event' || i.kind === 'eventDay',
+          )
+          // Holidays render alongside tasks under the gray dot — they
+          // share the "things to know about this day" visual role; only
+          // events warrant the accent treatment.
+          const hasTask = cell.items.some(
+            (i) => i.kind === 'task' || i.kind === 'holiday',
+          )
+          const dayNum = Number(cell.date.slice(8))
+          return (
+            <button
+              key={cell.date}
+              type="button"
+              className={
+                'cal-day' +
+                (isToday ? ' today' : '') +
+                (isSel ? ' sel' : '')
+              }
+              aria-selected={isSel}
+              aria-label={cell.date}
+              onClick={() => setSelDate(cell.date)}
+            >
+              <span className="n">{dayNum}</span>
+              {(hasEv || hasTask) && (
+                <span className="cal-day-dots" aria-hidden>
+                  {hasEv && <span className="cal-dot ev" />}
+                  {hasTask && <span className="cal-dot" />}
+                </span>
+              )}
+            </button>
+          )
+        })}
       </div>
+      <MonthMiniAgenda
+        cell={selCell}
+        todayYmd={todayYmd}
+        onItemClick={onItemClick}
+      />
+    </>
+  )
+}
+
+function MonthMiniAgenda({
+  cell,
+  todayYmd,
+  onItemClick,
+}: {
+  cell: CalendarCell | null
+  todayYmd: string
+  onItemClick: (item: UpcomingItem) => void
+}) {
+  if (!cell) return null
+  const isToday = cell.date === todayYmd
+  return (
+    <div className="cal-agenda">
+      <div className="cal-agenda-hd">
+        <span className="d">{groupDateLabel(cell.date)}</span>
+        {isToday && (
+          <span
+            className="pl-chip accent"
+            aria-label="Today"
+            style={{ marginLeft: 'auto' }}
+          >
+            Today
+          </span>
+        )}
+      </div>
+      {cell.items.length === 0 ? (
+        <div className="cal-agenda-empty">Nothing scheduled</div>
+      ) : (
+        <div className="cal-agenda-list">
+          {cell.items.map((it) => {
+            const isEv = it.kind === 'event' || it.kind === 'eventDay'
+            const title =
+              it.kind === 'task'
+                ? it.task.title
+                : it.kind === 'eventDay'
+                  ? it.eventDay.name
+                  : it.kind === 'holiday'
+                    ? it.holiday.name
+                    : it.event.name
+            const key =
+              it.kind === 'task'
+                ? `task:${it.task.id}`
+                : it.kind === 'event'
+                  ? `event:${it.event.id}`
+                  : it.kind === 'holiday'
+                    ? `holiday:${it.holiday.id}`
+                    : `eventDay:${it.eventDay.eventId}@${it.eventDay.date}`
+            // Collapse the discriminated-union's internal kind to the
+            // user-facing role label (the agenda doesn't need to
+            // distinguish `event` vs `eventDay`).
+            const kindLabel =
+              it.kind === 'eventDay' ? 'event' : it.kind
+            return (
+              <button
+                key={key}
+                type="button"
+                className="cal-agenda-item"
+                onClick={() => onItemClick(it)}
+              >
+                <span
+                  className={'cal-dot' + (isEv ? ' ev' : '')}
+                  aria-hidden
+                />
+                <span className="t">{title}</span>
+                <span className="k">{kindLabel}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -224,14 +454,14 @@ export function WeekStrip({
   // Navigate by 7 days forward / back
   function prevWeek() {
     const [y, m, d] = anchorYmd.split('-').map(Number)
-    const dt = new Date(y, (m ?? 1) - 1, (d ?? 1) - 7)
+    const dt = new Date(y ?? NaN, (m ?? 1) - 1, (d ?? 1) - 7)
     onWeekChange(
       `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`,
     )
   }
   function nextWeek() {
     const [y, m, d] = anchorYmd.split('-').map(Number)
-    const dt = new Date(y, (m ?? 1) - 1, (d ?? 1) + 7)
+    const dt = new Date(y ?? NaN, (m ?? 1) - 1, (d ?? 1) + 7)
     onWeekChange(
       `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`,
     )
@@ -271,21 +501,76 @@ export function WeekStrip({
           <Icon name="chevron" size={14} />
         </button>
       </div>
-      <div className="cal-grid cal-grid--week">
-        {dowLabels.map((lbl) => (
-          <div key={lbl} className="cal-dow-hdr">
-            {lbl}
-          </div>
-        ))}
-        {cells.map((cell) => (
-          <CalCell
-            key={cell.date}
-            cell={cell}
-            todayYmd={todayYmd}
-            onDayClick={onDayClick}
-            onItemClick={onItemClick}
-          />
-        ))}
+      {/* Kit's vertical-list Week view: one .wk-day card per day, each
+          with a left rail (dow label + big day number) and a right
+          items list. Replaces the prior `.cal-grid--week` 7-column
+          variant which shared CalCell with MonthGrid. */}
+      <div className="wk-list">
+        {cells.map((cell, idx) => {
+          const isToday = cell.date === todayYmd
+          const dayNum = Number(cell.date.slice(8))
+          const dow = dowLabels[idx % 7] ?? ''
+          return (
+            <div
+              key={cell.date}
+              className={'wk-day' + (isToday ? ' is-today' : '')}
+            >
+              <button
+                type="button"
+                className="wk-rail"
+                onClick={() => onDayClick(cell.date)}
+                aria-label={`Open ${cell.date}`}
+                style={{ all: 'unset', cursor: 'pointer' }}
+              >
+                <span className="wk-dow">{dow}</span>
+                <span className="wk-dnum">{dayNum}</span>
+              </button>
+              <div className="wk-items">
+                {cell.items.length === 0 ? (
+                  <span className="wk-empty">Nothing scheduled</span>
+                ) : (
+                  cell.items.map((it) => {
+                    const isEv = it.kind === 'event' || it.kind === 'eventDay'
+                    const title =
+                      it.kind === 'task'
+                        ? it.task.title
+                        : it.kind === 'eventDay'
+                          ? it.eventDay.name
+                          : it.kind === 'holiday'
+                            ? it.holiday.name
+                            : it.event.name
+                    const completed =
+                      it.kind === 'task' ? it.task.completed : false
+                    const key =
+                      it.kind === 'task'
+                        ? `task:${it.task.id}`
+                        : it.kind === 'event'
+                          ? `event:${it.event.id}`
+                          : it.kind === 'holiday'
+                            ? `holiday:${it.holiday.id}`
+                            : `eventDay:${it.eventDay.eventId}@${it.eventDay.date}`
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        className={'wk-item' + (isEv ? ' ev' : '')}
+                        data-completed={completed || undefined}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onItemClick(it)
+                        }}
+                        title={title}
+                      >
+                        <span className="wk-dot" aria-hidden />
+                        {title}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          )
+        })}
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ListDto, ListItemDto, ListsClient } from '@rallypoint/lists-client'
-import { choresInFeedsEnabled, fetchChoresFeedItems } from './chores-feed.js'
+import { choresInFeedsEnabled, fetchChoresFeed, fetchChoresFeedItems } from './chores-feed.js'
 
 // Pure + light-integration coverage for the chores→feed plumbing (#546).
 
@@ -71,12 +71,54 @@ describe('fetchChoresFeedItems', () => {
     expect(result.map((i) => i.id)).toEqual(['lit_1'])
   })
 
-  it('returns [] when the toggle is OFF', async () => {
+  it('returns [] when the toggle is OFF (default future scope)', async () => {
     const list = choresList('lst_c', 'lgr_p')
     const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
     const client = makeFake({ lists: [list], items: [item] })
     const result = await fetchChoresFeedItems(client, settingsOff, actor)
     expect(result).toEqual([])
+  })
+
+  it('today scope returns chores even when the toggle is OFF (always-on)', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    const result = await fetchChoresFeedItems(client, settingsOff, actor, 'today')
+    expect(result.map((i) => i.id)).toEqual(['lit_1'])
+  })
+
+  it('today scope still returns chores when the toggle is ON', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    const result = await fetchChoresFeedItems(client, settingsOn, actor, 'today')
+    expect(result.map((i) => i.id)).toEqual(['lit_1'])
+  })
+
+  it('future scope is gated explicitly when the toggle is OFF', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    const result = await fetchChoresFeedItems(client, settingsOff, actor, 'future')
+    expect(result).toEqual([])
+  })
+
+  it('today scope skips the settings read entirely (no settings dependency)', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    // settingsThrows would normally fall back to ON via the catch; here we
+    // want to prove the read isn't even attempted for today scope.
+    let settingsCalled = false
+    const settingsCounted: typeof settingsThrows = {
+      get: async () => {
+        settingsCalled = true
+        return {}
+      },
+    }
+    const result = await fetchChoresFeedItems(client, settingsCounted, actor, 'today')
+    expect(settingsCalled).toBe(false)
+    expect(result.map((i) => i.id)).toEqual(['lit_1'])
   })
 
   it('returns [] when no chores list exists yet (never provisions)', async () => {
@@ -90,5 +132,34 @@ describe('fetchChoresFeedItems', () => {
     const client = makeFake({ lists: [list], items: [item] })
     const result = await fetchChoresFeedItems(client, settingsThrows, actor)
     expect(result.map((i) => i.id)).toEqual(['lit_1'])
+  })
+})
+
+describe('fetchChoresFeed (id + items)', () => {
+  const actor = 'user_a'
+
+  it('returns the chores-list id alongside the items', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    const result = await fetchChoresFeed(client, settingsOn, actor, 'today')
+    expect(result.listId).toBe('lst_c')
+    expect(result.items.map((i) => i.id)).toEqual(['lit_1'])
+  })
+
+  it('returns a null id and no items when no chores list exists (never provisions)', async () => {
+    const client = makeFake({ lists: [] })
+    expect(await fetchChoresFeed(client, settingsOn, actor, 'today')).toEqual({
+      listId: null,
+      items: [],
+    })
+  })
+
+  it('future scope with toggle OFF suppresses items but still reports the id', async () => {
+    const list = choresList('lst_c', 'lgr_p')
+    const item = { id: 'lit_1', listId: 'lst_c', title: 'Trash' } as unknown as ListItemDto
+    const client = makeFake({ lists: [list], items: [item] })
+    const result = await fetchChoresFeed(client, settingsOff, actor, 'future')
+    expect(result).toEqual({ listId: 'lst_c', items: [] })
   })
 })

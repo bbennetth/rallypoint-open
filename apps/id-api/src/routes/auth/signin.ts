@@ -19,6 +19,7 @@ import {
   constantTimeEqual,
 } from '@rallypoint/crypto'
 import { issueSession } from '../../session/issue.js'
+import { normalizeEmail } from '../../lib/normalize-email.js'
 import { renderSignin2faCode } from '../../mailer-templates/signin-2fa-code.js'
 import { renderVerifyEmail } from '../../mailer-templates/verify-email.js'
 import type { PasswordHasher } from '../../crypto/password.js'
@@ -51,18 +52,54 @@ import { avatarPictureUrl } from '../../avatar-url.js'
 const CHALLENGE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 
+// Account lockout (2.5). After this many consecutive wrong-password
+// /signin/start attempts, the account is locked for SIGNIN_LOCK_MS. A
+// locked account is refused with the SAME generic response as a wrong
+// password (no "account locked" leak), and the correct password during a
+// lock is still refused. A correct password when NOT locked clears the
+// counter. This is per-account state (users table), complementing the
+// per-IP and per-email rate limits — it bounds total guesses at one
+// account regardless of source. Intentional tradeoff: an attacker who
+// knows an email can keep it locked, a DoS we accept because reset flows
+// (and the 15-minute expiry) recover it without support.
+const SIGNIN_LOCK_THRESHOLD = 10
+const SIGNIN_LOCK_MS = 15 * 60 * 1000 // 15 minutes
+
+// Enumeration-timing equalizer id. Only a real, unlocked, password-holding
+// account that guessed wrong actually accrues a failed-signin attempt — but
+// if that were the ONLY failure branch to issue the extra users-UPDATE, its
+// latency would leak "this account exists, has a password, and isn't locked".
+// So the other failure branches (no such user / no password method / already
+// locked) issue a matching no-op UPDATE against this sentinel id (matches 0
+// rows) via equalizeFailedSigninWrite(), keeping every failure path at one
+// users-write + one audit-write. The locked branch in particular must NOT
+// record against the REAL id, or an attacker hammering a locked account would
+// perpetually re-extend its own lock. Sentinel is deliberately not a valid
+// `user_<ULID>`, so it can never collide with a real row.
+const SIGNIN_ENUM_EQUALIZER_USER_ID = 'user_enum_equalizer_sentinel' as UserId
+
 export interface SigninCtx {
   repos: Repos
   services: Services
   passwordHasher: PasswordHasher
   argon2PepperKey: string
   signinCodeHmacKey: string
+  sessionHmacKey: string
   publicBaseUrl: string
   ipAddress: string
   userAgent: string
   tenantId?: string
   now?: () => Date
   logger?: Logger
+  /**
+   * Dev-only 2FA code override. When set, every issued + resent
+   * signin code is forced to this constant instead of a random
+   * 6-digit string — so dev loops can complete signin by typing the
+   * known value instead of fishing the random code out of the
+   * MAILER=log'd email. Never set in qa/prod. Plumbed from the
+   * `DEV_SIGNIN_CODE_OVERRIDE` env var by the route layer.
+   */
+  devSigninCodeOverride?: string
 }
 
 export interface SigninStartResult {
@@ -78,7 +115,8 @@ export async function handleSigninStart(
   if (!parsed.success) {
     throw errors.validation({ issues: parsed.error.issues })
   }
-  const { email, password } = parsed.data
+  const { password } = parsed.data
+  const email = normalizeEmail(parsed.data.email)
   const tenantId = ctx.tenantId ?? TENANT_DEFAULT
   const now = ctx.now ?? (() => new Date())
   const salt = dailySalt(ctx.argon2PepperKey, now())
@@ -86,6 +124,8 @@ export async function handleSigninStart(
   const uaHash = hashUserAgent(ctx.userAgent)
 
   // Email is the only login identifier — username is non-unique.
+  // Normalized on the comparison side so a mixed-case account created
+  // before this normalization was added is still found (#675).
   const user = await ctx.repos.users.findByEmail(tenantId, email)
 
   if (!user) {
@@ -95,6 +135,7 @@ export async function handleSigninStart(
     // as challenge_invalid (which we also return for legitimate
     // wrong-code attempts — no enumeration leak).
     await ctx.passwordHasher.dummyVerify()
+    await equalizeFailedSigninWrite(ctx, null, now())
     await ctx.repos.audit.write({
       tenantId,
       eventType: 'signin.attempt',
@@ -106,10 +147,34 @@ export async function handleSigninStart(
     return { ok: true, challengeId: generateChallengeId() }
   }
 
+  // Account locked? Refuse with the same generic challenge-issued shape as
+  // a wrong password — no "account locked" signal — and burn an argon2
+  // cycle so a locked account is timing-indistinguishable from an unlocked
+  // one. The real password is NOT verified while locked, and we record the
+  // failure against the SENTINEL (not user.id) so hammering a locked account
+  // can't perpetually re-extend its lock.
+  if (user.lockedUntil && user.lockedUntil.getTime() > now().getTime()) {
+    await ctx.passwordHasher.dummyVerify()
+    await equalizeFailedSigninWrite(ctx, null, now())
+    await ctx.repos.audit.write({
+      tenantId,
+      eventType: 'signin.failure',
+      userId: user.id,
+      ipHash,
+      uaHash,
+      meta: { reason: 'account_locked' },
+    })
+    return { ok: true, challengeId: generateChallengeId() }
+  }
+
   // Look up the password auth method.
   const auth = await ctx.repos.authMethods.findByUserAndKind(user.id, 'password')
   if (!auth) {
+    // Account exists but has no password (OAuth/passkey only) — nothing to
+    // brute-force, so DON'T accrue a real failure (it could lock a
+    // passwordless account). Equalize with a sentinel no-op write instead.
     await ctx.passwordHasher.dummyVerify()
+    await equalizeFailedSigninWrite(ctx, null, now())
     await ctx.repos.audit.write({
       tenantId,
       eventType: 'signin.attempt',
@@ -127,6 +192,9 @@ export async function handleSigninStart(
     password,
   )
   if (!passwordOk) {
+    // The one branch that records a REAL failed attempt against user.id;
+    // crossing the threshold stamps locked_until.
+    await equalizeFailedSigninWrite(ctx, user.id, now())
     await ctx.repos.audit.write({
       tenantId,
       eventType: 'signin.failure',
@@ -136,6 +204,16 @@ export async function handleSigninStart(
       meta: { reason: 'bad_password' },
     })
     return { ok: true, challengeId: generateChallengeId() }
+  }
+
+  // Password correct — clear any accumulated lockout state. Gated so the
+  // common clean-record login doesn't write on every attempt. A benign race
+  // exists (a concurrent wrong-guess crossing the threshold could re-lock
+  // right after this clears) but it never grants access: the owner has
+  // already proven the correct password here, so clearing a just-set lock is
+  // the correct outcome, not a bypass.
+  if (user.failedSigninCount > 0 || user.lockedUntil) {
+    await ctx.repos.users.clearSigninFailures(user.id)
   }
 
   // Password OK. If the email is unverified, silently resend a
@@ -158,7 +236,7 @@ export async function handleSigninStart(
   // Password OK + email verified → issue real challenge and send the
   // 2FA code.
   const challengeId = generateChallengeId()
-  const code = generateSigninCode()
+  const code = ctx.devSigninCodeOverride ?? generateSigninCode()
   const codeHmac = hmacSigninCode(code, ctx.signinCodeHmacKey)
   const expiresAt = new Date(now().getTime() + CHALLENGE_TTL_MS)
   await ctx.repos.signinChallenges.create({
@@ -325,6 +403,7 @@ export async function handleSigninComplete(
     tenantId: user.tenantId,
     ipHash,
     uaHash,
+    sessionHmacKey: ctx.sessionHmacKey,
     now,
   })
 
@@ -410,7 +489,7 @@ export async function handleSigninResend(
   const user = await ctx.repos.users.findById(challenge.userId)
   if (!user) return { ok: true }
 
-  const newCode = generateSigninCode()
+  const newCode = ctx.devSigninCodeOverride ?? generateSigninCode()
   const newHmac = hmacSigninCode(newCode, ctx.signinCodeHmacKey)
   // rotateCode bakes in INITIAL_ATTEMPTS — caller doesn't pass it (#31).
   await ctx.repos.signinChallenges.rotateCode({
@@ -454,6 +533,22 @@ export async function handleSigninResend(
 }
 
 // --- internals ------------------------------------------------------
+
+// Record a failed signin attempt while keeping every failure branch's D1
+// write-count uniform (see SIGNIN_ENUM_EQUALIZER_USER_ID). `userId` non-null
+// records a real attempt (may lock); null issues a no-op UPDATE against the
+// sentinel so the branch still pays one users-write without mutating state.
+async function equalizeFailedSigninWrite(
+  ctx: SigninCtx,
+  userId: UserId | null,
+  at: Date,
+): Promise<void> {
+  await ctx.repos.users.recordFailedSignin(userId ?? SIGNIN_ENUM_EQUALIZER_USER_ID, {
+    now: at,
+    threshold: SIGNIN_LOCK_THRESHOLD,
+    lockMs: SIGNIN_LOCK_MS,
+  })
+}
 
 async function issueVerificationSilently(
   ctx: SigninCtx,

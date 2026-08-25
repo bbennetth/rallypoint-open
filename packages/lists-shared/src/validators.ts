@@ -30,7 +30,20 @@ import { viewConfigField } from './views.js'
 // entry's day) with mood + arbitrary metrics captured in custom fields; its
 // own discriminator lets the Planner Diary tab route to it and every task
 // surface hide it. System-managed like chores/notes/shopping.
-export const LIST_TYPES = ['tasks', 'standard', 'shopping', 'notes', 'chores', 'diary'] as const
+// `braindump` is a standard-shaped list whose items are free-text captures
+// (title = heading, `notes` = body, dueDate = capture day) with AI-derived
+// metadata (category, themes/entities/summary) riding custom fields; its own
+// discriminator lets the Planner Brain Dump tab route to it and every task
+// surface hide it. System-managed like diary.
+export const LIST_TYPES = [
+  'tasks',
+  'standard',
+  'shopping',
+  'notes',
+  'chores',
+  'diary',
+  'braindump',
+] as const
 export const listTypeField = z.enum(LIST_TYPES)
 export type ListType = (typeof LIST_TYPES)[number]
 
@@ -292,6 +305,18 @@ function dedupe<T>(arr: T[]): T[] {
 // create and PATCH (full replace — not additive).
 export const labelIdsField = z.array(labelIdField).max(50).transform(dedupe)
 
+// Opaque idempotency key for offline-retry-safe creates (repo-wide
+// "offline create retries must be idempotent" fix, mirrors money-shared's
+// expenseRefField). Clients send a stable id (e.g. `tmp_<uuid>`, 40
+// chars) as `ref` on a create; a retry with the same (list_id, ref)
+// returns the original row instead of inserting a duplicate. Bounded to
+// keep the partial-unique index tidy.
+export const refField = z
+  .string()
+  .trim()
+  .min(1, 'ref must not be empty.')
+  .max(256, 'ref must be at most 256 characters.')
+
 export const CreateListItemSchema = z.object({
   title: itemTitleField,
   notes: itemNotesField,
@@ -320,6 +345,9 @@ export const CreateListItemSchema = z.object({
   // Omitted or true → categorize as normal (backward-compat default).
   // Only meaningful for shopping lists; the server ignores it for other types.
   autoCategorize: z.boolean().optional(),
+  // Idempotency key (offline create-retry dedup). Omit for un-keyed,
+  // unconstrained creates — the pre-existing behavior.
+  ref: refField.nullable().optional(),
 })
 export type CreateListItemInput = z.infer<typeof CreateListItemSchema>
 

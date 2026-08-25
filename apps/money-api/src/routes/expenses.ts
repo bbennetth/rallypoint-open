@@ -17,7 +17,7 @@ import type {
   ExpenseWithSplits,
   LedgerRecord,
 } from '../repos/types.js'
-import { UniqueConstraintError } from '../repos/errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { readJsonBody } from './_body.js'
 import { envelope, ledgerChannel } from '../realtime/channels.js'
 import { publish } from '../realtime/publish.js'
@@ -268,6 +268,12 @@ export const expensesRoutes = new Hono<HonoApp>()
 
     const updated = await c.var.repos.expenses.patch(exp.id, parsed.data)
     if (!updated) throw errors.expenseNotFound()
+    // Re-fetch splits from the DB so the response always reflects the
+    // live split rows. The pre-patch `exp.splits` snapshot is stale
+    // the moment a concurrent write or a future split-patching path
+    // lands (P2 finding: returning pre-patch splits on PATCH response).
+    const freshWithSplits = await c.var.repos.expenses.findByIdActive(updated.id)
+    if (!freshWithSplits) throw errors.expenseNotFound()
     await recordActivity(c, ledger.id, 'expense.patched', {
       expense_id: exp.id,
       fields: Object.keys(parsed.data),
@@ -277,9 +283,7 @@ export const expensesRoutes = new Hono<HonoApp>()
       ledgerChannel(ledger.id),
       envelope('expenses', 'update', exp.id, c.var.session!.userId),
     )
-    return c.json({
-      ...serializeExpense({ ...updated, splits: exp.splits }),
-    })
+    return c.json(serializeExpense(freshWithSplits))
   })
 
   // --- soft-delete (member+) -----------------------------------------

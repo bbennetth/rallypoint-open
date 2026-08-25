@@ -1,0 +1,195 @@
+# fitness-api as a Cloudflare Worker. `wrangler deploy --env qa`
+# -> health.rallypt.dev, `--env prod` -> health.rallypt.app. Entry is
+# src/worker.ts (`{ fetch }`).
+#
+# Account + auth come from CI/the deployer (CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned by
+# wrangler / the bootstrap step (rp-fitness-{qa,prod} created if absent;
+# database_id injected by cf-deploy.yml at deploy time). Real secrets via
+# `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step):
+#   FITNESS_SESSION_KEY_V1
+# Durable Objects: RestTimerAlarm (rest-timer push delivery — see the
+# push block below). R2 (OBJECT_STORE) holds Body Stats progress
+# pictures; buckets are rallypoint-fitness-{dev,qa,prod} and must exist
+# before deploy (`wrangler r2 bucket create …`).
+
+name = "rallypoint-fitness"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the fitness-web SPA from the assets dir; run the Worker first only for
+# the API, so /api/* hits the Worker while the SPA serves first-party from
+# the same origin (the __Host- cookie config). The deploy build populates
+# ./public from `npm run build -w @rallypoint/fitness-web`; a committed
+# placeholder keeps `wrangler dev` working pre-build.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# Rest-timer push notifications (mirrors planner-api): VAPID_* secrets via
+# `wrangler secret bulk --env <env>`:
+#   VAPID_PUBLIC_KEY      (served to fitness-web via GET /api/v1/push/public-key)
+#   VAPID_PRIVATE_KEY
+#   VAPID_SUBJECT         (contact URI, e.g. mailto:ops@rallypt.app)
+# Delivery: RestTimerAlarm Durable Object alarm at fire_at (rest periods
+# are shorter than the cron granularity) + a per-minute cron sweep as the
+# safety net. DO migration + binding + [triggers] are redeclared per env
+# below (wrangler does not inherit them into named envs).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RestTimerAlarm"]
+
+[[durable_objects.bindings]]
+name = "REST_ALARMS"
+class_name = "RestTimerAlarm"
+
+[triggers]
+crons = ["* * * * *"]
+
+# Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
+# dev-safe defaults for the secrets.
+[vars]
+NODE_ENV = "development"
+FITNESS_UI_ORIGIN = "http://localhost:5178"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rp-fitness-local"
+# Ignored by `wrangler dev --local` (local SQLite store); a real id is only
+# needed for the per-env deploy blocks below.
+database_id = "local-dev-unused"
+migrations_dir = "../../packages/fitness-db/migrations"
+
+# Workers AI binding for the whiteboard-photo OCR endpoint
+# (POST /api/v1/ui/scan/wod). Free tier on Workers AI is enough for
+# the Ink-redesign launch; rate limits apply on the upstream account.
+# Local `wrangler dev` proxies the call to the real Workers AI runtime
+# when the developer is logged in; offline → the route 502s with a
+# message the UI surfaces as "could not read the board".
+[ai]
+binding = "AI"
+
+# Private R2 bucket for Body Stats progress pictures. `wrangler dev
+# --local` (Miniflare) auto-creates the local bucket; the qa/prod
+# buckets must be provisioned once with `wrangler r2 bucket create`.
+[[r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-fitness-dev"
+
+# Top-level service binding — required for cross-process RPC under
+# wrangler's local dev registry (feat/rpc-bindings pattern).
+[[services]]
+binding = "RPID"
+service = "rallypoint-id"
+entrypoint = "IdRPC"
+
+# events-api coordinate weather forecast (running weather snapshots) —
+# the same Open-Meteo pipeline Planner's My Day uses.
+[[services]]
+binding = "EVENTS"
+service = "rallypoint-events"
+entrypoint = "EventsRPC"
+
+# AI trace-corpus ingest + feedback (ai-api). Fire-and-forget from the
+# vision services; absent binding just means scans run untraced.
+[[services]]
+binding = "AI_TRACES"
+service = "rallypoint-ai"
+entrypoint = "AiRPC"
+
+# ---- QA: health.rallypt.dev ------------------------------------------
+# AI_GATEWAY_ID routes the Workers AI vision calls through the
+# `rallypoint-ai` Cloudflare AI Gateway (logging / caching / cost
+# visibility). The gateway must exist in the CF account before deploy
+# (dashboard: AI → AI Gateway → Create). Omitted from the top-level dev
+# [vars] so local `wrangler dev` calls Workers AI directly.
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
+[env.qa]
+vars = { NODE_ENV = "production", FITNESS_UI_ORIGIN = "https://health.rallypt.dev", AI_GATEWAY_ID = "rallypoint-ai", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
+
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "rp-fitness-qa"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+migrations_dir = "../../packages/fitness-db/migrations"
+
+[[env.qa.services]]
+binding = "RPID"
+entrypoint = "IdRPC"
+service = "rallypoint-id-qa"
+
+[[env.qa.services]]
+binding = "EVENTS"
+entrypoint = "EventsRPC"
+service = "rallypoint-events-qa"
+
+[[env.qa.services]]
+binding = "AI_TRACES"
+entrypoint = "AiRPC"
+service = "rallypoint-ai-qa"
+
+[[env.qa.routes]]
+pattern = "health.rallypt.dev"
+custom_domain = true
+
+[env.qa.ai]
+binding = "AI"
+
+[[env.qa.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-fitness-qa"
+
+[[env.qa.durable_objects.bindings]]
+name = "REST_ALARMS"
+class_name = "RestTimerAlarm"
+
+[env.qa.triggers]
+crons = ["* * * * *"]
+
+# ---- Prod: health.rallypt.app ----------------------------------------
+[env.prod]
+vars = { NODE_ENV = "production", FITNESS_UI_ORIGIN = "https://health.rallypt.app", AI_GATEWAY_ID = "rallypoint-ai", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "rp-fitness-prod"
+# database_id injected by cf-deploy.yml at deploy time — do NOT add manually
+migrations_dir = "../../packages/fitness-db/migrations"
+
+[[env.prod.services]]
+binding = "RPID"
+entrypoint = "IdRPC"
+service = "rallypoint-id-prod"
+
+[[env.prod.services]]
+binding = "EVENTS"
+entrypoint = "EventsRPC"
+service = "rallypoint-events-prod"
+
+[[env.prod.services]]
+binding = "AI_TRACES"
+entrypoint = "AiRPC"
+service = "rallypoint-ai-prod"
+
+[[env.prod.routes]]
+pattern = "health.rallypt.app"
+custom_domain = true
+
+[env.prod.ai]
+binding = "AI"
+
+[[env.prod.r2_buckets]]
+binding = "OBJECT_STORE"
+bucket_name = "rallypoint-fitness-prod"
+
+[[env.prod.durable_objects.bindings]]
+name = "REST_ALARMS"
+class_name = "RestTimerAlarm"
+
+[env.prod.triggers]
+crons = ["* * * * *"]

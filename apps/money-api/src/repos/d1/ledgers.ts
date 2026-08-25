@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, isNull } from 'drizzle-orm'
-import { ledgers } from '@rallypoint/money-db'
+import { ledgers, ledgerMembers } from '@rallypoint/money-db'
 import type {
   CreateLedgerInput,
   LedgerRecord,
@@ -110,5 +110,50 @@ export class D1LedgerRepo implements LedgerRepo {
       .where(and(eq(ledgers.id, input.ledgerId), isNull(ledgers.deletedAt)))
       .returning()
     return rows[0] ? rowToLedger(rows[0]) : null
+  }
+
+  // Atomic ownership swap (audit E2 #6): demote the new owner's
+  // existing member row, hand the role over on the ledger, and add the
+  // old owner back as a member — all in one db.batch so D1 either
+  // commits everything or nothing. Replaces the previous 3-await
+  // sequence in the route handler, which on a mid-flow crash could
+  // leave the old owner without ledger access AND without a member
+  // row (zero recoverability short of an admin DB poke).
+  //
+  // Returns the updated ledger row from the UPDATE leg of the batch.
+  async transferOwnershipAtomic(input: {
+    ledgerId: string
+    newOwnerUserId: string
+    oldOwnerUserId: string
+    oldOwnerMemberId: string
+  }): Promise<LedgerRecord | null> {
+    const results = await this.db.batch([
+      this.db
+        .delete(ledgerMembers)
+        .where(
+          and(
+            eq(ledgerMembers.ledgerId, input.ledgerId),
+            eq(ledgerMembers.userId, input.newOwnerUserId),
+          ),
+        ),
+      this.db
+        .update(ledgers)
+        .set({ ownerUserId: input.newOwnerUserId, updatedAt: new Date() })
+        .where(and(eq(ledgers.id, input.ledgerId), isNull(ledgers.deletedAt)))
+        .returning(),
+      this.db.insert(ledgerMembers).values({
+        id: input.oldOwnerMemberId,
+        ledgerId: input.ledgerId,
+        userId: input.oldOwnerUserId,
+        role: 'member',
+      }),
+    ])
+    // The UPDATE is the 2nd statement; its .returning() result is at
+    // index 1 of the batch results array. D1 rolls the whole batch
+    // back if any one statement fails, so a missing/empty result here
+    // means the ledger didn't exist (or was soft-deleted) — return
+    // null and let the route surface a ledger_not_found.
+    const updated = results[1] as Array<typeof ledgers.$inferSelect>
+    return updated[0] ? rowToLedger(updated[0]) : null
   }
 }

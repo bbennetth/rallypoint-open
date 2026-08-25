@@ -4,7 +4,6 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import {
   PublicPageConfigSchema,
-  eventTimezoneField,
   type PublicPageConfig,
 } from '@rallypoint/events-shared'
 import type { EventRecord, EventWeatherRecord } from '../repos/types.js'
@@ -135,14 +134,25 @@ function rowToDto(row: EventWeatherRecord, isStale: boolean): WeatherDto {
 }
 
 function scheduleBackgroundRefresh(c: Context<HonoApp>, event: EventRecord): void {
-  setImmediate(() => {
-    void refreshWeatherForEvent(c, event).catch((err: unknown) => {
-      c.var.logger.warn(
-        { err: err instanceof Error ? err.message : String(err), event_id: event.id },
-        'weather: background refresh failed',
-      )
-    })
+  // `setImmediate` does not exist in the Workers runtime (workerd). Use
+  // `c.executionCtx.waitUntil` to register the background promise so the
+  // isolate stays alive until the refresh completes (or fails) without
+  // blocking the response. In test environments that don't supply an
+  // executionCtx (app.request(…) helper), fall back to a fire-and-forget
+  // void — the cache miss will be filled on the next request.
+  const refreshPromise = refreshWeatherForEvent(c, event).catch((err: unknown) => {
+    c.var.logger.warn(
+      { err: err instanceof Error ? err.message : String(err), event_id: event.id },
+      'weather: background refresh failed',
+    )
   })
+  try {
+    c.executionCtx.waitUntil(refreshPromise)
+  } catch {
+    // executionCtx unavailable (test helper path — no ExecutionContext
+    // supplied). The promise is already running; swallow the error.
+    void refreshPromise
+  }
 }
 
 // Calls the provider, persists the result. Exposed for the refresher
@@ -211,43 +221,7 @@ export const weatherRoutes = new Hono<HonoApp>()
     return c.json(dto)
   })
 
-  // --- app SDK: coordinate forecast (no event, no event_weather cache) ---
-  // For consumers that have a raw lat/lng (e.g. Planner's "Weather on My Day"
-  // from the browser's geolocation). API-key gated in build-app
-  // (requireSdkKey on /api/v1/sdk/weather) so it isn't an open Open-Meteo
-  // proxy. Calls the provider directly; the response is short-cacheable.
-  .get('/api/v1/sdk/weather', async (c) => {
-    const lat = Number(c.req.query('lat'))
-    const lng = Number(c.req.query('lng'))
-    if (
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lng) ||
-      lat < -90 ||
-      lat > 90 ||
-      lng < -180 ||
-      lng > 180
-    ) {
-      throw errors.validation({ latlng: 'lat (-90..90) and lng (-180..180) are required.' })
-    }
-    const tzParsed = eventTimezoneField.safeParse(c.req.query('tz') ?? 'UTC')
-    if (!tzParsed.success) throw errors.validation({ tz: 'must be a valid IANA timezone' })
-    const date = c.req.query('date') || null
-    if (date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      throw errors.validation({ date: 'must be a valid YYYY-MM-DD date' })
-    }
-    const input: WeatherProviderInput = {
-      lat,
-      lng,
-      // A single requested day; the provider defaults start→today and
-      // end→start+7d when both are null.
-      startDate: date,
-      endDate: date,
-      timezone: tzParsed.data,
-      // My Day's strip renders an hourly breakdown; this coordinate endpoint
-      // is the only weather surface that needs it (event weather stays daily).
-      includeHourly: true,
-    }
-    const result = await c.var.services.weather.getEventWeather(input)
-    c.header('Cache-Control', CACHE_CONTROL)
-    return c.json({ forecast: result.forecast, airQuality: result.airQuality })
-  })
+// The coordinate forecast endpoint (`/api/v1/sdk/weather`) was retired
+// in PR 3 of feat/rpc-bindings — planner-api now calls
+// `EventsRPC.getCoordinateWeather(input)` through its `Service<EventsRPC>`
+// binding.

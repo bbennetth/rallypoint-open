@@ -42,6 +42,7 @@ export function ShareAcceptPage() {
         navigate(`/me/lists/${res.list_id}`, { replace: true })
       })
       .catch((err: unknown) => {
+        // eslint-disable-next-line rallypoint/no-stale-async-setstate -- run-once effect (ran.current gates re-entry); the single accept can't be superseded, so there is no competing generation to race.
         setPhase({
           kind: 'error',
           code: err instanceof ApiError ? err.code : 'unexpected_error',

@@ -33,7 +33,7 @@ const MOOD_CHOICES = [
 // "Mood" already exists (guards the first-access create race + manual deletes
 // staying deleted is not a concern since we only seed right after creating).
 async function seedMoodField(lists: ListsClient, listId: string, actor: string): Promise<void> {
-  const defs = await lists.listFieldDefs(listId)
+  const defs = await lists.listFieldDefs(listId, actor)
   if (defs.some((d) => d.label === MOOD_FIELD_LABEL)) return
   await lists.createFieldDef(
     listId,

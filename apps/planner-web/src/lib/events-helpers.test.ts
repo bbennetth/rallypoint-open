@@ -1,5 +1,27 @@
 import { describe, it, expect } from 'vitest'
-import { deriveStatus, formatWhen, formatWhenShort } from './events-helpers.js'
+import { deriveStatus, formatWhen, formatWhenShort, isPastEvent, ticketViewKind } from './events-helpers.js'
+
+// ── ticketViewKind ──────────────────────────────────────────────────────────
+
+describe('ticketViewKind', () => {
+  it('classifies raster images as image', () => {
+    expect(ticketViewKind('image/jpeg')).toBe('image')
+    expect(ticketViewKind('image/png')).toBe('image')
+    expect(ticketViewKind('image/webp')).toBe('image')
+  })
+
+  it('classifies PDFs as pdf', () => {
+    expect(ticketViewKind('application/pdf')).toBe('pdf')
+  })
+
+  it('falls back to other for anything else', () => {
+    expect(ticketViewKind('application/octet-stream')).toBe('other')
+    expect(ticketViewKind('text/html')).toBe('other')
+    expect(ticketViewKind('')).toBe('other')
+    // must not match a bare "image" prefix without the slash
+    expect(ticketViewKind('imagex/png')).toBe('other')
+  })
+})
 
 // ── deriveStatus ────────────────────────────────────────────────────────────
 
@@ -128,5 +150,79 @@ describe('formatWhenShort with allDay=true', () => {
     expect(result).not.toBe('No date')
     // Time-bearing locale string includes a colon for HH:MM
     expect(result).toMatch(/:/)
+  })
+})
+
+// ── isPastEvent ───────────────────────────────────────────────────────────────
+
+// isPastEvent goes through eventSpanYmds → localYmd, which works in the local
+// timezone. Build instants from local wall-clock parts so the tests pass in
+// any TZ the runner happens to use.
+function localIso(ymd: string, hour: number, minute = 0): string {
+  const [y, m, d] = ymd.split('-').map(Number)
+  return new Date(y!, m! - 1, d!, hour, minute, 0, 0).toISOString()
+}
+
+describe('isPastEvent', () => {
+  const TODAY = '2026-06-15'
+
+  it('undated event (no startAt) is never past', () => {
+    expect(isPastEvent({ startAt: null, endAt: null, allDay: false }, TODAY)).toBe(false)
+  })
+
+  it('timed event yesterday is past', () => {
+    const ev = { startAt: localIso('2026-06-14', 9), endAt: localIso('2026-06-14', 10), allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(true)
+  })
+
+  it('timed event earlier today is NOT past (day-based, visible until midnight)', () => {
+    const ev = { startAt: localIso('2026-06-15', 1), endAt: localIso('2026-06-15', 2), allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(false)
+  })
+
+  it('timed event in the future is not past', () => {
+    const ev = { startAt: localIso('2026-06-20', 9), endAt: null, allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(false)
+  })
+
+  it('multi-day event spanning today is not past', () => {
+    const ev = { startAt: localIso('2026-06-13', 9), endAt: localIso('2026-06-16', 12), allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(false)
+  })
+
+  it('multi-day event that ended yesterday is past', () => {
+    const ev = { startAt: localIso('2026-06-12', 9), endAt: localIso('2026-06-14', 12), allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(true)
+  })
+
+  it('all-day event yesterday is past', () => {
+    const ev = { startAt: localIso('2026-06-14', 0), endAt: null, allDay: true }
+    expect(isPastEvent(ev, TODAY)).toBe(true)
+  })
+
+  it('all-day event today is not past', () => {
+    const ev = { startAt: localIso('2026-06-15', 0), endAt: null, allDay: true }
+    expect(isPastEvent(ev, TODAY)).toBe(false)
+  })
+
+  it('all-day range with inclusive local-midnight end: past once the end day has passed', () => {
+    // Editor stores all-day endAt as LOCAL MIDNIGHT of the last covered day
+    // (inclusive) — a 06-13 → 06-14 all-day event is past on 06-15.
+    const ev = { startAt: localIso('2026-06-13', 0), endAt: localIso('2026-06-14', 0), allDay: true }
+    expect(isPastEvent(ev, TODAY)).toBe(true)
+  })
+
+  it('timed event ending exactly at local midnight today is past (half-open end)', () => {
+    // An 8pm → midnight event does not occupy the midnight day; its last
+    // covered day is yesterday.
+    const ev = { startAt: localIso('2026-06-14', 20), endAt: localIso('2026-06-15', 0), allDay: false }
+    expect(isPastEvent(ev, TODAY)).toBe(true)
+  })
+
+  it('bad range (endAt <= startAt) collapses to the start day', () => {
+    const past = { startAt: localIso('2026-06-14', 10), endAt: localIso('2026-06-14', 9), allDay: false }
+    expect(isPastEvent(past, TODAY)).toBe(true)
+    const today = { startAt: localIso('2026-06-15', 10), endAt: localIso('2026-06-15', 9), allDay: false }
+    expect(isPastEvent(today, TODAY)).toBe(false)
   })
 })

@@ -145,6 +145,17 @@ export const scopeTypeField = z.enum(EVENT_SCOPE_TYPES, {
 // The calling layer converts to a Date for DB storage.
 export const eventInstantField = z.string().datetime({ offset: true })
 
+// Opaque idempotency key for offline create retries (repo-wide "offline
+// create retries must be idempotent" fix). Mirrors money-shared's
+// expenseRefField. When a caller supplies the same `ref` twice for one
+// owner, the server returns the existing personal event rather than
+// creating a duplicate. Bounded to keep the partial-unique index tidy.
+export const refField = z
+  .string()
+  .trim()
+  .min(1, 'ref must not be empty.')
+  .max(256, 'ref must be at most 256 characters.')
+
 // Create a personal (planner) event. scopeType, slug, and privacyMode
 // are NOT accepted from the caller — they are forced server-side to
 // 'personal', a server-minted ulid slug, and 'private' respectively.
@@ -160,6 +171,7 @@ export const CreatePersonalEventSchema = z
     ticketAccountEmail: ticketAccountEmailField,
     // Issue #545: explicit all-day flag.
     allDay: z.boolean().optional(),
+    ref: refField.nullable().optional(),
   })
   .refine(
     (v) => {
@@ -241,10 +253,51 @@ const accentColorField = z
 
 const backgroundImageKeyField = z.string().trim().min(1).max(512)
 
+// Theme image keys (background + icon) live in owner-editable jsonb, so
+// they arrive from the client — unlike map keys, which are constructed
+// server-side. Every read AND write of a theme key must pass this
+// event-scope check, or a public serve route becomes an arbitrary-read
+// proxy into the R2 bucket (audit 1.1). The `events/<eventId>/` prefix
+// matches the app-icon uploader's key scheme.
+export function isEventScopedObjectKey(key: string, eventId: string): boolean {
+  const prefix = `events/${eventId}/`
+  return key.startsWith(prefix) && key.length > prefix.length
+}
+
 const publicPageThemeSchema = z.object({
   accent_color: accentColorField.optional(),
   background_image_key: backgroundImageKeyField.optional(),
+  // Square PNG used as the home-screen icon when an attendee installs
+  // this event as its own PWA. Optional — the per-event manifest falls
+  // back to the stock Rallypoint icon set when unset. Same opaque
+  // object-key shape as background_image_key.
+  icon_image_key: backgroundImageKeyField.optional(),
 })
+
+// Reject scripty schemes (javascript:, data:, file:, vbscript:, etc.)
+// while keeping the genuinely-clickable set we care about for an event
+// page section. `z.string().url()` alone accepts ANY scheme — including
+// the XSS-on-click vector `javascript:alert(1)` — so we wrap it with an
+// explicit allowlist. Keep the list minimal: web links, plus mailto/tel
+// for direct-contact RSVP destinations (call/email the organiser).
+const ALLOWED_NAVIGABLE_SCHEMES = ['http:', 'https:', 'mailto:', 'tel:'] as const
+
+const safeNavigableUrlField = z
+  .string()
+  .url()
+  .max(2048)
+  .refine(
+    (v) => {
+      // `new URL(v)` succeeds for every value that passed `.url()`, so
+      // this can't throw — the protocol check is the only gate.
+      const proto = new URL(v).protocol.toLowerCase()
+      return (ALLOWED_NAVIGABLE_SCHEMES as readonly string[]).includes(proto)
+    },
+    {
+      message:
+        'URL scheme must be http, https, mailto, or tel.',
+    },
+  )
 
 // Each `section` shape per design §11. Discriminated on `kind`. The
 // editor UI in V1 emits an empty `sections: []`; the SDK route will
@@ -265,7 +318,7 @@ const publicSectionSchema = z.discriminatedUnion('kind', [
   }),
   z.object({
     kind: z.literal('rsvp_link'),
-    url: z.string().url().max(2048),
+    url: safeNavigableUrlField,
   }),
 ])
 
@@ -606,7 +659,8 @@ export const GenerateDaysSchema = z
   })
 export type GenerateDaysBody = z.infer<typeof GenerateDaysSchema>
 
-// Music links shared by create + patch of an artist.
+// Music links for artist create (catalog rows have no edit endpoint —
+// see apps/events-api/src/routes/lineup.ts artist section).
 const artistLinkFields = {
   soundcloud: musicLinkField(),
   spotify: musicLinkField(),
@@ -618,21 +672,14 @@ const artistLinkFields = {
 export const CreateArtistSchema = z.object({ name: artistNameField, ...artistLinkFields })
 export type CreateArtistBody = z.infer<typeof CreateArtistSchema>
 
-export const PatchArtistSchema = z
-  .object({ name: artistNameField.optional(), ...artistLinkFields })
-  .superRefine((v, ctx) => {
-    if (Object.values(v).every((x) => x === undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: 'At least one field must be supplied.' })
-    }
-  })
-export type PatchArtistBody = z.infer<typeof PatchArtistSchema>
-
 // A single lineup slot: which artist plays which day, plus optional
-// stage/time/tier metadata. endTime may legitimately precede startTime
-// (a set crossing midnight), so the two are NOT cross-validated here.
+// stage/time/tier metadata. dayId null/absent = unscheduled/TBA booking
+// (the artist is on the lineup before day splits are announced).
+// endTime may legitimately precede startTime (a set crossing midnight),
+// so the two are NOT cross-validated here.
 export const LineupSlotSchema = z.object({
   artistId: idRefField('Artist id'),
-  dayId: idRefField('Day id'),
+  dayId: idRefField('Day id').nullable().optional(),
   stageId: idRefField('Stage id').nullable().optional(),
   tier: tierField,
   genre: genreField,
@@ -642,10 +689,11 @@ export const LineupSlotSchema = z.object({
 })
 export type LineupSlotBody = z.infer<typeof LineupSlotSchema>
 
-// A lineup slot to remove, keyed by its composite identity (artist + day).
+// A lineup slot to remove, keyed by its composite identity (artist + day;
+// day null = the artist's unscheduled/TBA slot).
 export const LineupDeleteSchema = z.object({
   artistId: idRefField('Artist id'),
-  dayId: idRefField('Day id'),
+  dayId: idRefField('Day id').nullable().optional(),
 })
 export type LineupDeleteBody = z.infer<typeof LineupDeleteSchema>
 
@@ -899,3 +947,10 @@ export const SetStarSchema = z.object({
   dayId: idRefField('Day id'),
 })
 export type SetStarBody = z.infer<typeof SetStarSchema>
+
+// Body for favorite / unfavorite an artist within an event. Day-agnostic
+// (unlike SetStarSchema): the event_id rides in the route parameter.
+export const ArtistFavoriteSchema = z.object({
+  artistId: idRefField('Artist id'),
+})
+export type ArtistFavoriteBody = z.infer<typeof ArtistFavoriteSchema>

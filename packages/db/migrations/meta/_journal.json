@@ -8,6 +8,20 @@
       "when": 1780759980764,
       "tag": "0000_absurd_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784557451186,
+      "tag": "0001_dry_vanisher",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786118098342,
+      "tag": "0002_swift_ultimo",
+      "breakpoints": true
     }
   ]
 }

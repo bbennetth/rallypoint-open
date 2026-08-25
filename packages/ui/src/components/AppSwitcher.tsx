@@ -3,7 +3,7 @@ import { AppBrandLockup, Icon } from './icons.js'
 import { ThemeToggle } from './ThemeToggle.js'
 import { DEFAULT_APPS, type AppSwitcherApp } from './apps.js'
 import { detectStandalone } from '../lib/standalone.js'
-import { appendEmbeddedParam, isIOS, shouldEmbedTarget } from '../lib/embedded-shell.js'
+import { appendEmbeddedParam, isIOS, isSafeAppHref, shouldEmbedTarget } from '../lib/embedded-shell.js'
 
 // App-switcher fly-out anchored to the brand lockup. Rows route to the sibling
 // Rallypoint apps via build-time origins (toast fallback when unset); the row
@@ -28,6 +28,10 @@ export interface AppSwitcherProps {
   onFeedback?: () => void
   /** Version string for the footer (e.g. import.meta.env.VITE_APP_VERSION). */
   appVersion?: string
+  /** App-specific rows rendered directly under the theme row (e.g. the
+   *  fitness lb/kg unit picker). Style them like `.pl-theme-row` for a
+   *  consistent menu. */
+  extraMenuRows?: React.ReactNode
 }
 
 export function AppSwitcher({
@@ -39,6 +43,7 @@ export function AppSwitcher({
   onOpenSettings,
   onFeedback,
   appVersion,
+  extraMenuRows,
 }: AppSwitcherProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -117,6 +122,10 @@ export function AppSwitcher({
       if (shouldEmbedTarget(detectStandalone(), isIOS())) {
         href = appendEmbeddedParam(href)
       }
+      // app.origin comes from build-time config, but validate the
+      // protocol anyway — a misconfigured origin must never turn a
+      // switcher tap into a javascript:/data: navigation.
+      if (!isSafeAppHref(href)) return
       window.location.href = href
     } else {
       onToast?.(`${app.name} opens in its own app`)
@@ -192,6 +201,7 @@ export function AppSwitcher({
             <span className="lbl">Theme</span>
             <ThemeToggle inMenu />
           </div>
+          {extraMenuRows}
           <div style={{ display: 'grid', gap: 6 }}>
             {onOpenSettings && (
               <button type="button" role="menuitem" className="pl-shortcut" onClick={() => { setOpen(false); onOpenSettings() }}>

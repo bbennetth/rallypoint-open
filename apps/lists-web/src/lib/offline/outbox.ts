@@ -44,10 +44,33 @@ export async function enqueue(db: ListsOfflineDb, op: OutboxOp): Promise<number>
   return db.outbox.add(buildOutboxEntry(op) as OutboxEntry)
 }
 
+// Serializes fn across tabs via the Web Locks API. Falls back to running fn
+// directly where navigator.locks is unavailable (older WebViews, non-browser
+// test envs) — same single-tab behavior as before.
+export async function withCrossTabLock(key: string, fn: () => Promise<void>): Promise<void> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+  if (!locks) {
+    await fn()
+    return
+  }
+  await locks.request(key, { mode: 'exclusive' }, fn)
+}
+
 export class OutboxFlusher {
   private running = false
   private rerun = false
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  // Aborted in dispose() so an in-flight send() from a disposed flusher
+  // can't mutate the outbox after a new flusher instance has already
+  // reset its (stale) 'inflight' entry back to 'pending' and started
+  // resending it (#675 double-send race). ListsApi has no signal
+  // parameter to actually cancel the underlying fetch, so this guards
+  // the *outcome handling* (onSuccess/onError) instead — a disposed
+  // flusher's send() is left to resolve/reject into the void, and the
+  // entry it was working on simply stays 'inflight' until the next
+  // flusher's self-heal step (drainOnce) resets it to 'pending', which
+  // is the safe/expected state per the fix's design.
+  private abortController = new AbortController()
 
   constructor(private readonly deps: FlusherDeps) {}
 
@@ -63,16 +86,28 @@ export class OutboxFlusher {
   // call while a flush is in flight requests one more pass after the current
   // one rather than overlapping.
   async flush(): Promise<void> {
+    if (this.abortController.signal.aborted) return
     if (this.running) {
       this.rerun = true
       return
     }
     this.running = true
     try {
-      do {
-        this.rerun = false
-        await this.drainOnce()
-      } while (this.rerun)
+      // Serialize the drain across tabs: without this, two tabs waking
+      // together both pass the read-check-claim sequence (and each resets
+      // the other's inflight entries back to pending), duplicating writes.
+      const lockKey = `offline-outbox:${this.deps.getDb().name}`
+      await withCrossTabLock(lockKey, async () => {
+        // Waiting for the lock can take seconds; a dispose (user-switch /
+        // sign-out) may have landed meanwhile. Re-check before touching the
+        // DB so a stale flusher can't resurrect the old user's store via
+        // getDb() over the newly-active user's connection.
+        if (this.abortController.signal.aborted) return
+        do {
+          this.rerun = false
+          await this.drainOnce()
+        } while (this.rerun)
+      })
     } finally {
       this.running = false
     }
@@ -81,8 +116,9 @@ export class OutboxFlusher {
   private async drainOnce(): Promise<void> {
     if (!this.isOnline()) return
     const db = this.deps.getDb()
-    // Self-heal any 'inflight' left by a previous crashed run — only one
-    // flusher runs at a time, so an inflight at the top of a pass is stale.
+    // Self-heal any 'inflight' left by a crashed/killed tab. The cross-tab
+    // lock in flush() means no live tab is mid-send here, so an inflight at
+    // the top of a pass is stale and safe to reset.
     await db.outbox.where('status').equals('inflight').modify({ status: 'pending' })
 
     // Collapse a flurry of consecutive same-item updates into one PATCH before
@@ -93,6 +129,7 @@ export class OutboxFlusher {
     let progressed = false
     // Bound the loop by the queue length so a misbehaving entry can't spin.
     for (;;) {
+      if (this.abortController.signal.aborted) break
       const entries = await db.outbox.orderBy('seq').toArray()
       const entry = entries.find((e) => shouldFlushEntry(e, this.now()))
       if (!entry || entry.seq === undefined) break
@@ -101,10 +138,15 @@ export class OutboxFlusher {
       let result: 'next' | 'stop' = 'stop'
       try {
         const serverId = await this.send(entry.op)
+        // Disposed mid-flight: don't touch the outbox — leave the entry
+        // 'inflight' for the next flusher's self-heal to reset to
+        // 'pending' rather than racing it with this stale onSuccess.
+        if (this.abortController.signal.aborted) break
         await this.onSuccess(db, entry, serverId)
         progressed = true
         result = 'next'
       } catch (err) {
+        if (this.abortController.signal.aborted) break
         result = await this.onError(db, entry, err)
         if (result === 'next') progressed = true
       }
@@ -134,7 +176,10 @@ export class OutboxFlusher {
   private async send(op: OutboxOp): Promise<string | undefined> {
     switch (op.type) {
       case 'item:create': {
-        const created = await this.deps.api.createItem(op.listId, op.input)
+        // Forward the stable tmpId as an idempotency key so a create that
+        // timed out post-commit isn't duplicated on retry (server dedups on
+        // (list_id, ref)).
+        const created = await this.deps.api.createItem(op.listId, { ...op.input, ref: op.tmpId })
         return created.id
       }
       case 'item:update':
@@ -194,11 +239,14 @@ export class OutboxFlusher {
     }, delayMs)
   }
 
-  // Tear down any pending retry timer (call on user-switch / unmount).
+  // Tear down any pending retry timer and abort any in-flight send's
+  // outcome handling (call on user-switch / unmount). A flusher is
+  // disposed-of, not reused — dispose() is terminal for this instance.
   dispose(): void {
     if (this.retryTimer !== null) {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
     }
+    this.abortController.abort()
   }
 }

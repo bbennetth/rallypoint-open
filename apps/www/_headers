@@ -1,0 +1,29 @@
+# Security headers for the apex marketing site (audit E3 #20).
+# Format: Cloudflare Workers Assets `_headers` (per-path rules).
+# Copied into apps/www/public/ at deploy time by .github/workflows/
+# cf-deploy.yml's deploy-www job (the dist→public copy wipes public/,
+# so this file is staged from the repo source after the copy).
+#
+# Verify in production with:
+#   curl -sI https://rallypt.app/ | grep -iE 'strict|frame|content-type-opt|referrer|content-security'
+
+# Keep the QA/staging deployment (rallypt.dev) out of search indexes —
+# the same build ships to both domains, so the exclusion is host-scoped.
+# Belt-and-braces with the Disallow robots.txt the deploy-www job stages
+# for the qa env. Only rallypt.app should ever be indexed.
+https://rallypt.dev/*
+  X-Robots-Tag: noindex, nofollow
+
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  # Conservative CSP for a static marketing site with no inline scripts.
+  # 'self' covers same-origin script/style/asset loads vite emits. Images
+  # allow `data:` (favicons, encoded assets). `connect-src` includes the 6
+  # app subdomains so the SPA's CTA buttons can prefetch the app shells.
+  # `frame-ancestors 'none'` is the X-Frame-Options DENY equivalent for
+  # modern browsers.
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://t.rallypt.app https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://t.rallypt.app https://cloudflareinsights.com https://us.i.posthog.com https://*.i.posthog.com https://id.rallypt.app https://id.rallypt.dev https://events.rallypt.app https://events.rallypt.dev https://lists.rallypt.app https://lists.rallypt.dev https://money.rallypt.app https://money.rallypt.dev https://planner.rallypt.app https://planner.rallypt.dev https://health.rallypt.app https://health.rallypt.dev; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()

@@ -1,5 +1,6 @@
 import { ulid } from 'ulid'
 import type { Context } from 'hono'
+import { SYSTEM_USER_ID } from '@rallypoint/shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import type { EventRecord, MemberRole } from '../repos/types.js'
@@ -12,23 +13,67 @@ export const TENANT = 'rallypoint'
 
 export const ROLE_RANK: Record<MemberRole, number> = { owner: 3, editor: 2, viewer: 1 }
 
+// System-owned events: owner_user_id is the reserved SYSTEM_USER_ID
+// sentinel (no real user behind it). Allowlisted admins act with
+// owner-equivalent rights on these events.
+export function isSystemEvent(event: EventRecord): boolean {
+  return event.ownerUserId === SYSTEM_USER_ID
+}
+
+// Browse/discovery visibility (#browse-tab): an event is browsable —
+// listable in the Browse tab, previewable, and self-joinable without
+// an invite — iff it is live and either system-owned (any privacy
+// mode; admins curate via soft-delete) or explicitly public. Unlisted
+// and private user-owned events never surface here. The listing repo
+// method (events.listBrowsable) encodes the same rule in SQL — keep
+// the two in sync.
+export function isBrowsableEvent(event: EventRecord): boolean {
+  return event.deletedAt === null && (isSystemEvent(event) || event.privacyMode === 'public')
+}
+
+// Whether the viewer has an active event_attendees row. Owner role no
+// longer implies not-attending (owners can self-join via the attendance
+// endpoint), so the client needs this bit alongside viewer_role.
+export async function viewerAttending(
+  c: Context<HonoApp>,
+  eventId: string,
+  userId: string,
+): Promise<boolean> {
+  const attendee = await c.var.repos.attendees.findByEventAndUser(eventId, userId)
+  return attendee !== null && attendee.removedAt === null
+}
+
+// Comma-separated ADMIN_USER_IDS allowlist (mirrors admin-api's
+// admin-allowlist.ts — same secret value in the deploy pipeline).
+export function isEventsAdmin(c: Context<HonoApp>, userId: string): boolean {
+  return c.var.env.ADMIN_USER_IDS.split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .includes(userId)
+}
+
 // Resolve the actor's role on an event, or null if they have no
-// access at all. Owner is canonical (events.owner_user_id); everyone
-// else needs a member row.
+// access at all. Owner is canonical (events.owner_user_id); on
+// system-owned events every allowlisted admin resolves as owner;
+// everyone else needs a member row.
 //
 // Phase 0 (#16): a soft-removed event_attendees row revokes access
 // across the board, even if the user still has an event_members
-// collaborator row. The owner short-circuits — they don't carry an
-// event_attendees row and cannot be removed by the attendees endpoint
-// (it 409s on owner). For collaborators, we require either no
-// event_attendees row (legacy collaborators predating the table) or
-// a row with removed_at IS NULL.
+// collaborator row. The owner short-circuits, so their access never
+// depends on an event_attendees row — but since the self-join
+// attendance endpoint landed, the owner MAY carry one ("owner is
+// also attending"). A soft-removed owner attendee row means "no
+// longer attending", not "no access". The attendees endpoint still
+// 409s on removing the owner. For collaborators, we require either
+// no event_attendees row (legacy collaborators predating the table)
+// or a row with removed_at IS NULL.
 export async function actorRole(
   c: Context<HonoApp>,
   event: EventRecord,
   userId: string,
 ): Promise<MemberRole | null> {
   if (event.ownerUserId === userId) return 'owner'
+  if (isSystemEvent(event) && isEventsAdmin(c, userId)) return 'owner'
   const member = await c.var.repos.members.findByEventAndUser(event.id, userId)
   if (!member) return null
   const attendee = await c.var.repos.attendees.findByEventAndUser(event.id, userId)

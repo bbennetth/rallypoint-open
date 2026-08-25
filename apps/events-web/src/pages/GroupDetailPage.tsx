@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -18,7 +19,10 @@ import {
 import { GroupMembersEditor } from '../ui/GroupMembersEditor.js'
 import { WhoIsGoingCard } from '../ui/WhoIsGoingCard.js'
 import { GroupInviteCard } from '../ui/GroupInviteCard.js'
+import { GroupLinkList } from '../ui/GroupLinkCard.js'
 import { useRefreshBus } from '../lib/refresh-bus.js'
+import { useMyEventGroups } from '../lib/useMyEventGroups.js'
+import { eventGroupsHref, otherGroups } from '../lib/attendee-route.js'
 import { useAttendeeOutlet } from '../ui/AttendeeChrome.js'
 
 type LoadState =
@@ -32,11 +36,19 @@ export function GroupDetailPage() {
   const navigate = useNavigate()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
 
+  const run = useAsyncTask()
   const load = useCallback(() => {
     if (!groupId) return
-    getGroup(groupId)
-      .then((group) => setState({ status: 'ready', group }))
-      .catch((err: unknown) => {
+    // Generation gate: this page stays mounted while the :groupId param
+    // changes (the "your other groups" links it renders), so an older
+    // getGroup resolving last must not show group A's detail.
+    void run(async (ctx) => {
+      try {
+        const group = await getGroup(groupId)
+        if (ctx.stale()) return
+        setState({ status: 'ready', group })
+      } catch (err: unknown) {
+        if (ctx.stale()) return
         if (err instanceof ApiError && err.status === 404) {
           setState({ status: 'error', code: 'not_found', message: 'Group not found.' })
         } else {
@@ -46,8 +58,9 @@ export function GroupDetailPage() {
             message: err instanceof Error ? err.message : 'Unknown error.',
           })
         }
-      })
-  }, [groupId])
+      }
+    })
+  }, [groupId, run])
 
   useEffect(() => {
     load()
@@ -70,8 +83,9 @@ export function GroupDetailPage() {
         <div
           className="max-w-md w-full p-4"
           style={{
-            border: '1.5px solid var(--hot)',
-            background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+            background: 'var(--hot-soft)',
+            color: 'var(--hot-text)',
+            borderRadius: 'var(--radius-lg)',
           }}
         >
           <h1 className="text-lg font-semibold text-[color:var(--ink)]">
@@ -102,8 +116,6 @@ export function GroupDetailPage() {
 
         <GroupHero group={group} viewerUserId={userId} />
 
-        <ActionRail groupId={group.id} />
-
         <GroupInviteCard groupName={group.name} shortCode={group.short_code} />
 
         <GroupMembersEditor
@@ -118,11 +130,46 @@ export function GroupDetailPage() {
             rendering nothing) when the attendees toggle is off. */}
         <WhoIsGoingCard groupId={group.id} />
 
+        <OtherGroupsCard group={group} />
+
         <GroupLists groupId={group.id} />
 
         <GroupLedger groupId={group.id} viewerUserId={userId} />
       </div>
     </main>
+  )
+}
+
+// Your OTHER groups at the same event. Without this the group shell is
+// a dead end: entry points route you into your first-joined group and
+// nothing links onward, so a second group is reachable only by pasting
+// its URL. Renders nothing when this is your only group here, and stays
+// silent on load/error rather than showing a broken shell.
+function OtherGroupsCard({ group }: { group: GroupDetailDto }) {
+  const { state } = useMyEventGroups(group.event_id)
+  if (state.status !== 'ready') return null
+  const others = otherGroups(state.groups, group.id)
+  if (others.length === 0) return null
+
+  return (
+    <section className="space-y-3">
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">
+          {group.event_name
+            ? `Your other groups at ${group.event_name}`
+            : 'Your other groups at this event'}
+        </h3>
+        {group.event_slug && (
+          <Link
+            to={eventGroupsHref(group.event_slug)}
+            className="text-xs text-[color:var(--ink-mute)] hover:text-[color:var(--ink)] underline"
+          >
+            See all
+          </Link>
+        )}
+      </div>
+      <GroupLinkList groups={others} />
+    </section>
   )
 }
 
@@ -137,136 +184,83 @@ function GroupHero({
   group: GroupDetailDto
   viewerUserId: string
 }) {
-  const visible = group.members.slice(0, 6)
-  const overflow = group.members.length - visible.length
+  // Ink kit's Group screen: `.pg-head` shell + vertical `.grp-row`
+  // member list. Replaces the prior horizontal avatar-chip rail; the
+  // vertical list reads as the kit's "members + status" pattern even
+  // with the per-user status field unwired (status is placeholder).
+  const visibleMembers = group.members.slice(0, 8)
+  const overflow = group.members.length - visibleMembers.length
   return (
-    <header className="space-y-3">
-      <div className="space-y-1">
-        <p
-          className="text-xs font-medium"
-          style={{ color: 'var(--ink-mute)' }}
-        >
-          Group · {group.viewer_role}
-        </p>
-        <h1 className="display text-2xl">{group.name}</h1>
-        {group.description && (
-          <p className="text-[color:var(--ink)] text-sm leading-relaxed">{group.description}</p>
-        )}
+    <header style={{ display: 'grid', gap: 14 }}>
+      <div className="pg-head" style={{ marginBottom: 0 }}>
+        <div>
+          <span className="eyebrow" style={{ color: 'var(--acid)' }}>
+            Group
+          </span>
+          <h1 style={{ marginTop: 6 }}>{group.name}</h1>
+          <p className="sub" style={{ marginTop: 8 }}>
+            {group.members.length} {group.members.length === 1 ? 'member' : 'members'} ·
+            {' '}
+            {group.viewer_role}
+          </p>
+          {group.description && (
+            <p className="sub" style={{ marginTop: 6, maxWidth: '62ch' }}>
+              {group.description}
+            </p>
+          )}
+        </div>
       </div>
-      <div
-        className="flex items-center gap-2 overflow-x-auto"
+      <ul
+        style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 8 }}
         aria-label="Group members"
       >
-        {visible.map((m) => (
-          <MemberChip
-            key={m.id}
-            userId={m.user_id}
-            role={m.role}
-            isViewer={m.user_id === viewerUserId}
-          />
-        ))}
+        {visibleMembers.map((m) => {
+          const label = m.display_name ?? m.user_id
+          return (
+          <li key={m.id} className="grp-row">
+            <span
+              aria-hidden
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: '50%',
+                background: 'var(--surface-2)',
+                color: 'var(--ink-dim)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 14,
+                fontWeight: 700,
+                flex: '0 0 auto',
+              }}
+            >
+              {label.slice(0, 1).toUpperCase()}
+            </span>
+            <div className="grp-main">
+              <div className="grp-top">
+                <span className="grp-name">
+                  {m.user_id === viewerUserId ? `You · ${label}` : label}
+                </span>
+              </div>
+              {/* Per-member free-text status — kit shows this as the
+                  primary member-row content. No backend yet → render a
+                  muted placeholder so the layout reads correctly. */}
+              <div className="grp-status is-empty">No status set</div>
+            </div>
+            <span className="grp-role">{m.role}</span>
+          </li>
+          )
+        })}
         {overflow > 0 && (
-          <span
-            className="mono"
-            style={{
-              fontSize: 10,
-              color: 'var(--ink-mute)',
-              letterSpacing: '0.1em',
-              padding: '2px 6px',
-              border: '1.5px solid var(--line)',
-              whiteSpace: 'nowrap',
-            }}
+          <li
+            className="meta"
+            style={{ textAlign: 'center', color: 'var(--ink-mute)', padding: '6px 0' }}
           >
-            +{overflow}
-          </span>
+            +{overflow} more member{overflow === 1 ? '' : 's'}
+          </li>
         )}
-      </div>
+      </ul>
     </header>
-  )
-}
-
-function MemberChip({
-  userId,
-  role,
-  isViewer,
-}: {
-  userId: string
-  role: 'owner' | 'sidekick' | 'member'
-  isViewer: boolean
-}) {
-  return (
-    <span
-      title={isViewer ? `You · ${role}` : `${userId} · ${role}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '4px 8px 4px 4px',
-        border: `1.5px solid ${isViewer ? 'var(--acid)' : 'var(--line)'}`,
-        background: isViewer ? 'color-mix(in srgb, var(--acid) 12%, transparent)' : 'transparent',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: '50%',
-          background: 'var(--line)',
-          color: 'var(--ink-dim)',
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: 11,
-          fontWeight: 700,
-        }}
-      >
-        {userId.slice(0, 1).toUpperCase()}
-      </span>
-      <span
-        className="mono"
-        style={{ fontSize: 9, letterSpacing: '0.1em', color: 'var(--ink-dim)' }}
-      >
-        {(isViewer ? 'YOU · ' : '') + role.toUpperCase()}
-      </span>
-    </span>
-  )
-}
-
-// Quick navigation chips replacing the full-card link list. Mirrors
-// festival-planner's compact action rail under the group hero.
-function ActionRail({ groupId }: { groupId: string }) {
-  const items = [
-    { to: `/groups/${groupId}/now`, label: 'NOW' },
-    { to: `/groups/${groupId}/day`, label: 'MY DAY' },
-    { to: `/groups/${groupId}/rallies`, label: 'RALLIES' },
-    { to: `/groups/${groupId}/chat`, label: 'CHAT' },
-  ]
-  return (
-    <nav
-      className="flex gap-2 overflow-x-auto"
-      aria-label="Group quick links"
-    >
-      {items.map((it) => (
-        <Link
-          key={it.to}
-          to={it.to}
-          className="mono"
-          style={{
-            textDecoration: 'none',
-            padding: '6px 12px',
-            border: '1.5px solid var(--line)',
-            color: 'var(--ink-dim)',
-            fontSize: 11,
-            letterSpacing: '0.1em',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {it.label}
-        </Link>
-      ))}
-    </nav>
   )
 }
 
@@ -281,7 +275,7 @@ function SectionHeader({
   return (
     <div
       className="flex items-baseline justify-between gap-2"
-      style={{ borderBottom: '1px solid var(--line)', paddingBottom: 4 }}
+      style={{ borderBottom: '1px solid var(--hairline-soft)', paddingBottom: 4 }}
     >
       <h2
         style={{
@@ -325,8 +319,7 @@ function GroupLists({ groupId }: { groupId: string }) {
 
   return (
     <section
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <SectionHeader title="Lists" />
 
@@ -476,18 +469,19 @@ function GroupLedger({
   viewerUserId: string
 }) {
   const [state, setState] = useState<GroupLedgerState>({ status: 'loading' })
+  const run = useAsyncTask()
 
   useEffect(() => {
-    let active = true
     setState({ status: 'loading' })
     // Three independent fetches; we render as soon as the ledger
     // resolves so a slow expenses query doesn't block the header.
-    void Promise.all([
-      getGroupLedger(groupId).catch(() => null),
-      listGroupLedgerExpenses(groupId).catch(() => null),
-      getGroupLedgerBalances(groupId).catch(() => null),
-    ]).then(([ledger, expenses, balances]) => {
-      if (!active) return
+    void run(async (ctx) => {
+      const [ledger, expenses, balances] = await Promise.all([
+        getGroupLedger(groupId).catch(() => null),
+        listGroupLedgerExpenses(groupId).catch(() => null),
+        getGroupLedgerBalances(groupId).catch(() => null),
+      ])
+      if (ctx.stale()) return
       if (!ledger) {
         setState({ status: 'error' })
         return
@@ -496,18 +490,14 @@ function GroupLedger({
         status: 'ready',
         ledger,
         expenses: expenses ?? [],
-        balances: balances ?? undefined,
+        ...(balances ? { balances } : {}),
       })
     })
-    return () => {
-      active = false
-    }
-  }, [groupId, viewerUserId])
+  }, [run, groupId, viewerUserId])
 
   return (
     <section
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <SectionHeader
         title="Ledger"
@@ -536,27 +526,30 @@ function GroupLedger({
             hasExpenses={(state.expenses ?? []).length > 0}
           />
 
-          {state.expenses && state.expenses.length > 0 && (
-            <ul className="divide-y divide-white/10 pt-1">
-              {state.expenses.slice(0, 5).map((exp) => (
-                <li
-                  key={exp.id}
-                  className="flex items-center justify-between gap-3 py-2 text-sm"
-                >
-                  <span className="flex flex-col min-w-0">
-                    <span className="truncate text-[color:var(--ink)]">{exp.description}</span>
-                    <span className="text-[10px] font-medium text-[color:var(--ink-mute)]">
-                      {exp.paidByUserId === viewerUserId ? 'you paid' : 'paid by other'} ·{' '}
-                      {new Date(exp.spentAt).toLocaleDateString()}
+          {state.expenses && state.expenses.length > 0 && (() => {
+            const currency = state.ledger.currency
+            return (
+              <ul className="divide-y divide-white/10 pt-1">
+                {state.expenses.slice(0, 5).map((exp) => (
+                  <li
+                    key={exp.id}
+                    className="flex items-center justify-between gap-3 py-2 text-sm"
+                  >
+                    <span className="flex flex-col min-w-0">
+                      <span className="truncate text-[color:var(--ink)]">{exp.description}</span>
+                      <span className="text-[10px] font-medium text-[color:var(--ink-mute)]">
+                        {exp.paidByUserId === viewerUserId ? 'you paid' : 'paid by other'} ·{' '}
+                        {new Date(exp.spentAt).toLocaleDateString()}
+                      </span>
                     </span>
-                  </span>
-                  <span className="mono whitespace-nowrap text-[color:var(--ink)]">
-                    {formatCents(exp.totalCents, state.ledger.currency)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+                    <span className="mono whitespace-nowrap text-[color:var(--ink)]">
+                      {formatCents(exp.totalCents, currency)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )
+          })()}
 
           {state.expenses && state.expenses.length > 5 && (
             <p className="text-[10px] font-medium text-[color:var(--ink-mute)]">

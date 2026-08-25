@@ -33,7 +33,9 @@ const WEEKEND = ['SA', 'SU']
 
 function ymdToUtc(ymd: string): Date {
   const [y, m, d] = ymd.split('-').map(Number)
-  return new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1))
+  // A malformed ymd leaves y as undefined; fall back to NaN so the
+  // resulting Date is Invalid rather than silently anchoring at epoch.
+  return new Date(Date.UTC(y ?? NaN, (m ?? 1) - 1, d ?? 1))
 }
 
 /** "Jun 11, 2026" — stable across runner timezones (formatted in UTC). */
@@ -99,7 +101,7 @@ export function describeRecurrence(rule: RecurrenceRuleLike): string {
 /** First upcoming occurrence date (YYYY-MM-DD), or null when the preview
  * window is empty (finite series already exhausted). */
 export function nextOccurrence(next: readonly string[] | null | undefined): string | null {
-  return next && next.length > 0 ? next[0] : null
+  return next && next.length > 0 ? (next[0] ?? null) : null
 }
 
 /** Short upcoming-dates summary for a series row, e.g.

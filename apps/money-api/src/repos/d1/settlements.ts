@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { settlements } from '@rallypoint/money-db'
 import type {
   CreateSettlementInput,
@@ -18,6 +18,7 @@ function rowToSettlement(row: typeof settlements.$inferSelect): SettlementRecord
     settledAt: row.settledAt,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
+    ref: row.ref ?? null,
   }
 }
 
@@ -36,6 +37,7 @@ export class D1SettlementRepo implements SettlementRepo {
         note: input.note ?? null,
         settledAt: input.settledAt,
         createdBy: input.createdBy,
+        ref: input.ref ?? null,
       })
       .returning()
     return rowToSettlement(rows[0]!)
@@ -46,6 +48,15 @@ export class D1SettlementRepo implements SettlementRepo {
       .select()
       .from(settlements)
       .where(eq(settlements.id, id))
+      .limit(1)
+    return rows[0] ? rowToSettlement(rows[0]) : null
+  }
+
+  async findByRef(ledgerId: string, ref: string): Promise<SettlementRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(settlements)
+      .where(and(eq(settlements.ledgerId, ledgerId), eq(settlements.ref, ref)))
       .limit(1)
     return rows[0] ? rowToSettlement(rows[0]) : null
   }

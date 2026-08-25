@@ -6,8 +6,15 @@
 # CLOUDFLARE_ACCOUNT_ID); D1 databases are auto-provisioned/name-linked by
 # wrangler >=4.45 (bootstrap step creates rp-id-{qa,prod} if absent).
 # Real secrets (ARGON2_PEPPER, SESSION_HMAC_KEY, SIGNIN_CODE_HMAC_KEY,
-# *_API_KEY, *_SESSION_KEY_V1, ADMIN_TOKEN, RESEND_API_KEY, TURNSTILE_SECRET)
-# via `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step).
+# *_SESSION_KEY_V1, ADMIN_TOKEN, RESEND_API_KEY, TURNSTILE_SECRET,
+# and the OPTIONAL social-login credentials — GOOGLE_OAUTH_CLIENT_ID/SECRET,
+# GITHUB_OAUTH_CLIENT_ID/SECRET, APPLE_OAUTH_CLIENT_ID/TEAM_ID/KEY_ID/PRIVATE_KEY;
+# a provider stays dark until its set is pushed) via
+# `wrangler secret bulk --env <env>` (cf-deploy.yml push-secrets step).
+# WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN need no config — they derive from UI_ORIGIN.
+# Social login is OFF until SOCIAL_SIGNIN_ENABLED = "true" is added to the
+# per-env [vars] below (default off; keeps social dark until the provider
+# backends are registered), on top of the per-provider credential gate.
 # Avatar object storage is a native R2 binding (OBJECT_STORE), not keys (#409).
 
 name = "rallypoint-id"
@@ -55,9 +62,12 @@ migrations_dir = "../../packages/db/migrations"
 binding = "OBJECT_STORE"
 bucket_name = "rallypoint-id-dev"
 
+# POSTHOG_KEY is the public phc_ project write key (same class of value
+# the web bundles ship) — plaintext var, drives server-side $exception
+# capture in the error handler. Omitted from dev [vars] → capture no-ops.
 # ---- QA: id.rallypt.dev ---------------------------------------------
 [env.qa]
-vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.dev", PUBLIC_BASE_URL = "https://id.rallypt.dev", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.dev", SSO_LISTS_HOST = "lists.rallypt.dev", SSO_MONEY_HOST = "money.rallypt.dev", SSO_PLANNER_HOST = "planner.rallypt.dev" }
+vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.dev", PUBLIC_BASE_URL = "https://id.rallypt.dev", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.dev", SSO_LISTS_HOST = "lists.rallypt.dev", SSO_MONEY_HOST = "money.rallypt.dev", SSO_PLANNER_HOST = "planner.rallypt.dev", SSO_FITNESS_HOST = "health.rallypt.dev", SSO_ADMIN_HOST = "admin.rallypt.dev", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
 [[env.qa.r2_buckets]]
 binding = "OBJECT_STORE"
@@ -79,7 +89,7 @@ custom_domain = true
 
 # ---- Prod: id.rallypt.app -------------------------------------------
 [env.prod]
-vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.app", PUBLIC_BASE_URL = "https://id.rallypt.app", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.app", SSO_LISTS_HOST = "lists.rallypt.app", SSO_MONEY_HOST = "money.rallypt.app", SSO_PLANNER_HOST = "planner.rallypt.app" }
+vars = { NODE_ENV = "production", MAILER = "resend", CAPTCHA = "turnstile", BREACHED_PASSWORD_CHECK = "hibp", TRUSTED_PROXY_HEADER = "cf-connecting-ip", UI_ORIGIN = "https://id.rallypt.app", PUBLIC_BASE_URL = "https://id.rallypt.app", SMTP_FROM = "Rallypoint ID <noreply@send.rallypt.app>", SSO_EVENTS_HOST = "events.rallypt.app", SSO_LISTS_HOST = "lists.rallypt.app", SSO_MONEY_HOST = "money.rallypt.app", SSO_PLANNER_HOST = "planner.rallypt.app", SSO_FITNESS_HOST = "health.rallypt.app", SSO_ADMIN_HOST = "admin.rallypt.app", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
 [[env.prod.r2_buckets]]
 binding = "OBJECT_STORE"

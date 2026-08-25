@@ -19,6 +19,11 @@ export const artists = sqliteTable(
     appleMusic: text('apple_music'),
     youtubeMusic: text('youtube_music'),
     instagram: text('instagram'),
+    genre: text('genre'),
+    // Pinned MusicBrainz artist id — set by the admin catalog sweep's
+    // strict auto-match (or lineup-ingest approve) so later sweeps can
+    // re-look-up this artist deterministically, without name matching.
+    mbid: text('mbid'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),

@@ -26,7 +26,7 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     setupFiles: ['./vitest.setup.ts'],
-    include: ['{apps,packages,scripts}/**/*.{test,spec}.{ts,tsx}'],
+    include: ['{apps,packages,scripts,tools}/**/*.{test,spec}.{ts,tsx}'],
     // `*.d1.test.ts` run under @cloudflare/vitest-pool-workers (real
     // workerd + local D1), not this node pool — see apps/*/vitest.d1.config.ts.
     exclude: ['**/node_modules/**', '**/dist/**', '**/*.d1.test.ts', '**/*.workers.test.ts'],

@@ -1,0 +1,45 @@
+{
+  "name": "@rallypoint/admin-api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/worker.js",
+  "types": "dist/worker.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rallypoint/admin-db": "*",
+    "@rallypoint/api-kit": "*",
+    "@rallypoint/crypto": "*",
+    "@rallypoint/events-api": "*",
+    "@rallypoint/events-shared": "*",
+    "@rallypoint/fitness-api": "*",
+    "@rallypoint/fitness-shared": "*",
+    "@rallypoint/id-api": "*",
+    "@rallypoint/id-client": "*",
+    "@rallypoint/logger": "*",
+    "@rallypoint/rate-limit": "*",
+    "@rallypoint/shared": "*",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.3",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260606.1",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

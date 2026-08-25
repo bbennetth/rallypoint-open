@@ -35,5 +35,3 @@ export const ssoCodes = sqliteTable(
     expiresIdx: index('sso_codes_expires_idx').on(t.expiresAt),
   }),
 )
-
-export type DbSsoCode = typeof ssoCodes.$inferSelect

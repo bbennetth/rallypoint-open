@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   listCommunityAttendees,
@@ -21,9 +22,9 @@ type LoadState =
 
 export function WhoIsGoingCard({ eventId, groupId }: { eventId?: string; groupId?: string }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
+  const run = useAsyncTask()
 
   useEffect(() => {
-    let cancelled = false
     const fetcher = groupId
       ? () => listGroupAttendees(groupId)
       : eventId
@@ -33,12 +34,14 @@ export function WhoIsGoingCard({ eventId, groupId }: { eventId?: string; groupId
       setState({ status: 'hidden' })
       return
     }
-    fetcher()
-      .then((page) => {
-        if (!cancelled) setState({ status: 'ready', items: page.items })
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
+    setState({ status: 'loading' })
+    void run(async (ctx) => {
+      try {
+        const page = await fetcher()
+        if (ctx.stale()) return
+        setState({ status: 'ready', items: page.items })
+      } catch (err) {
+        if (ctx.stale()) return
         if (err instanceof ApiError && err.status === 404) {
           // Feature off (or no access) — show nothing rather than an error.
           setState({ status: 'hidden' })
@@ -48,11 +51,9 @@ export function WhoIsGoingCard({ eventId, groupId }: { eventId?: string; groupId
           status: 'error',
           message: err instanceof ApiError ? err.message : 'Failed to load attendees.',
         })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [eventId, groupId])
+      }
+    })
+  }, [eventId, groupId, run])
 
   if (state.status === 'hidden' || state.status === 'loading') return null
   if (state.status === 'error') {
@@ -65,8 +66,7 @@ export function WhoIsGoingCard({ eventId, groupId }: { eventId?: string; groupId
 
   return (
     <section
-      className="p-4 space-y-3"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-3 pl-card"
     >
       <h3 className="text-xs font-medium text-[color:var(--ink-mute)]">
         Who's going ({state.items.length})
@@ -79,7 +79,7 @@ export function WhoIsGoingCard({ eventId, groupId }: { eventId?: string; groupId
             <li
               key={a.user_id}
               className="chip text-xs"
-              style={{ border: '1px solid var(--line)', padding: '2px 8px' }}
+              style={{ background: 'var(--surface-2)', borderRadius: 'var(--radius-round)', padding: '2px 8px' }}
               title={new Date(a.joined_at).toLocaleDateString()}
             >
               {a.display_name ?? 'Attendee'}

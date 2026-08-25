@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "www-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "-w", "@rallypoint/www-web"],
+      "port": 5180
+    },
+    {
+      "name": "fitness-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "-w", "@rallypoint/fitness-web"],
+      "port": 5178
+    }
+  ]
+}

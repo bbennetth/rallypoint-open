@@ -32,6 +32,9 @@ describe('D1 integration — ledgers UI surface', () => {
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
     },
+    profiles: {
+      lookup: async () => null,
+    },
     settings: {
       get: async () => ({}),
       patch: async (_u, _n, p) => p,
@@ -71,6 +74,9 @@ describe('D1 integration — ledgers UI surface', () => {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. All req() calls here are UI writes; supply the configured origin.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 
@@ -232,6 +238,56 @@ describe('D1 integration — ledgers UI surface', () => {
       name: 'Hijacked',
     })
     expect(strangerPatch.status).toBe(404)
+  })
+
+  it('paginates the activity feed with a cursor, traversing all rows across pages', async () => {
+    const owner = `user_${Date.now()}_activitypager`
+    const ownerBearer = await loginAs(owner)
+
+    const created = await (await req(ownerBearer, 'POST', '/api/v1/ui/ledgers', {
+      name: 'Pager',
+      currency: 'USD',
+      scopeType: 'personal',
+      scopeId: owner,
+    })).json() as { id: string }
+
+    // ledger.created is row #1. Generate 4 more via patches so there are
+    // 5 activity rows total.
+    for (let i = 0; i < 4; i++) {
+      const res = await req(ownerBearer, 'PATCH', `/api/v1/ui/ledgers/${created.id}`, {
+        description: `rev ${i}`,
+      })
+      expect(res.status).toBe(200)
+    }
+
+    // Fetch the full set unpaginated as our source of truth.
+    const fullRes = await req(
+      ownerBearer,
+      'GET',
+      `/api/v1/ui/ledgers/${created.id}/activity?limit=50`,
+    )
+    const full = (await fullRes.json()) as { items: Array<{ id: string }>; next_cursor: string | null }
+    expect(full.items.length).toBe(5)
+    expect(full.next_cursor).toBeNull()
+
+    // Now page through with limit=2 and confirm every row is visited
+    // exactly once, in the same order, ending with next_cursor: null.
+    const seen: string[] = []
+    let cursor: string | null = null
+    for (let page = 0; page < 10; page++) {
+      const qs = cursor ? `?limit=2&cursor=${encodeURIComponent(cursor)}` : '?limit=2'
+      const res = await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${created.id}/activity${qs}`)
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        items: Array<{ id: string }>
+        next_cursor: string | null
+      }
+      for (const item of body.items) seen.push(item.id)
+      cursor = body.next_cursor
+      if (cursor === null) break
+    }
+    expect(cursor).toBeNull()
+    expect(seen).toEqual(full.items.map((i) => i.id))
   })
 
   it('soft-deletes a ledger (owner only) and tombstones the row', async () => {

@@ -3,6 +3,7 @@
 // are unit-testable (no React/DOM, UTC-deterministic dates).
 
 import type { DiaryEntryDto, FieldDefDto } from './api.js'
+import { fmtTime, localYmd } from './planner-helpers.js'
 
 // The label of the auto-seeded mood field (kept in lockstep with the BFF
 // constant MOOD_FIELD_LABEL in apps/planner-api/src/routes/diary.ts).
@@ -25,14 +26,34 @@ export function dataPointFields(defs: readonly FieldDefDto[]): FieldDefDto[] {
     .sort((a, b) => a.position - b.position)
 }
 
-// Entries newest-first by entry day (dueDate), then createdAt as a tiebreak.
-// Undated entries sink below dated ones.
+// Entries newest-first by entry day, then within a day: day-only entries
+// first (the all-day convention), timed entries by their instant newest-first,
+// createdAt as the final tiebreak. The day is derived the same way the cards
+// display it (ymdFromDueDate — LOCAL day for timed entries): comparing raw
+// dueDate strings would rank a west-of-UTC late-evening entry (whose UTC
+// instant crosses into the next calendar day) above the following day's
+// day-only entries, contradicting its own day heading. Undated entries sink
+// below dated ones.
 export function sortDiaryEntries(entries: readonly DiaryEntryDto[]): DiaryEntryDto[] {
   return entries.slice().sort((a, b) => {
-    if (a.dueDate && b.dueDate) {
-      if (a.dueDate !== b.dueDate) return a.dueDate < b.dueDate ? 1 : -1
-    } else if (a.dueDate) return -1
-    else if (b.dueDate) return 1
+    const dayA = ymdFromDueDate(a.dueDate)
+    const dayB = ymdFromDueDate(b.dueDate)
+    if (dayA !== dayB) {
+      if (!dayA) return 1
+      if (!dayB) return -1
+      return dayA < dayB ? 1 : -1
+    }
+    const timedA = dayA !== '' && !isDayOnlyDueDate(a.dueDate)
+    const timedB = dayB !== '' && !isDayOnlyDueDate(b.dueDate)
+    if (timedA !== timedB) return timedA ? 1 : -1
+    if (timedA && timedB) {
+      // Epoch comparison rather than string comparison: lexicographic order
+      // only matches instant order for same-width ISO strings, and nothing
+      // guarantees a future producer keeps the .toISOString() shape.
+      const tA = new Date(a.dueDate as string).getTime()
+      const tB = new Date(b.dueDate as string).getTime()
+      if (tA !== tB && !Number.isNaN(tA) && !Number.isNaN(tB)) return tA < tB ? 1 : -1
+    }
     return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0
   })
 }
@@ -59,10 +80,35 @@ export function formatFieldValue(def: FieldDefDto, raw: unknown): string | null 
   return String(raw)
 }
 
-// 'YYYY-MM-DD' for a stored dueDate (midnight-UTC ISO). The diary sends the
-// raw date string on write, so slicing the UTC date part round-trips exactly.
+// Day-only vs timed split for a stored diary dueDate. Day-only entries are
+// stored as exactly midnight-UTC: the composers send the raw 'YYYY-MM-DD'
+// string, which the BFF normalizes to '…T00:00:00.000Z' (and an optimistic
+// outbox row still carries the raw date until the flush reconciles it).
+// Anything else was written with an explicit time via combineDueDateTime and
+// is a true instant, interpreted in the viewer's local zone. A timed entry
+// landing on exactly UTC midnight reads as day-only — a rare, accepted edge.
+export function isDayOnlyDueDate(dueDate: string | null): boolean {
+  if (!dueDate) return true
+  if (!dueDate.includes('T')) return true
+  return /T00:00:00(?:\.000)?Z$/.test(dueDate)
+}
+
+// 'YYYY-MM-DD' for a stored dueDate. Day-only entries slice the UTC date part
+// (round-trips the raw date string the composer sent); timed entries resolve
+// to the LOCAL calendar day — slicing their UTC string would shift an evening
+// entry onto the wrong day for west-of-UTC users.
 export function ymdFromDueDate(dueDate: string | null): string {
-  return dueDate ? dueDate.slice(0, 10) : ''
+  if (!dueDate) return ''
+  if (isDayOnlyDueDate(dueDate)) return dueDate.slice(0, 10)
+  const d = new Date(dueDate)
+  return Number.isNaN(d.getTime()) ? dueDate.slice(0, 10) : localYmd(dueDate)
+}
+
+// Local 12-hour time label for a timed entry ("8:42 PM"), null for day-only /
+// missing dues so the card renders nothing rather than a fake "12:00 AM".
+export function entryTimeLabel(dueDate: string | null): string | null {
+  if (isDayOnlyDueDate(dueDate)) return null
+  return fmtTime(dueDate) || null
 }
 
 // "Fri, Jun 13, 2026" for an entry's day. Formatted in UTC so the heading
@@ -70,7 +116,9 @@ export function ymdFromDueDate(dueDate: string | null): string {
 export function formatEntryDate(ymd: string): string {
   if (!ymd) return 'No date'
   const [y, m, d] = ymd.split('-').map(Number)
-  const date = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1))
+  // A malformed ymd (wrong segment count) leaves y as undefined; fall back to
+  // NaN so Date.UTC produces an Invalid Date, caught by the isNaN check below.
+  const date = new Date(Date.UTC(y ?? NaN, (m ?? 1) - 1, d ?? 1))
   if (Number.isNaN(date.getTime())) return ymd
   return date.toLocaleDateString(undefined, {
     weekday: 'short',

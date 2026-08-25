@@ -4,6 +4,7 @@ import { AccountShell } from '../ui/AccountShell.js'
 import { Banner, Button, Field } from '@rallypoint/ui'
 import { RequireAuth } from '../ui/RequireAuth.js'
 import { api } from '../api/client.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 const CONFIRM_PHRASE = 'DELETE MY ACCOUNT'
 
@@ -45,6 +46,7 @@ function DeleteForm({ onDeleted }: { onDeleted: () => void }) {
       setError(res.error.message)
       return
     }
+    captureEvent('account_deleted')
     setDeletedAt(new Date())
     setHardPurgeAt(new Date(res.data.hardPurgeAt))
     onDeleted()

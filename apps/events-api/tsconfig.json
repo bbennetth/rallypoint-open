@@ -16,6 +16,24 @@
   ],
   "references": [
     {
+      "path": "../../apps/id-api"
+    },
+    {
+      "path": "../../apps/lists-api"
+    },
+    {
+      "path": "../../apps/money-api"
+    },
+    {
+      "path": "../../apps/ai-api"
+    },
+    {
+      "path": "../../packages/ai"
+    },
+    {
+      "path": "../../packages/api-kit"
+    },
+    {
       "path": "../../packages/crypto"
     },
     {
@@ -32,9 +50,6 @@
     },
     {
       "path": "../../packages/lists-client"
-    },
-    {
-      "path": "../../packages/money-client"
     },
     {
       "path": "../../packages/realtime"

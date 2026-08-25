@@ -4,6 +4,7 @@ import { AuthCard } from '../ui/AuthCard.js'
 import { Banner, Button } from '@rallypoint/ui'
 import { api } from '../api/client.js'
 import { secondsRemaining } from '../lib/countdown.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 // Slice 6a replaces the slice-2 inline-HTML /verify-email landing.
 // The token comes in via ?token=rpv_... and we POST it to the
@@ -43,6 +44,7 @@ export function VerifyEmailPage() {
         setMessage(res.error.message)
         return
       }
+      captureEvent('email_verified')
       setEmail(res.data.email)
       setStatus('success')
       setCountdown(Math.ceil(REDIRECT_DELAY_MS / 1000))

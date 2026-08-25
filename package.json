@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Rallypoint ID — open-source identity service. Monorepo root.",
+  "description": "Rallypoint ID \u2014 open-source identity service. Monorepo root.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -20,7 +20,8 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "lint": "eslint .",
-    "typecheck": "tsc --build",
+    "typecheck": "tsc --build && npm run typecheck:web",
+    "typecheck:web": "tsc --build packages/*/tsconfig.json && npm run typecheck --workspace=apps/id-web --workspace=apps/events-web --workspace=apps/lists-web --workspace=apps/money-web --workspace=apps/planner-web --workspace=apps/fitness-web --workspace=apps/admin-web",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run lint && npm run typecheck && npm run test",
@@ -56,6 +57,17 @@
     "test:d1:events": "vitest run --config apps/events-api/vitest.d1.config.ts",
     "test:d1:money": "vitest run --config apps/money-api/vitest.d1.config.ts",
     "test:d1:planner": "vitest run --config apps/planner-api/vitest.d1.config.ts",
+    "test:d1:fitness": "vitest run --config apps/fitness-api/vitest.d1.config.ts",
+    "test:d1:admin": "vitest run --config apps/admin-api/vitest.d1.config.ts",
+    "test:d1:ai": "vitest run --config apps/ai-api/vitest.d1.config.ts",
+    "dev:ai-api": "npm run dev --workspace=apps/ai-api",
+    "ai:db:generate": "npm run ai:db:generate -w @rallypoint/ai-db",
+    "dev:fitness-api": "npm run dev --workspace=apps/fitness-api",
+    "dev:fitness-web": "npm run dev --workspace=apps/fitness-web",
+    "dev:admin-api": "npm run dev --workspace=apps/admin-api",
+    "dev:admin-web": "npm run dev --workspace=apps/admin-web",
+    "fitness:db:generate": "npm run fitness:db:generate -w @rallypoint/fitness-db",
+    "fitness:db:migrate": "npm run fitness:db:migrate -w @rallypoint/fitness-db",
     "test:workers": "vitest run --config packages/realtime/vitest.workers.config.ts",
     "test:objstore": "vitest run --config packages/object-store/vitest.workers.config.ts",
     "e2e": "playwright test -c e2e/playwright.config.ts",
@@ -67,7 +79,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.13",
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
     "@playwright/test": "^1.60.0",
     "@types/node": "^22.10.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
@@ -81,6 +93,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0",
-    "wrangler": "^4.45.0"
+    "wrangler": "^4.105.0"
   }
 }

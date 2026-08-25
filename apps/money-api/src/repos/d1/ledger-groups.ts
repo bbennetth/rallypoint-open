@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, isNull } from 'drizzle-orm'
 import { ledgerGroupMembers, ledgerGroups } from '@rallypoint/money-db'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type {

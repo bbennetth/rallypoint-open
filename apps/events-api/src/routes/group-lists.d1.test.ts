@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test'
 import { describe, it, expect, beforeAll } from 'vitest'
 import type { Hono } from 'hono'
-import type { ListDto, ListItemDto } from '@rallypoint/lists-client'
+import type { ListDto, ListItemDto } from '../services/types.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
 import { buildD1Repos, createDb } from '../repos/d1/index.js'
@@ -137,6 +137,7 @@ describe('D1 integration — group lists BFF proxy', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 

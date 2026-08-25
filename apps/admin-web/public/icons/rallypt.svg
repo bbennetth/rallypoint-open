@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- V1 compass mark on a rounded ink tile. White strokes stay
+       legible across browser/OS chrome (light tabs, dark tabs, OS
+       launchers). Inside: full orbit ring + cardinal and diagonal
+       hash marks + white paper-plane + concentric gap-pin (white
+       outer circle, ink inner dot). Source vector is
+       `.claude/logo_system/icon_dark_*.svg`; PNG variants are
+       regenerated from this file by `scripts/build-icons.mjs`. -->
+  <rect x="0" y="0" width="512" height="512" rx="96" fill="#0a0a0a"/>
+  <circle cx="256" cy="256" r="200" stroke="#FFFFFF" stroke-width="14" fill="none"/>
+  <line x1="256" y1="40" x2="256" y2="72" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  <line x1="256" y1="440" x2="256" y2="472" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  <line x1="40" y1="256" x2="72" y2="256" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  <line x1="440" y1="256" x2="472" y2="256" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  <line x1="408.7" y1="103.3" x2="389.5" y2="122.5" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+  <line x1="103.3" y1="103.3" x2="122.5" y2="122.5" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+  <line x1="408.7" y1="408.7" x2="389.5" y2="389.5" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+  <line x1="103.3" y1="408.7" x2="122.5" y2="389.5" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+  <polygon points="343.1,168.9 183.73,258.41 253.59,328.27" fill="#FFFFFF"/>
+  <circle cx="397.4" cy="114.6" r="22" fill="#FFFFFF"/>
+  <circle cx="397.4" cy="114.6" r="9" fill="#0a0a0a"/>
+</svg>

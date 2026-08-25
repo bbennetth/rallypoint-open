@@ -29,6 +29,9 @@ describe('D1 integration — expenses + balances', () => {
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
     },
+    profiles: {
+      lookup: async () => null,
+    },
     settings: {
       get: async () => ({}),
       patch: async (_u, _n, p) => p,
@@ -68,6 +71,9 @@ describe('D1 integration — expenses + balances', () => {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. All req() calls here are UI writes; supply the configured origin.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 
@@ -131,6 +137,42 @@ describe('D1 integration — expenses + balances', () => {
     const list = (await (await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/expenses`)).json()) as { items: Array<{ id: string }> }
     expect(list.items).toHaveLength(1)
     expect(list.items[0]!.id).toBe(expense.id)
+  })
+
+  it('lists multiple expenses with each expense’s own splits (batched, no N+1)', async () => {
+    // Guards the batched inArray split fetch: with several expenses in the
+    // ledger, every expense must come back with exactly its own splits
+    // (grouping correctness), not another expense's or a merged set.
+    const owner = `user_${Date.now()}_multi_owner`
+    const ownerBearer = await loginAs(owner)
+    const peer = `user_${Date.now()}_multi_peer`
+    const ledgerId = await setupLedger(ownerBearer, owner, peer)
+
+    // Expense A: split between owner + peer. Expense B: owner only.
+    const a = (await (await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 80,
+      description: 'Shared',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits: [{ userId: owner }, { userId: peer }],
+    })).json()) as { id: string }
+    const b = (await (await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 40,
+      description: 'Solo',
+      splitMode: 'equal',
+      spentAt: '2026-05-31',
+      splits: [{ userId: owner }],
+    })).json()) as { id: string }
+
+    const list = (await (await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/expenses`)).json()) as {
+      items: Array<{ id: string; splits: Array<{ user_id: string }> }>
+    }
+    expect(list.items).toHaveLength(2)
+    const byId = new Map(list.items.map((e) => [e.id, e.splits.map((s) => s.user_id).sort()]))
+    expect(byId.get(a.id)).toEqual([owner, peer].sort())
+    expect(byId.get(b.id)).toEqual([owner])
   })
 
   it('rejects an expense whose paid_by isn\'t a ledger member', async () => {
@@ -337,6 +379,44 @@ describe('D1 integration — expenses + balances', () => {
     expect(bal.items).toHaveLength(0)
   })
 
+  // P2 fix: PATCH response must carry the fresh post-patch splits, not the
+  // pre-patch snapshot. Verified by patching description on an expense that
+  // was created with two splits and asserting all split fields survive in the
+  // response (previously the stale exp.splits were merged in, which would
+  // drift if the splits had changed between creation and patch).
+  it('PATCH response includes current splits (not stale pre-patch snapshot)', async () => {
+    const owner = `user_${Date.now()}_patch_splits_owner`
+    const ownerBearer = await loginAs(owner)
+    const peer = `user_${Date.now()}_patch_splits_peer`
+    const ledgerId = await setupLedger(ownerBearer, owner, peer)
+
+    const created = (await (await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 100,
+      description: 'Original description',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits: [{ userId: owner }, { userId: peer }],
+    })).json()) as { id: string; splits: Array<{ user_id: string }> }
+
+    // Confirm two splits were created.
+    expect(created.splits).toHaveLength(2)
+
+    // PATCH only the description — splits are unchanged.
+    const patched = (await (await req(ownerBearer, 'PATCH', `/api/v1/ui/ledgers/${ledgerId}/expenses/${created.id}`, {
+      description: 'Updated description',
+    })).json()) as {
+      description: string
+      splits: Array<{ user_id: string; amount_cents: number | null; share_weight: number | null }>
+    }
+
+    // The response must carry both split rows — not an empty array or the
+    // pre-patch snapshot that could diverge in the future.
+    expect(patched.description).toBe('Updated description')
+    expect(patched.splits).toHaveLength(2)
+    expect(patched.splits.map((s) => s.user_id).sort()).toEqual([owner, peer].sort())
+  })
+
   it('rejects a non-member trying to read expenses with 404', async () => {
     const owner = `user_${Date.now()}_acl_owner`
     const ownerBearer = await loginAs(owner)
@@ -346,5 +426,104 @@ describe('D1 integration — expenses + balances', () => {
     const strangerBearer = await loginAs(stranger)
     const res = await req(strangerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/expenses`)
     expect(res.status).toBe(404)
+  })
+
+  // Regression for "D1_ERROR: too many SQL variables" (100 bound-param cap):
+  // the splits insert is 4 params/row, so 30 splits (120 params) previously
+  // blew the cap in a single INSERT. The repo now chunks the insert inside
+  // one atomic db.batch().
+  it('creates an expense with 30 splits (chunked past the D1 param cap)', async () => {
+    const ts = Date.now()
+    const owner = `user_${ts}_manysplit_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await setupLedger(ownerBearer, owner)
+
+    const peers = Array.from({ length: 29 }, (_, i) => `user_${ts}_manysplit_p${i}`)
+    for (const [i, peer] of peers.entries()) {
+      await repos.ledgerMembers.add({
+        id: `lmm_${ts}_manysplit_${i}`,
+        ledgerId,
+        userId: peer,
+        role: 'member',
+      })
+    }
+    const participants = [owner, ...peers]
+    expect(participants).toHaveLength(30)
+
+    const res = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 300,
+      description: '30-way split',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits: participants.map((userId) => ({ userId })),
+    })
+    expect(res.status).toBe(201)
+    const created = (await res.json()) as { id: string; splits: Array<{ user_id: string }> }
+    expect(created.splits).toHaveLength(30)
+
+    const got = (await (
+      await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/expenses`)
+    ).json()) as { items: Array<{ id: string; splits: Array<{ user_id: string }> }> }
+    const fetched = got.items.find((e) => e.id === created.id)
+    expect(fetched?.splits).toHaveLength(30)
+    expect(fetched?.splits.map((s) => s.user_id).sort()).toEqual([...participants].sort())
+  })
+
+  // Regression for the listForLedger split-fetch chunking: with >100
+  // expense ids in a page, the inArray(expenseSplits.expenseId, ids) fetch
+  // must be chunked (previously a single query with >100 ids blew the D1
+  // bound-param cap).
+  it('listForLedger returns every expense with its splits across >100 expenses (chunked inArray)', async () => {
+    const ts = Date.now()
+    const owner = `user_${ts}_manyexp_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await setupLedger(ownerBearer, owner)
+
+    const COUNT = 120
+    const createdIds: string[] = []
+    for (let i = 0; i < COUNT; i++) {
+      const res = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+        paidByUserId: owner,
+        totalCents: 10,
+        description: `Item ${i}`,
+        splitMode: 'equal',
+        spentAt: '2026-05-30',
+        splits: [{ userId: owner }],
+      })
+      expect(res.status).toBe(201)
+      const { id } = (await res.json()) as { id: string }
+      createdIds.push(id)
+    }
+
+    const list = (await (
+      await req(ownerBearer, 'GET', `/api/v1/ui/ledgers/${ledgerId}/expenses`)
+    ).json()) as { items: Array<{ id: string; splits: Array<{ user_id: string }> }> }
+    expect(list.items).toHaveLength(COUNT)
+    for (const item of list.items) {
+      expect(item.splits).toHaveLength(1)
+      expect(item.splits[0]!.user_id).toBe(owner)
+    }
+    expect(list.items.map((i) => i.id).sort()).toEqual([...createdIds].sort())
+  })
+
+  // Validator regression: MAX_EXPENSE_SPLITS caps the splits array at 50;
+  // 51 must be rejected before it ever reaches the repo layer.
+  it('rejects an expense with 51 splits at the validator (400)', async () => {
+    const ts = Date.now()
+    const owner = `user_${ts}_toomany_owner`
+    const ownerBearer = await loginAs(owner)
+    const ledgerId = await setupLedger(ownerBearer, owner)
+
+    const splits = Array.from({ length: 51 }, (_, i) => ({ userId: `user_${ts}_toomany_p${i}` }))
+    const res = await req(ownerBearer, 'POST', `/api/v1/ui/ledgers/${ledgerId}/expenses`, {
+      paidByUserId: owner,
+      totalCents: 510,
+      description: 'Too many',
+      splitMode: 'equal',
+      spentAt: '2026-05-30',
+      splits,
+    })
+    expect(res.status).toBe(400)
   })
 })

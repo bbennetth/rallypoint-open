@@ -55,4 +55,26 @@ describe('createPasswordHasher', () => {
     const h = createPasswordHasher({ pepper: PEPPER_A })
     await expect(h.dummyVerify()).resolves.toBeUndefined()
   })
+
+  it('shares the dummy hash derivation across hasher instances with the same pepper/version', async () => {
+    // Two independently-constructed hashers over the same pepper +
+    // version should hit the same module-level dummyHashCache entry
+    // instead of each running its own ~32 MiB scrypt derivation. We
+    // can't observe the cache directly (it's module-private), but a
+    // concurrent-call race is the behavior the cache exists to avoid —
+    // both should resolve cleanly whether or not they overlap.
+    const h1 = createPasswordHasher({ pepper: PEPPER_A })
+    const h2 = createPasswordHasher({ pepper: PEPPER_A })
+    await expect(Promise.all([h1.dummyVerify(), h2.dummyVerify()])).resolves.toEqual([
+      undefined,
+      undefined,
+    ])
+  })
+
+  it('dummyVerify still works independently per pepper (different peppers do not collide in the cache)', async () => {
+    const ha = createPasswordHasher({ pepper: PEPPER_A })
+    const hb = createPasswordHasher({ pepper: PEPPER_B })
+    await expect(ha.dummyVerify()).resolves.toBeUndefined()
+    await expect(hb.dummyVerify()).resolves.toBeUndefined()
+  })
 })

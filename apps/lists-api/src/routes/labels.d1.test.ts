@@ -85,6 +85,7 @@ describe('D1 integration — labels', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -275,6 +276,66 @@ describe('D1 integration — labels', () => {
       labelIds: [foreignLabel.id],
     })
     expect(res.status).toBe(400)
+  })
+
+  // Regression for "D1_ERROR: too many SQL variables": setItemLabels
+  // inserts 2 params per join row, so 50 labels (the labelIdsField cap)
+  // sits exactly at D1's 100-bound-param limit — the repo must chunk.
+  it('sets 50 labels on one item (50x2 = 100 params, the exact D1 cap boundary)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_lbl_50`)
+    const listId = await makeStandardList(bearer)
+    const labels: Label[] = []
+    for (let i = 0; i < 50; i++) {
+      labels.push(await createLabel(bearer, listId, { name: `Label ${i}` }))
+    }
+    const labelIds = labels.map((l) => l.id)
+
+    const itemRes = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items`, {
+      title: 'Item with 50 labels',
+      labelIds,
+    })
+    expect(itemRes.status).toBe(201)
+    const item = (await itemRes.json()) as Item
+    expect(item.label_ids.sort()).toEqual([...labelIds].sort())
+
+    const listRes = await req(bearer, 'GET', `/api/v1/ui/lists/${listId}/items`)
+    const items = ((await listRes.json()) as { items: Item[] }).items
+    const found = items.find((i) => i.id === item.id)!
+    expect(found.label_ids.sort()).toEqual([...labelIds].sort())
+  })
+
+  // Regression for labelsForItems chunking: a list GET batches label
+  // lookups by item id, one bound param per id — 150+ items blows past
+  // D1's 100 cap in a single inArray query.
+  it('lists 150+ items with labels (exercises labelsForItems chunking past the D1 param cap)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_lbl_150items`)
+    const listId = await makeStandardList(bearer)
+    const labelA = await createLabel(bearer, listId, { name: 'A' })
+    const labelB = await createLabel(bearer, listId, { name: 'B' })
+    const labelC = await createLabel(bearer, listId, { name: 'C' })
+
+    const itemLabels = new Map<string, string[]>()
+    for (let i = 0; i < 160; i++) {
+      // Spread labels across items so multiple chunks each carry rows.
+      const labelIds =
+        i % 3 === 0 ? [labelA.id, labelB.id] : i % 3 === 1 ? [labelC.id] : []
+      const res = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items`, {
+        title: `Item ${i}`,
+        labelIds,
+      })
+      expect(res.status).toBe(201)
+      const item = (await res.json()) as Item
+      itemLabels.set(item.id, labelIds)
+    }
+
+    const listRes = await req(bearer, 'GET', `/api/v1/ui/lists/${listId}/items`)
+    expect(listRes.status).toBe(200)
+    const items = ((await listRes.json()) as { items: Item[] }).items
+    expect(items).toHaveLength(160)
+    for (const item of items) {
+      const expected = itemLabels.get(item.id)!
+      expect(item.label_ids.sort()).toEqual([...expected].sort())
+    }
   })
 
   it('deleting a label removes it from all items', async () => {

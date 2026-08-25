@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { sqliteTable, index, integer, text } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, index, integer, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { lists } from './lists.js'
 
 // Recurrence rule for a repeating task ("clean the bathroom every Sunday").
@@ -32,6 +32,11 @@ export const listItemSeries = sqliteTable(
     until: text('until'),
     count: integer('count'),
     timeOfDay: text('time_of_day'),
+    // Opaque idempotency key for offline-retry-safe creates (mirrors
+    // list_items.ref / money-db's expenses.ref). A create retried with
+    // the same (list_id, ref) returns the original series row instead of
+    // inserting a duplicate — see the partial-unique index below.
+    ref: text('ref'),
     createdBy: text('created_by').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
@@ -43,6 +48,12 @@ export const listItemSeries = sqliteTable(
   },
   (t) => ({
     listIdx: index('list_item_series_list_idx').on(t.listId),
+    // Partial-unique on `(list_id, ref)` where ref is set — spans active +
+    // soft-deleted rows so a tombstoned series' ref isn't silently
+    // re-usable (mirrors list_items.refUq).
+    refUq: uniqueIndex('lists_series_list_ref_uq')
+      .on(t.listId, t.ref)
+      .where(sql`${t.ref} IS NOT NULL`),
   }),
 )
 

@@ -55,6 +55,7 @@ describe('D1 integration — SSO exchange rate limit', () => {
         'x-forwarded-for': ip,
         cookie: `${envVars.LISTS_SSO_STATE_COOKIE_NAME}=irrelevant; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
         'x-rp-csrf': CSRF,
+        origin: envVars.LISTS_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'c', state: 'irrelevant' }),
     })

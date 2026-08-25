@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { sqliteTable, index, integer, text } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, index, integer, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { listItemSeries } from './list-item-series.js'
 import { lists } from './lists.js'
 
@@ -81,6 +81,13 @@ export const listItems = sqliteTable(
       .notNull()
       .default(sql`'{}'`)
       .$type<Record<string, unknown>>(),
+    // Opaque idempotency key for offline-retry-safe creates (repo-wide
+    // "offline create retries must be idempotent" fix, mirrors money-db's
+    // expenses.ref). A client-supplied stable id (e.g. `tmp_<uuid>`); a
+    // create retried with the same (list_id, ref) returns the original row
+    // instead of inserting a duplicate — see the partial-unique index
+    // below. Rows without a ref are unconstrained (opt-in).
+    ref: text('ref'),
     createdBy: text('created_by').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
@@ -96,6 +103,13 @@ export const listItems = sqliteTable(
     statusIdx: index('list_items_status_idx').on(t.listId, t.status),
     parentIdx: index('list_items_parent_idx').on(t.listId, t.parentId),
     seriesIdx: index('list_items_series_idx').on(t.seriesId, t.occurrenceDate),
+    // Partial-unique on `(list_id, ref)` where ref is set — the
+    // idempotency key for offline-retry-safe creates. Spans active +
+    // soft-deleted rows so a tombstoned item's ref isn't silently
+    // re-usable (mirrors money-db's expenses.ledgerRefUq).
+    refUq: uniqueIndex('lists_items_list_ref_uq')
+      .on(t.listId, t.ref)
+      .where(sql`${t.ref} IS NOT NULL`),
   }),
 )
 

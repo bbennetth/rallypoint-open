@@ -8,11 +8,13 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
+import { parsePlannerPage } from './_page.js'
 import { proxyLists } from '../lib/sdk-error.js'
 import {
   resolveShoppingList,
   findShoppingList,
 } from '../lib/personal-scope.js'
+import { ensureQuantityFieldDef } from '../lib/shopping-fields.js'
 
 // Planner Shopping BFF — single system-managed shopping list per user.
 // The list is auto-provisioned on first access (resolveShoppingList) and
@@ -50,11 +52,19 @@ export const shoppingRoutes = new Hono<HonoApp>()
   // Returns the single system-managed shopping list for the actor,
   // provisioning it if it doesn't exist yet. Never returns an array —
   // the shopping surface is always a single list.
+  //
+  // `quantityFieldId` is the id of the list's `quantity` custom field def
+  // (provisioned here on first access alongside the list). Item quantities
+  // live in the generic customFields blob, which is keyed by field-def id,
+  // so the client needs this id to read the chip value and to write edits.
+  // Null when the def couldn't be resolved — the client then hides the
+  // quantity affordances rather than failing the whole page.
   .get('/api/v1/ui/shopping/list', requireSession(), async (c) => {
     const actor = c.var.session!.userId
     const lists = c.var.services.listsClient
     const list = await proxyLists(() => resolveShoppingList(lists, actor))
-    return c.json(list)
+    const quantityFieldId = await ensureQuantityFieldDef(lists, list.id, actor)
+    return c.json({ ...list, quantityFieldId })
   })
 
   // --- items in the caller's shopping list ---------------
@@ -66,11 +76,23 @@ export const shoppingRoutes = new Hono<HonoApp>()
     const actor = c.var.session!.userId
     const listId = c.req.param('listId')
     const lists = c.var.services.listsClient
-    const items = await proxyLists(async () => {
+    const assertOwned = async (): Promise<void> => {
       const theList = await findShoppingList(lists, actor)
-      if (!theList || theList.id !== listId)
-        throw errors.notFound('List not found.')
-      return lists.listItems(listId)
+      if (!theList || theList.id !== listId) throw errors.notFound('List not found.')
+    }
+    // Opt-in pagination: `?limit=`/`?cursor=` switch to `{items, next_cursor}`;
+    // without them the legacy whole-array shape is preserved for planner-web.
+    const page = parsePlannerPage(c)
+    if (page) {
+      const result = await proxyLists(async () => {
+        await assertOwned()
+        return lists.listItemsPage(listId, actor, { limit: page.limit, cursor: page.cursor ?? null })
+      })
+      return c.json({ items: result.items, next_cursor: result.nextCursor })
+    }
+    const items = await proxyLists(async () => {
+      await assertOwned()
+      return lists.listItems(listId, actor)
     })
     return c.json(items)
   })

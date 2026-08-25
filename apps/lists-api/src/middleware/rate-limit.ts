@@ -1,35 +1,22 @@
 import type { MiddlewareHandler } from 'hono'
+import { createRateLimit } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
-import { extractIp, dailySalt, hashIp } from '@rallypoint/crypto'
-import { TENANT_DEFAULT } from '@rallypoint/shared'
 import { errors } from '../errors.js'
 
-// Per-route rate-limit middleware. Extracts the IP-based bucket key,
-// calls into the rate-limit repo, and 429s if the bucket is exhausted.
-// The repo handles atomic increments.
+// Per-route IP rate-limit. Shared implementation lives in @rallypoint/api-kit;
+// this app supplies its daily-salt env key + error factory. V1 policy:
+// per-IP buckets only.
 
 export interface RateLimitPolicy {
   route: string // short slug for the bucket key
   perIp: { limit: number; windowSeconds: number }
 }
 
+const rl = createRateLimit({
+  saltEnvKey: 'LISTS_SESSION_KEY_V1',
+  errors: { rateLimited: errors.rateLimited },
+})
+
 export function rateLimit(policy: RateLimitPolicy): MiddlewareHandler<HonoApp> {
-  return async (c, next) => {
-    const env = c.var.env
-    const ip = extractIp({ headers: c.req.raw.headers, policy: env.TRUSTED_PROXY_HEADER })
-    const salt = dailySalt(env.LISTS_SESSION_KEY_V1)
-    const ipHash = hashIp(ip, salt)
-    const bucketKey = `ip:${ipHash}:${policy.route}`
-    const decision = await c.var.repos.rateLimit.takeToken({
-      tenantId: TENANT_DEFAULT,
-      bucketKey,
-      limit: policy.perIp.limit,
-      windowSeconds: policy.perIp.windowSeconds,
-    })
-    if (!decision.allowed) {
-      c.header('Retry-After', String(decision.retryAfterSeconds))
-      throw errors.rateLimited(decision.retryAfterSeconds, `ip:${policy.route}`)
-    }
-    await next()
-  }
+  return rl(policy) as MiddlewareHandler<HonoApp>
 }

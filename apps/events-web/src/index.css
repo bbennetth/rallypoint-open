@@ -2,6 +2,7 @@
 @import '@rallypoint/ui/theme.css';
 @import '@rallypoint/ui/fonts.css';
 @import '@rallypoint/ui/shell.css';
+@import './events.css';
 
 /* Rallypoint Minimal token layer owns the design tokens (var(--bg/--ink/--font-*))
    and the .app-* layout grid. Set the document defaults off those tokens. */

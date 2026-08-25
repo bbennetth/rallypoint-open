@@ -18,6 +18,8 @@ import type {
   DayCode,
   FieldDefOptions,
   FieldType,
+  ListBundle,
+  ListImportResult,
   ListType,
   RecurrenceFreq,
   ScopeType,
@@ -98,6 +100,21 @@ export interface ListItemDto {
   createdBy: string
   createdAt: string
   updatedAt: string
+}
+
+// A soft-deleted item that is still inside the restore window. Live item
+// reads deliberately omit deletedAt; the dedicated deleted-items surface
+// makes it required so consumers can label and order trash views safely.
+export interface DeletedListItemDto extends ListItemDto {
+  deletedAt: string
+}
+
+// One keyset page of items. `nextCursor` is an opaque token (null at the end
+// of the collection) minted by lists-api — consumers relay it verbatim, never
+// parse it.
+export interface ListItemsPage {
+  items: ListItemDto[]
+  nextCursor: string | null
 }
 
 // Wire shape of a recurring series row (mirrors the api's
@@ -192,16 +209,6 @@ export interface GroupDto {
   updatedAt: string
 }
 
-export interface ListsClientConfig {
-  // Base origin of lists-api, e.g. https://lists.rallypt.app or
-  // http://localhost:8082. No trailing slash required.
-  baseUrl: string
-  // SDK bearer key minted by lists-api.
-  apiKey: string
-  // Optional fetch override (tests / non-browser runtimes).
-  fetch?: typeof fetch
-}
-
 // Thrown for any non-2xx response; carries the parsed error envelope
 // (docs/design/error-shape.md) when present.
 export class ListsClientError extends Error {
@@ -226,17 +233,33 @@ export class ListsClientError extends Error {
 // the actor; opaque (Events `group`) scopes are trusted to the caller.
 export interface ListsClient {
   health(): Promise<{ status: string }>
-  listLists(scope: { scopeType: ScopeType; scopeId: string }): Promise<ListDto[]>
-  listItems(listId: string): Promise<ListItemDto[]>
+  // Reads are membership-checked against `actor` for `list_group` scopes
+  // (private lists additionally require creator-or-share); opaque
+  // (Events `group`) scopes are trusted to the caller.
+  listLists(scope: { scopeType: ScopeType; scopeId: string }, actor: string): Promise<ListDto[]>
+  listItems(listId: string, actor: string): Promise<ListItemDto[]>
+  // Keyset-paged read in the default (position, createdAt, id) order. Prefer
+  // this for large lists; `listItems` returns the whole set. `page.cursor` is
+  // the opaque `nextCursor` from the previous page (null/absent → first page).
+  listItemsPage(
+    listId: string,
+    actor: string,
+    page?: { limit?: number; cursor?: string | null },
+  ): Promise<ListItemsPage>
+  listDeletedItems(listId: string, actor: string): Promise<DeletedListItemDto[]>
+  // Fetch a single item by id, scoped to `listId`. Returns null when the
+  // item doesn't exist, belongs to a different list, or is soft-deleted
+  // (matches the findItemInScope not-found convention).
+  getItem(listId: string, itemId: string, actor: string): Promise<ListItemDto | null>
   // Custom field definitions for a list — the schema needed to interpret
   // each item's `customFields`.
-  listFieldDefs(listId: string): Promise<FieldDefDto[]>
+  listFieldDefs(listId: string, actor: string): Promise<FieldDefDto[]>
   // Per-list custom statuses — the set needed to interpret each item's
   // `statusId` (id → name/category/color). Lazily seeds defaults. RPL v1.0.0.
-  listStatuses(listId: string): Promise<ListStatusDto[]>
+  listStatuses(listId: string, actor: string): Promise<ListStatusDto[]>
   // Per-list labels — the set needed to interpret each item's `label_ids`.
   // RPL v1.0.0.
-  listLabels(listId: string): Promise<LabelDto[]>
+  listLabels(listId: string, actor: string): Promise<LabelDto[]>
   // --- field defs (writes) ------------------------------------------
   // Define / update / remove a list's custom-field schema. `actor` must be
   // a member of the list's scope (sent as x-actor); fieldType is immutable
@@ -275,6 +298,8 @@ export interface ListsClient {
   ): Promise<ListItemDto>
   // Soft-delete an item.
   deleteListItem(listId: string, itemId: string, actor: string): Promise<void>
+  // Restore a soft-deleted item while it remains inside the restore window.
+  restoreListItem(listId: string, itemId: string, actor: string): Promise<ListItemDto>
   // Move an item from `listId` to `targetListId` (the explicit cross-list
   // move surface — #549). Field values not meaningful in the target are
   // cleaned server-side; position is re-appended at the target's end.
@@ -299,14 +324,14 @@ export interface ListsClient {
   // the calling app has already authorized; sent as x-actor header.
   createListItemSeries(listId: string, input: CreateSeriesInput, actor: string): Promise<ListItemSeriesDto>
   // List all active (non-deleted) series for a list.
-  listSeries(listId: string): Promise<ListItemSeriesDto[]>
+  listSeries(listId: string, actor: string): Promise<ListItemSeriesDto[]>
   // Sparse-update a series rule/template; re-projects future occurrences.
   updateSeries(seriesId: string, patch: UpdateSeriesInput, actor: string): Promise<ListItemSeriesDto>
   // Soft-delete a series + its future non-exception occurrences.
   deleteSeries(seriesId: string, actor: string): Promise<void>
   // --- comments -----------------------------------------------------
   // Live comments for a list item, oldest-first (PLANNER_API_KEY-gated).
-  listComments(listId: string, itemId: string): Promise<CommentDto[]>
+  listComments(listId: string, itemId: string, actor: string): Promise<CommentDto[]>
   // Create a comment on a list item. `actor` is the user_<ulid> the
   // calling peer app has already authenticated.
   createComment(
@@ -315,218 +340,38 @@ export interface ListsClient {
     input: { body: string },
     actor: string,
   ): Promise<CommentDto>
+  // --- merge --------------------------------------------------------
+  // Fold every source list's items + series into `targetListId`, unifying
+  // custom-field schemas by (label, fieldType) and soft-deleting the moved
+  // source items/series (the source LIST rows stay). Generic: the CALLER
+  // decides which lists are sources vs. target — no product policy lives in
+  // lists-api. `actor` must be able to read each source and structurally
+  // write the target (creator-only on `list_group` scopes). Idempotent — a
+  // re-run over already-emptied sources is a no-op. Returns per-run counts.
+  mergeLists(
+    targetListId: string,
+    sourceListIds: string[],
+    actor: string,
+  ): Promise<MergeListsResult>
+
+  // Whole-list export/import, the generic capability an app-level
+  // backup–restore composes. A bundle carries no row ids: items and series
+  // travel by `ref` (so a re-import dedupes on the key the create path
+  // already enforces) and statuses/labels/field defs are matched by name/key
+  // on the target list. `actor` must be able to read the source list and
+  // write into the target scope.
+  exportListBundle(listId: string, actor: string): Promise<ListBundle>
+  importListBundle(
+    scope: { scopeType: ScopeType; scopeId: string },
+    bundle: ListBundle,
+    actor: string,
+  ): Promise<ListImportResult>
 }
 
-export function createListsClient(config: ListsClientConfig): ListsClient {
-  const base = config.baseUrl.replace(/\/$/, '')
-  const doFetch = config.fetch ?? globalThis.fetch
-
-  async function request<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ): Promise<T> {
-    const res = await doFetch(`${base}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${config.apiKey}`,
-        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...extraHeaders,
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-    const text = await res.text()
-    const json: unknown = text ? JSON.parse(text) : {}
-    if (!res.ok) {
-      const env = (json as { error?: { code?: string; message?: string; details?: unknown } })
-        .error
-      throw new ListsClientError(
-        res.status,
-        env?.code ?? 'unknown_error',
-        env?.message ?? `Request failed with status ${res.status}`,
-        env?.details,
-      )
-    }
-    return json as T
-  }
-
-  return {
-    health() {
-      return request<{ status: string }>('GET', '/api/v1/health')
-    },
-    listLists(scope) {
-      const qs = new URLSearchParams({
-        scope_type: scope.scopeType,
-        scope_id: scope.scopeId,
-      })
-      return request<ListDto[]>('GET', `/api/v1/sdk/lists?${qs.toString()}`)
-    },
-    listItems(listId) {
-      return request<ListItemDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items`,
-      )
-    },
-    listFieldDefs(listId) {
-      return request<FieldDefDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/fields`,
-      )
-    },
-    listStatuses(listId) {
-      return request<ListStatusDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/statuses`,
-      )
-    },
-    listLabels(listId) {
-      return request<LabelDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/labels`,
-      )
-    },
-    createFieldDef(listId, input, actor) {
-      return request<FieldDefDto>(
-        'POST',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/fields`,
-        input,
-        { 'x-actor': actor },
-      )
-    },
-    updateFieldDef(listId, fieldId, patch, actor) {
-      return request<FieldDefDto>(
-        'PATCH',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/fields/${encodeURIComponent(fieldId)}`,
-        patch,
-        { 'x-actor': actor },
-      )
-    },
-    deleteFieldDef(listId, fieldId, actor) {
-      return request<void>(
-        'DELETE',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/fields/${encodeURIComponent(fieldId)}`,
-        undefined,
-        { 'x-actor': actor },
-      )
-    },
-    listGroups(actor) {
-      return request<GroupDto[]>('GET', '/api/v1/sdk/groups', undefined, {
-        'x-actor': actor,
-      })
-    },
-    createGroup(input, actor) {
-      return request<GroupDto>('POST', '/api/v1/sdk/groups', input, {
-        'x-actor': actor,
-      })
-    },
-    createList(input, actor) {
-      return request<ListDto>('POST', '/api/v1/sdk/lists', input, {
-        'x-actor': actor,
-      })
-    },
-    deleteList(listId, actor) {
-      return request<void>(
-        'DELETE',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}`,
-        undefined,
-        { 'x-actor': actor },
-      )
-    },
-    createListItem(listId, input, actor) {
-      return request<ListItemDto>(
-        'POST',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items`,
-        input,
-        { 'x-actor': actor },
-      )
-    },
-    updateListItem(listId, itemId, patch, actor) {
-      return request<ListItemDto>(
-        'PATCH',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
-        patch,
-        { 'x-actor': actor },
-      )
-    },
-    deleteListItem(listId, itemId, actor) {
-      return request<void>(
-        'DELETE',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
-        undefined,
-        { 'x-actor': actor },
-      )
-    },
-    moveListItem(listId, itemId, targetListId, actor) {
-      return request<ListItemDto>(
-        'POST',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/move`,
-        { targetListId },
-        { 'x-actor': actor },
-      )
-    },
-    async findItemInScope(scope, itemId, actor) {
-      try {
-        return await request<ListItemDto>(
-          'GET',
-          `/api/v1/sdk/scopes/${encodeURIComponent(scope.scopeType)}/${encodeURIComponent(scope.scopeId)}/items/${encodeURIComponent(itemId)}`,
-          undefined,
-          { 'x-actor': actor },
-        )
-      } catch (err) {
-        // A genuine "no such live item in this scope" is item_not_found → null.
-        // Any other error — including the zero-key SDK gate-miss (a generic
-        // not_found the BFF remaps to 502) — propagates unchanged so a
-        // misconfigured deploy never masquerades as a missing item.
-        if (err instanceof ListsClientError && err.status === 404 && err.code === 'item_not_found') {
-          return null
-        }
-        throw err
-      }
-    },
-    createListItemSeries(listId, input, actor) {
-      return request<ListItemSeriesDto>(
-        'POST',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/series`,
-        input,
-        { 'x-actor': actor },
-      )
-    },
-    listSeries(listId) {
-      return request<ListItemSeriesDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/series`,
-      )
-    },
-    updateSeries(seriesId, patch, actor) {
-      return request<ListItemSeriesDto>(
-        'PATCH',
-        `/api/v1/sdk/series/${encodeURIComponent(seriesId)}`,
-        patch,
-        { 'x-actor': actor },
-      )
-    },
-    deleteSeries(seriesId, actor) {
-      return request<void>(
-        'DELETE',
-        `/api/v1/sdk/series/${encodeURIComponent(seriesId)}`,
-        undefined,
-        { 'x-actor': actor },
-      )
-    },
-    listComments(listId, itemId) {
-      return request<CommentDto[]>(
-        'GET',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/comments`,
-      )
-    },
-    createComment(listId, itemId, input, actor) {
-      return request<CommentDto>(
-        'POST',
-        `/api/v1/sdk/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}/comments`,
-        input,
-        { 'x-actor': actor },
-      )
-    },
-  }
+// Per-run tallies from a mergeLists call (all zero when there was nothing to
+// fold in). Advisory — the merge's effect is on the target/source lists.
+export interface MergeListsResult {
+  fieldDefsCreated: number
+  seriesMoved: number
+  itemsMoved: number
 }

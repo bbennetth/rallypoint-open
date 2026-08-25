@@ -17,21 +17,19 @@ function normPriority(p: Priority): 'high' | 'med' | 'low' | null {
   return null
 }
 
-const PRI_STYLE: Record<'high' | 'med' | 'low', { label: string; color: string; border: string }> = {
-  high: { label: 'HIGH', color: 'var(--hot)', border: 'var(--hot)' },
-  med: { label: 'MED', color: 'var(--acid)', border: 'var(--acid)' },
-  low: { label: 'LOW', color: 'var(--ink-mute)', border: 'var(--line)' },
+// Colors come from the shared .pl-pritag.hi/.med pills (shell.css); low
+// renders on the base surface-2 pill.
+const PRI_STYLE: Record<'high' | 'med' | 'low', { label: string; cls: string }> = {
+  high: { label: 'HIGH', cls: ' hi' },
+  med: { label: 'MED', cls: ' med' },
+  low: { label: 'LOW', cls: '' },
 }
 
 export function PriTag({ p }: { p: Priority }) {
   const key = normPriority(p)
   if (!key) return null
   const s = PRI_STYLE[key]
-  return (
-    <span className="pl-pritag" style={{ color: s.color, borderColor: s.border }}>
-      {s.label}
-    </span>
-  )
+  return <span className={'pl-pritag' + s.cls}>{s.label}</span>
 }
 
 export function DoneBtn({ done, onClick, busy }: { done: boolean; onClick: () => void; busy?: boolean }) {
@@ -49,13 +47,27 @@ export function DoneBtn({ done, onClick, busy }: { done: boolean; onClick: () =>
   )
 }
 
-export function Check({ done, onClick, sz = 20 }: { done: boolean; onClick: () => void; sz?: number }) {
+export function Check({
+  done,
+  onClick,
+  label,
+  sz = 20,
+}: {
+  done: boolean
+  onClick: () => void
+  // Accessible name for the toggle. The button is icon-only (empty when not
+  // done), so without this a screen reader announces nothing. Describe the
+  // action + which row, e.g. "Mark Buy milk done".
+  label: string
+  sz?: number
+}) {
   return (
     <button
       type="button"
       className={'pl-check' + (done ? ' done' : '')}
       onClick={onClick}
       aria-pressed={done}
+      aria-label={label}
       style={{ width: sz, height: sz, flex: `0 0 ${sz}px` }}
     >
       {done && (

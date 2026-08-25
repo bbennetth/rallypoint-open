@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { Button, type ButtonVariant } from './Button.js'
 import { nextFocusAfterTrap } from '../lib/focus-trap.js'
@@ -48,6 +48,13 @@ export interface ConfirmDialogProps {
   confirmVariant?: ButtonVariant
   onConfirm: () => void | Promise<void>
   onCancel: () => void
+  /** Optional third action rendered between cancel and confirm. Useful for
+   *  three-way decisions such as Save / Discard / Go back. */
+  extraAction?: {
+    label: string
+    variant?: ButtonVariant
+    onAction: () => void | Promise<void>
+  }
   /** Set true while the confirm action is in flight; disables both buttons. */
   busy?: boolean
 }
@@ -61,8 +68,12 @@ export function ConfirmDialog({
   confirmVariant = 'brutal',
   onConfirm,
   onCancel,
+  extraAction,
   busy = false,
 }: ConfirmDialogProps) {
+  const uid = useId()
+  const titleId = `${uid}-title`
+  const bodyId = `${uid}-body`
   const panelRef = useRef<HTMLDivElement | null>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
 
@@ -139,14 +150,14 @@ export function ConfirmDialog({
         ref={panelRef}
         role="alertdialog"
         aria-modal="true"
-        aria-labelledby="rp-confirm-title"
-        {...(body ? { 'aria-describedby': 'rp-confirm-body' } : {})}
+        aria-labelledby={titleId}
+        {...(body ? { 'aria-describedby': bodyId } : {})}
         tabIndex={-1}
         style={{
           position: 'relative',
           width: 'min(420px, 100%)',
-          background: 'var(--bg)',
-          border: '1.5px solid var(--line)',
+          background: 'var(--surface)',
+          borderRadius: 'var(--radius-xl)',
           padding: 20,
           display: 'flex',
           flexDirection: 'column',
@@ -157,14 +168,14 @@ export function ConfirmDialog({
         }}
       >
         <h2
-          id="rp-confirm-title"
+          id={titleId}
           className="display"
           style={{ fontSize: 16, letterSpacing: '0.02em' }}
         >
           {title}
         </h2>
         {body && (
-          <div id="rp-confirm-body" style={{ fontSize: 13, color: 'var(--ink-dim)', lineHeight: 1.5 }}>{body}</div>
+          <div id={bodyId} style={{ fontSize: 13, color: 'var(--ink-dim)', lineHeight: 1.5 }}>{body}</div>
         )}
         <div
           style={{
@@ -177,6 +188,15 @@ export function ConfirmDialog({
           <Button variant="ghost" onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </Button>
+          {extraAction && (
+            <Button
+              variant={extraAction.variant ?? 'ghost'}
+              onClick={() => void extraAction.onAction()}
+              disabled={busy}
+            >
+              {extraAction.label}
+            </Button>
+          )}
           <Button
             variant={confirmVariant}
             onClick={() => void onConfirm()}

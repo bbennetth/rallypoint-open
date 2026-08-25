@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Outlet, useNavigate, useParams } from 'react-router-dom'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { AppChrome } from './AppChrome.js'
 import { ApiError, getEvent, type EventDto } from '../lib/api.js'
+import { attendeeHomeHref } from '../lib/attendee-route.js'
 
 // Phase 2 of platform/v-1.1 (#16). Wraps every `/events/:slug/*` route
 // in the owner-side chrome with an event-scoped sidebar (back-link +
@@ -26,23 +28,28 @@ export function EventOwnerLayout({ userId }: { userId: string }) {
   const navigate = useNavigate()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
 
+  const run = useAsyncTask()
   const load = useCallback(async () => {
     if (!slug) return
-    try {
-      const event = await getEvent(slug)
-      setState({ status: 'ready', event })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
-        return
+    await run(async (ctx) => {
+      try {
+        const event = await getEvent(slug)
+        if (ctx.stale()) return
+        setState({ status: 'ready', event })
+      } catch (err) {
+        if (ctx.stale()) return
+        if (err instanceof ApiError && err.status === 404) {
+          setState({ status: 'error', code: 'not_found', message: 'Event not found.' })
+          return
+        }
+        setState({
+          status: 'error',
+          code: err instanceof ApiError ? err.code : 'unexpected_error',
+          message: err instanceof Error ? err.message : 'Unexpected error.',
+        })
       }
-      setState({
-        status: 'error',
-        code: err instanceof ApiError ? err.code : 'unexpected_error',
-        message: err instanceof Error ? err.message : 'Unexpected error.',
-      })
-    }
-  }, [slug])
+    })
+  }, [slug, run])
 
   useEffect(() => {
     void load()
@@ -79,10 +86,7 @@ export function EventOwnerLayout({ userId }: { userId: string }) {
   // user deep-linking /events/:slug gets bounced to their attendee
   // destination (group shell when they're in a group, else solo).
   if (event.viewer_role === 'viewer') {
-    void navigate(
-      event.my_group_id ? `/groups/${event.my_group_id}` : `/events/${event.slug}/attending/now`,
-      { replace: true },
-    )
+    void navigate(attendeeHomeHref(event), { replace: true })
     return null
   }
 

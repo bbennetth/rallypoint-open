@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button, EmptyState } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { ApiError, getEvent, type EventDto } from '../../lib/api.js'
 import { formatEventDay } from '../../lib/date-format.js'
 
@@ -8,8 +9,9 @@ import { formatEventDay } from '../../lib/date-format.js'
 // attendee right after they accept an event invite (see
 // EventJoinPage's role-aware redirect). Shows the event identity +
 // dates + a "what's next?" decision:
-//   - Join or create a group  → /groups/join (existing flow)
-//   - Continue solo          → /events/:slug/attending/now
+//   - Start a group  → /events/:slug/groups/new
+//   - Join a group   → /groups/join (code entry)
+//   - Continue solo  → /events/:slug/attending/now
 //
 // The solo flow is fully usable on its own; groups are an optional
 // social layer attendees form among themselves. This page exists so
@@ -24,16 +26,17 @@ export function AttendingLandingPage() {
   const { slug } = useParams<{ slug: string }>()
   const navigate = useNavigate()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
+  const run = useAsyncTask()
 
   useEffect(() => {
     if (!slug) return
-    let cancelled = false
-    void getEvent(slug)
-      .then((event) => {
-        if (!cancelled) setState({ status: 'ready', event })
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
+    void run(async (ctx) => {
+      try {
+        const event = await getEvent(slug)
+        if (ctx.stale()) return
+        setState({ status: 'ready', event })
+      } catch (err) {
+        if (ctx.stale()) return
         if (err instanceof ApiError && err.status === 404) {
           void navigate('/me/events', { replace: true })
           return
@@ -42,11 +45,9 @@ export function AttendingLandingPage() {
           status: 'error',
           message: err instanceof ApiError ? err.message : 'Failed to load event.',
         })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [slug, navigate])
+      }
+    })
+  }, [slug, navigate, run])
 
   if (state.status === 'loading') {
     return (
@@ -98,16 +99,30 @@ export function AttendingLandingPage() {
           <h2 className="text-sm text-white/80">What's next?</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {event.features.groups && (
-              <Link to="/groups/join" style={{ textDecoration: 'none' }}>
-                <DecisionCard
-                  title="Join or create a group →"
-                  body="Groups are how friends plan together at events — shared chat, rallies, lists, and a ledger."
-                />
-              </Link>
+              <>
+                <Link
+                  to={`/events/${encodeURIComponent(event.slug)}/groups/new`}
+                  style={{ textDecoration: 'none' }}
+                >
+                  <DecisionCard
+                    title="Start a group →"
+                    body="Groups are how friends plan together at events — shared rallies, lists, and a ledger."
+                  />
+                </Link>
+                <Link to="/groups/join" style={{ textDecoration: 'none' }}>
+                  <DecisionCard
+                    title="Join a group →"
+                    body="Have a join code from a friend? Enter it here."
+                  />
+                </Link>
+              </>
             )}
+            {/* With the two group cards on row 1, solo takes the full
+                second row instead of leaving a dead cell beside it. */}
             <Link
               to={`/events/${encodeURIComponent(event.slug)}/attending/now`}
               style={{ textDecoration: 'none' }}
+              className={event.features.groups ? 'sm:col-span-2' : undefined}
             >
               <DecisionCard
                 title="Continue solo →"
@@ -130,8 +145,7 @@ export function AttendingLandingPage() {
 function DecisionCard({ title, body }: { title: string; body: string }) {
   return (
     <div
-      className="p-4 space-y-2 hover:bg-white/10 transition-colors"
-      style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+      className="p-4 space-y-2 hover:bg-white/10 transition-colors pl-card"
     >
       <h3 className="display" style={{ fontSize: 15, letterSpacing: '0.02em' }}>
         {title}

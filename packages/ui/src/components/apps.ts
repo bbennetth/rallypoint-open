@@ -35,5 +35,6 @@ export const DEFAULT_APPS: readonly AppSwitcherApp[] = [
   { key: 'planner', name: 'Planner', icon: 'myday', origin: ENV.VITE_PLANNER_WEB_URL ?? 'http://localhost:5177', home: '/me' },
   { key: 'events', name: 'Events', icon: 'events', origin: ENV.VITE_EVENTS_WEB_URL ?? 'http://localhost:5174', home: '/me/events' },
   { key: 'lists', name: 'Lists', icon: 'tasks', origin: ENV.VITE_LISTS_WEB_URL ?? 'http://localhost:5175', home: '/me/lists' },
+  { key: 'fitness', name: 'Health', icon: 'grid', origin: ENV.VITE_FITNESS_WEB_URL ?? 'http://localhost:5178', home: '/me/log' },
   { key: 'money', name: 'Money', icon: 'money', tag: 'SOON' },
 ]

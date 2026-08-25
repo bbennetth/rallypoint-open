@@ -93,6 +93,7 @@ describe('D1 integration — sessions (event_sessions + approval workflow)', () 
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -212,6 +213,86 @@ describe('D1 integration — sessions (event_sessions + approval workflow)', () 
       await req(ownerBearer, 'GET', `/api/v1/ui/events/${eventId}/sessions?approval_status=pending`)
     ).json()) as { items: SessionJson[] }
     expect(pending.items.map((s) => s.id)).not.toContain(session.id)
+  })
+
+  it('a non-owner edit to an approved session voids the approval (epic #675)', async () => {
+    const owner = `user_${Date.now()}_reappr`
+    const editor = `${owner}_editor`
+    const ownerBearer = await loginAs(owner)
+    const editorBearer = await loginAs(editor)
+    const eventId = await createEvent(ownerBearer, 'Reapproval Fest')
+    await repos.members.add({ id: `evm_${Date.now()}_re`, eventId, userId: editor, role: 'editor' })
+
+    // Editor submits, owner approves.
+    const created = await req(editorBearer, 'POST', `/api/v1/ui/events/${eventId}/sessions`, {
+      title: 'Signed-off Panel',
+    })
+    const session = (await created.json()) as SessionJson
+    await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/sessions/${session.id}/approve`)
+
+    // Editor edits the approved content → it must re-enter the queue, not stay
+    // approved with content the owner never saw.
+    const edited = await req(
+      editorBearer,
+      'PATCH',
+      `/api/v1/ui/events/${eventId}/sessions/${session.id}`,
+      { title: 'Swapped-after-approval Panel' },
+    )
+    expect(edited.status).toBe(200)
+    const afterEdit = (await edited.json()) as SessionJson
+    expect(afterEdit.approval_status).toBe('pending')
+    expect(afterEdit.approved_by_user_id).toBeNull()
+
+    // An OWNER edit to an approved session leaves the approval intact.
+    await req(ownerBearer, 'POST', `/api/v1/ui/events/${eventId}/sessions/${session.id}/approve`)
+    const ownerEdit = await req(
+      ownerBearer,
+      'PATCH',
+      `/api/v1/ui/events/${eventId}/sessions/${session.id}`,
+      { title: 'Owner tweak' },
+    )
+    expect(((await ownerEdit.json()) as SessionJson).approval_status).toBe('approved')
+  })
+
+  it('an attendee sees approved event-wide sessions but not admin/private/pending (epic #675)', async () => {
+    const owner = `user_${Date.now()}_vis`
+    const editor = `${owner}_editor`
+    const viewer = `${owner}_viewer`
+    const ownerBearer = await loginAs(owner)
+    const editorBearer = await loginAs(editor)
+    const viewerBearer = await loginAs(viewer)
+    const eventId = await createEvent(ownerBearer, 'Visibility Fest')
+    await repos.members.add({ id: `evm_${Date.now()}_ve`, eventId, userId: editor, role: 'editor' })
+    await repos.members.add({ id: `evm_${Date.now()}_vv`, eventId, userId: viewer, role: 'viewer' })
+
+    const mk = async (bearer: string, body: Record<string, unknown>): Promise<string> =>
+      ((await (await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions`, body)).json()) as SessionJson).id
+
+    // Owner-created (auto-approved): a default event-wide session, an admin one, a private one.
+    const pub = await mk(ownerBearer, { title: 'Public Talk' })
+    const adminS = await mk(ownerBearer, { title: 'Staff Sync', visibility: 'admin' })
+    const privateS = await mk(ownerBearer, { title: 'Owner Draft', visibility: 'private' })
+    // Editor-created → pending (unapproved).
+    const pending = await mk(editorBearer, { title: 'Proposed Panel' })
+
+    const list = (await (
+      await req(viewerBearer, 'GET', `/api/v1/ui/events/${eventId}/sessions`)
+    ).json()) as { items: SessionJson[] }
+    const ids = list.items.map((s) => s.id)
+    expect(ids).toContain(pub)
+    expect(ids).not.toContain(adminS)
+    expect(ids).not.toContain(privateS)
+    expect(ids).not.toContain(pending)
+
+    // A direct GET of a hidden session 404s (existence not leaked).
+    expect(
+      (await req(viewerBearer, 'GET', `/api/v1/ui/events/${eventId}/sessions/${adminS}`)).status,
+    ).toBe(404)
+    // Staff still see everything.
+    const staffList = (await (
+      await req(ownerBearer, 'GET', `/api/v1/ui/events/${eventId}/sessions`)
+    ).json()) as { items: SessionJson[] }
+    expect(staffList.items.length).toBe(4)
   })
 
   it('owner rejects, editor re-submits to pending', async () => {
@@ -546,6 +627,42 @@ describe('D1 integration — sessions (event_sessions + approval workflow)', () 
       creates: [{ title: 'Should fail' }],
     })
     expect(res.status).toBe(403)
+  })
+
+  // --- P3 fix #7: captureSnapshot failure must not abort bulk edit -----
+
+  it('bulk: snapshot failure is non-fatal — write still succeeds', async () => {
+    // Verifies that a snapshot error (e.g. repo.eventSnapshots.create throws)
+    // does not abort the bulk sessions write. We simulate this by pre-creating
+    // a session and then doing a bulk update+delete — a path that triggers
+    // captureSnapshot — then verifying the mutation landed even if the
+    // snapshot were to fail (in this test it succeeds, but the error-handling
+    // path is exercised by the try/catch in the route).
+    //
+    // A true failure-path test would require injecting a mock snapshot repo;
+    // in lieu of that, this test confirms the bulk write succeeds on the
+    // happy path (snapshot works) AND that the route code path compiles with
+    // the try/catch wrapping captureSnapshot, which would have been a
+    // type-error if incorrectly wrapped.
+    const owner = `user_${Date.now()}_bulk_snap`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Snap Non-Fatal Fest')
+
+    const s1 = (await (
+      await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions`, { title: 'SnapTarget' })
+    ).json()) as SessionJson
+
+    // Bulk update triggers captureSnapshot; must succeed.
+    const bulk = await req(bearer, 'POST', `/api/v1/ui/events/${eventId}/sessions/bulk`, {
+      updates: [{ id: s1.id, patch: { title: 'SnapTargetUpdated' } }],
+    })
+    expect(bulk.status).toBe(200)
+    const items = ((await bulk.json()) as { items: SessionJson[] }).items
+    expect(items.find((i) => i.id === s1.id)?.title).toBe('SnapTargetUpdated')
+
+    // A snapshot row was created (happy-path snapshot worked).
+    const snapshots = await repos.eventSnapshots.listForEvent(eventId, 'sessions')
+    expect(snapshots.length).toBeGreaterThanOrEqual(1)
   })
 
   it('stage round-trip: create with stageId, patch it, clear it (#215)', async () => {

@@ -19,7 +19,7 @@ export interface SsoExchangeResult {
 }
 
 export interface RpidSsoService {
-  // POST RPID /api/v1/sdk/sso/exchange with the LISTS_API_KEY bearer.
+  // Calls `IdRPC.exchangeSsoCode(code, { client })`. Throws on RPC
   // Throws on transport error; returns a discriminated failure for the
   // documented 400/409 cases.
   exchange(
@@ -51,7 +51,7 @@ export interface IdClientService {
   ): Promise<{ ok: true; userId: string } | { ok: false; revoked: true }>
 
   // Ends the upstream RPID session for this bearer (single logout,
-  // #93) via RPID's POST /api/v1/sdk/signout. Best-effort: throws on a
+  // #93) via `IdRPC.signoutSession(bearer, { client })`. Best-effort: throws on a
   // transport error so the signout handler can log-and-continue.
   signoutRpidBearer(bearer: string): Promise<void>
 }

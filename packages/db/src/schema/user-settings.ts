@@ -43,6 +43,3 @@ export const userSettings = sqliteTable(
     pk: primaryKey({ columns: [t.userId, t.namespace, t.key], name: 'user_settings_pkey' }),
   }),
 )
-
-export type DbUserSetting = typeof userSettings.$inferSelect
-export type DbUserSettingInsert = typeof userSettings.$inferInsert

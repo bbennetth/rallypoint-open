@@ -1,8 +1,13 @@
 import { Hono } from 'hono'
+import { buildPage, paginationQuery } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { constantTimeEqual } from '@rallypoint/crypto'
 import { ANTI_FINGERPRINT_NOT_FOUND } from '@rallypoint/shared'
 import { ApiError, errors } from '../errors.js'
+import { auditCursorCodec } from '../lib/audit-cursor.js'
+import { normalizeEmail } from '../lib/normalize-email.js'
+
+const auditPageQuery = paginationQuery({ defaultLimit: 100, maxLimit: 500 })
 
 // Env-gated admin namespace. ADMIN_TOKEN env must be set AND
 // match the Authorization header for any /api/v1/admin/* call.
@@ -41,15 +46,33 @@ export const adminRoutes = new Hono<HonoApp>()
     const url = new URL(c.req.url)
     const userId = url.searchParams.get('userId') ?? undefined
     const eventType = url.searchParams.get('eventType') ?? undefined
-    const limit = Number(url.searchParams.get('limit') ?? '100')
     const tenantId = url.searchParams.get('tenantId') ?? 'rallypoint'
-    const events = await c.var.repos.audit.list({
+    const parsed = auditPageQuery.safeParse({
+      limit: url.searchParams.get('limit') ?? undefined,
+      cursor: url.searchParams.get('cursor') ?? undefined,
+    })
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const { limit } = parsed.data
+    let cursor: { createdAt: Date; id: string } | null = null
+    if (parsed.data.cursor !== undefined) {
+      const decoded = auditCursorCodec.decode(parsed.data.cursor)
+      if (decoded === null) {
+        throw errors.validation({
+          issues: [{ code: 'custom', path: ['cursor'], message: 'Invalid cursor.' }],
+        })
+      }
+      cursor = { createdAt: decoded.at, id: decoded.id }
+    }
+    // Over-fetch by one so buildPage can tell whether a further page exists.
+    const rows = await c.var.repos.audit.list({
       tenantId,
       ...(userId ? { userId: userId as `user_${string}` } : {}),
       ...(eventType ? { eventType } : {}),
-      limit,
+      limit: limit + 1,
+      ...(cursor ? { cursor } : {}),
     })
-    return c.json({ events })
+    const page = buildPage(rows, limit, auditCursorCodec, (e) => ({ at: e.createdAt, id: e.id }))
+    return c.json({ items: page.items, next_cursor: page.nextCursor })
   })
   // Look up a user by email OR user_id. Read-only.
   // Returns the full DB row (admin-only — no enumeration concerns).
@@ -71,7 +94,7 @@ export const adminRoutes = new Hono<HonoApp>()
 
     const user = userId
       ? await c.var.repos.users.findById(userId as `user_${string}`)
-      : await c.var.repos.users.findByEmail(tenantId, email!.toLowerCase())
+      : await c.var.repos.users.findByEmail(tenantId, normalizeEmail(email!))
 
     if (!user) return c.json({ user: null })
 
@@ -82,6 +105,10 @@ export const adminRoutes = new Hono<HonoApp>()
         createdAt: user.createdAt.toISOString(),
         updatedAt: user.updatedAt.toISOString(),
         deletedAt: user.deletedAt?.toISOString() ?? null,
+        // Lockout bookkeeping (audit 2.5) rides along for admin visibility;
+        // convert the Date to ISO like the sibling timestamps rather than
+        // letting the raw Date leak through the spread.
+        lockedUntil: user.lockedUntil?.toISOString() ?? null,
       },
       hasPasswordMethod: authMethods !== null,
     })

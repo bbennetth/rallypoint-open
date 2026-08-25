@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Kept in lockstep with ROUTE_META in src/seo.ts — seo.test.ts fails if
+     a route is added there without a matching <loc> here (or vice versa). -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://rallypt.app/</loc></url>
+  <url><loc>https://rallypt.app/planner</loc></url>
+  <url><loc>https://rallypt.app/health</loc></url>
+  <url><loc>https://rallypt.app/cmd</loc></url>
+</urlset>

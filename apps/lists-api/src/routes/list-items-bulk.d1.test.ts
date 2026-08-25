@@ -89,6 +89,7 @@ describe('D1 integration — bulk item actions', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -335,6 +336,96 @@ describe('D1 integration — bulk item actions', () => {
     expect(published).toHaveLength(1)
     const items = await listItems(bearer, listId)
     for (const i of items) expect(i.custom_fields).toEqual({ [budget.id]: 42 })
+  })
+
+  // Regression for "D1_ERROR: too many SQL variables" (100 bound-param
+  // cap): the bulk endpoint accepts up to 200 item ids per request
+  // (bulkItemIdsField), far past D1's cap, so the repo must chunk both
+  // the fast-path uniform UPDATE and bulkSoftDelete/bulkClearChildParent.
+  it('bulk-updates 200 items in one request (chunked past the D1 param cap)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bu200`)
+    const listId = await makeList(bearer)
+    const ids: string[] = []
+    for (let i = 0; i < 200; i++) {
+      ids.push(await makeItem(bearer, listId, `Item ${i}`))
+    }
+    published = []
+
+    // Broad uniform base patch (completed/priority/dueDate/assignedTo) so
+    // the fast-path UPDATE binds several SET params alongside each id chunk,
+    // guarding the chunk helper's reserved-param headroom.
+    const res = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items/bulk`, {
+      action: 'update',
+      itemIds: ids,
+      patch: {
+        completed: true,
+        priority: 'high',
+        dueDate: '2026-09-01T00:00:00.000Z',
+        assignedTo: 'user_assignee',
+      },
+    })
+    expect(res.status).toBe(200)
+    const out = (await res.json()) as { count: number; ids: string[] }
+    expect(out.count).toBe(200)
+    expect(out.ids.sort()).toEqual([...ids].sort())
+
+    const items = await listItems(bearer, listId)
+    expect(items).toHaveLength(200)
+    for (const i of items) {
+      expect(i.completed).toBe(true)
+      expect(i.priority).toBe('high')
+    }
+  })
+
+  it('bulk-deletes 200 items, clearing parentId on ~150 children (chunked past the D1 param cap)', async () => {
+    const bearer = await loginAs(`user_${Date.now()}_bd200`)
+    const listId = await makeList(bearer)
+
+    // 150 parents, each with one child (300 items total). 50 standalone
+    // items round it out to 200 ids in the delete batch.
+    const parentIds: string[] = []
+    const childIds: string[] = []
+    for (let i = 0; i < 150; i++) {
+      const parentId = await makeItem(bearer, listId, `Parent ${i}`)
+      parentIds.push(parentId)
+      const childRes = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items`, {
+        title: `Child ${i}`,
+        parentId,
+      })
+      expect(childRes.status).toBe(201)
+      childIds.push(((await childRes.json()) as { id: string }).id)
+    }
+    const standaloneIds: string[] = []
+    for (let i = 0; i < 50; i++) {
+      standaloneIds.push(await makeItem(bearer, listId, `Standalone ${i}`))
+    }
+    published = []
+
+    const deleteIds = [...parentIds, ...standaloneIds]
+    expect(deleteIds).toHaveLength(200)
+    const res = await req(bearer, 'POST', `/api/v1/ui/lists/${listId}/items/bulk`, {
+      action: 'delete',
+      itemIds: deleteIds,
+    })
+    expect(res.status).toBe(200)
+    const out = (await res.json()) as { count: number; ids: string[] }
+    expect(out.count).toBe(200)
+
+    const remaining = await listItems(bearer, listId)
+    const remainingIds = new Set(remaining.map((i) => i.id))
+    // Parents + standalone items gone; children survive as top-level rows.
+    for (const id of parentIds) expect(remainingIds.has(id)).toBe(false)
+    for (const id of standaloneIds) expect(remainingIds.has(id)).toBe(false)
+    for (const id of childIds) expect(remainingIds.has(id)).toBe(true)
+
+    const childRes = await req(bearer, 'GET', `/api/v1/ui/lists/${listId}/items`)
+    const childItems = ((await childRes.json()) as {
+      items: Array<{ id: string; parent_id: string | null }>
+    }).items
+    const byId = new Map(childItems.map((i) => [i.id, i]))
+    for (const id of childIds) {
+      expect(byId.get(id)!.parent_id).toBeNull()
+    }
   })
 
   it('rejects an empty update patch (400) and an empty itemIds array (400)', async () => {

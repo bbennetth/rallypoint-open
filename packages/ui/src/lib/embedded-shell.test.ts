@@ -3,8 +3,23 @@ import {
   hasEmbeddedParam,
   appendEmbeddedParam,
   isIOSAgent,
+  isSafeAppHref,
   shouldEmbedTarget,
 } from './embedded-shell.js'
+
+describe('isSafeAppHref', () => {
+  it('allows http(s) URLs', () => {
+    expect(isSafeAppHref('https://lists.rallypt.app/me/lists')).toBe(true)
+    expect(isSafeAppHref('http://localhost:5174/me/lists')).toBe(true)
+  })
+  it('rejects non-http protocols and malformed URLs', () => {
+    expect(isSafeAppHref('javascript:alert(1)')).toBe(false)
+    expect(isSafeAppHref('data:text/html,<script>1</script>')).toBe(false)
+    expect(isSafeAppHref('vbscript:x')).toBe(false)
+    expect(isSafeAppHref('not a url')).toBe(false)
+    expect(isSafeAppHref('')).toBe(false)
+  })
+})
 
 describe('hasEmbeddedParam', () => {
   it('detects the marker with or without a leading ?', () => {

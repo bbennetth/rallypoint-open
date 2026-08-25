@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useAsyncTask } from '@rallypoint/web-kit'
+import { useMobileViewport } from '@rallypoint/ui'
 import {
   ApiError,
   listEvents,
@@ -10,6 +12,7 @@ import {
   type EventListPage,
 } from '../lib/api.js'
 import { formatEventDay } from '../lib/date-format.js'
+import { canManageEvent, eventHomeHref, eventOwnerHref } from '../lib/attendee-route.js'
 
 type LoadState =
   | { status: 'loading' }
@@ -34,25 +37,42 @@ export function MyEventsPage() {
   // Event ids whose planner toggle has an in-flight request — guards
   // against a rapid double-click firing two concurrent, racing PUTs.
   const [plannerBusy, setPlannerBusy] = useState<Set<string>>(new Set())
+  // Drives where a row tap goes: on a phone every event opens the
+  // attendee experience, owners included (see eventHomeHref). Reactive
+  // so the links re-target on rotate/resize rather than going stale.
+  const mobile = useMobileViewport()
+
+  const run = useAsyncTask()
+  // Separate gate: the planner-prefs fetch is independent of the events load,
+  // so it must not cancel it (and vice versa).
+  const runPrefs = useAsyncTask()
 
   async function load(includeDeleted: boolean) {
     setState({ status: 'loading' })
-    try {
-      const page = await listEvents({ includeDeleted })
-      setState({ status: 'ready', page })
-    } catch (err) {
-      setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
-    }
+    await run(async (ctx) => {
+      try {
+        const page = await listEvents({ includeDeleted })
+        if (ctx.stale()) return
+        setState({ status: 'ready', page })
+      } catch (err) {
+        if (ctx.stale()) return
+        setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
+      }
+    })
   }
 
   async function loadPlannerPrefs() {
-    try {
-      const ids = await listEventPlannerPrefs()
-      setPlannerSet(new Set(ids))
-    } catch {
-      // Non-fatal: prefs simply appear unset on error.
-      setPlannerSet(new Set())
-    }
+    await runPrefs(async (ctx) => {
+      try {
+        const ids = await listEventPlannerPrefs()
+        if (ctx.stale()) return
+        setPlannerSet(new Set(ids))
+      } catch {
+        // Non-fatal: prefs simply appear unset on error.
+        if (ctx.stale()) return
+        setPlannerSet(new Set())
+      }
+    })
   }
 
   async function handlePlannerToggle(eventId: string, e: React.MouseEvent | React.ChangeEvent) {
@@ -136,14 +156,15 @@ export function MyEventsPage() {
   return (
     <main className="page-pad">
       <div className="content-cap mx-auto space-y-6">
-        <header className="flex items-center justify-between gap-4 flex-wrap">
+        {/* Ink kit's `.pg-head` shell — eyebrow + display-font H1 +
+            right-aligned action row. Replaces the prior ad-hoc Tailwind
+            flex header. */}
+        <div className="pg-head">
           <div>
-            <p className="text-xs font-medium text-[color:var(--ink-mute)]">
-              Rallypoint Events
-            </p>
-            <h1 className="display text-2xl mt-1">My Events</h1>
+            <span className="eyebrow">Rallypoint Events</span>
+            <h1 style={{ marginTop: 6 }}>My Events</h1>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <Link to="/events/join" className="btn-ghost" style={{ width: 'auto' }}>
               Join event
             </Link>
@@ -154,14 +175,24 @@ export function MyEventsPage() {
               New event
             </Link>
           </div>
-        </header>
+        </div>
 
-        <label className="flex items-center gap-2 text-sm text-white/60 cursor-pointer select-none">
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 13,
+            color: 'var(--ink-dim)',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+        >
           <input
             type="checkbox"
             checked={showDeleted}
             onChange={(e) => setShowDeleted(e.target.checked)}
-            style={{ accentColor: 'var(--acid)' }}
+            className="cyber-checkbox"
           />
           Show deleted events
         </label>
@@ -172,8 +203,9 @@ export function MyEventsPage() {
           <div
             className="p-4"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              color: 'var(--hot-text)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
             <p className="text-sm" style={{ color: 'var(--ink)' }}>
@@ -193,8 +225,7 @@ export function MyEventsPage() {
 
         {state.status === 'ready' && state.page.items.length === 0 && (
           <div
-            className="p-6 text-center text-white/60 text-sm"
-            style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
+            className="p-6 text-center text-white/60 text-sm pl-card"
           >
             No events yet.{' '}
             <Link to="/events/new" className="text-[color:var(--ink)] underline">
@@ -210,39 +241,74 @@ export function MyEventsPage() {
         )}
 
         {state.status === 'ready' && state.page.items.length > 0 && (
-          <ul className="space-y-3">
+          // Ink kit's `.ev-list` of `.ev-listitem` rows. Each row's
+          // body is `.body`, the row title is `.title`, privacy / role
+          // are real `.pl-chip` / `.pl-chip.accent` chips, and the
+          // group-scoped Planner toggle sits in `.planner-toggle` as a
+          // bordered mono-uppercase right cell.
+          <ul className="ev-list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {state.page.items.map((event) => (
               <li
                 key={event.id}
-                className="flex items-stretch"
-                style={{
-                  border: '1.5px solid var(--line)',
-                  background: 'var(--surface)',
-                  opacity: event.deleted_at ? 0.6 : 1,
-                }}
+                className="ev-listitem"
+                style={{ opacity: event.deleted_at ? 0.6 : 1 }}
               >
-                <div className="flex-1 p-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
+                <div className="body">
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 0, display: 'grid', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <Link
-                          to={eventDestination(event)}
-                          className="font-medium hover:opacity-70 transition-opacity"
+                          to={eventHomeHref(event, { mobile })}
+                          className="title"
+                          style={{ textDecoration: 'none' }}
                         >
                           {event.name}
                         </Link>
-                        <span className="mono text-xs text-white/40">{event.slug}</span>
+                        <span className="meta">{event.slug}</span>
                         {event.deleted_at && (
-                          <span className="chip" style={{ color: 'var(--hot)' }}>
-                            deleted
+                          <span className="pl-chip" style={{ background: 'var(--hot-soft)', color: 'var(--hot-text)' }}>
+                            DELETED
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-white/60 flex-wrap">
-                        <span className="capitalize">{event.privacy_mode}</span>
-                        <span className="capitalize text-[color:var(--ink-mute)]">{event.viewer_role}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <span className="pl-chip">{event.privacy_mode}</span>
+                        <span
+                          className={
+                            'pl-chip' +
+                            (event.viewer_role === 'owner' ? ' accent' : '')
+                          }
+                        >
+                          {event.viewer_role}
+                        </span>
+                        {/* On mobile the row title opens the attendee
+                            experience, so this is how an organizer gets
+                            to the management tabs. It matters most for
+                            group members, whose attendee shell
+                            (/groups/:id) has no route back at all. */}
+                        {mobile && !event.deleted_at && canManageEvent(event.viewer_role) && (
+                          <Link
+                            to={eventOwnerHref(event.slug)}
+                            // `toggle` for the interactive chip size +
+                            // press feedback, `accent` so the action
+                            // doesn't read flatter than the static role
+                            // chip beside it. Sized to --control-h-sm,
+                            // not --tap-min: at 44px the pill stretches
+                            // around unchanged 9.5px text and stops
+                            // reading as part of this chip family (a
+                            // 1.5:1 box among 2.6:1 neighbours). ~65x28
+                            // clears the WCAG 24px floor with room, and
+                            // by position this is a row-trailing action
+                            // even though it matters more than most.
+                            className="pl-chip toggle accent"
+                            style={{ minHeight: 'var(--control-h-sm)', textDecoration: 'none' }}
+                            aria-label={`Manage "${event.name}"`}
+                          >
+                            Manage
+                          </Link>
+                        )}
                         {(event.start_date || event.end_date) && (
-                          <span>
+                          <span className="meta">
                             {formatDate(event.start_date)}
                             {event.end_date && event.end_date !== event.start_date
                               ? ` – ${formatDate(event.end_date)}`
@@ -256,8 +322,8 @@ export function MyEventsPage() {
                         type="button"
                         disabled={restoringId === event.id}
                         onClick={() => void handleRestore(event)}
-                        className="btn-ghost shrink-0"
-                        style={{ width: 'auto' }}
+                        className="btn-ghost"
+                        style={{ width: 'auto', flexShrink: 0 }}
                       >
                         {restoringId === event.id ? 'Restoring…' : 'Restore'}
                       </button>
@@ -266,8 +332,7 @@ export function MyEventsPage() {
                 </div>
                 {event.scope_type === 'group' && !event.deleted_at && (
                   <label
-                    className="flex items-center gap-1.5 px-3 cursor-pointer text-xs"
-                    style={{ color: 'var(--ink-dim)', borderLeft: '1px solid var(--line)' }}
+                    className="planner-toggle"
                     title={plannerSet.has(event.id) ? 'Remove from Planner' : 'Show in Planner'}
                   >
                     <input
@@ -278,7 +343,7 @@ export function MyEventsPage() {
                       aria-label={`Show "${event.name}" in Planner`}
                       className="cyber-checkbox"
                     />
-                    <span className="whitespace-nowrap">Planner</span>
+                    Planner
                   </label>
                 )}
               </li>
@@ -302,14 +367,4 @@ export function MyEventsPage() {
       </div>
     </main>
   )
-}
-// #440: events the user doesn't own/edit open the attendee experience.
-// Group members land in their group shell; group-less viewers land in
-// the solo attendee shell. Owners/editors keep the owner tabs.
-function eventDestination(event: EventDto): string {
-  if (event.viewer_role === 'owner' || event.viewer_role === 'editor') {
-    return `/events/${event.slug}`
-  }
-  if (event.my_group_id) return `/groups/${event.my_group_id}`
-  return `/events/${event.slug}/attending/now`
 }

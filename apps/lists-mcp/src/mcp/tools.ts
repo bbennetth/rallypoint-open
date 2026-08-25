@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { CreateListItemInput, ListsClient, UpdateListItemInput } from '@rallypoint/lists-client'
+import { firstDoneStatus } from '@rallypoint/lists-shared'
 
 // MCP tool descriptor — name, description, JSON Schema (sent to clients),
 // Zod schema (runtime validation), and the execution function.
@@ -32,10 +33,17 @@ const tools: ToolDef<any>[] = [
     },
     zodSchema: z.object({}),
     async run(_args: Record<string, never>, ctx: ToolCtx) {
-      const groups = await ctx.lists.listGroups(ctx.actor)
+      // RPL<->RPP separation (#675): Planner-managed groups (shopping/
+      // notes/diary live there) are Planner's surface — agents must not
+      // see or edit them. Filtered HERE, not in the lists-api RPC core:
+      // planner-api resolves its personal scope through the same RPC, so
+      // a core-level filter breaks Planner itself.
+      const groups = (await ctx.lists.listGroups(ctx.actor)).filter(
+        (g) => g.origin !== 'planner',
+      )
       const allLists = await Promise.all(
         groups.map((g) =>
-          ctx.lists.listLists({ scopeType: 'list_group', scopeId: g.id }),
+          ctx.lists.listLists({ scopeType: 'list_group', scopeId: g.id }, ctx.actor),
         ),
       )
       return allLists.flat()
@@ -57,8 +65,8 @@ const tools: ToolDef<any>[] = [
     zodSchema: z.object({ listId: z.string().min(1) }),
     async run(args: { listId: string }, ctx: ToolCtx) {
       const [statuses, items] = await Promise.all([
-        ctx.lists.listStatuses(args.listId),
-        ctx.lists.listItems(args.listId),
+        ctx.lists.listStatuses(args.listId, ctx.actor),
+        ctx.lists.listItems(args.listId, ctx.actor),
       ])
       return { statuses, items }
     },
@@ -77,7 +85,7 @@ const tools: ToolDef<any>[] = [
     },
     zodSchema: z.object({ listId: z.string().min(1) }),
     async run(args: { listId: string }, ctx: ToolCtx) {
-      return ctx.lists.listItems(args.listId)
+      return ctx.lists.listItems(args.listId, ctx.actor)
     },
   },
 
@@ -96,14 +104,11 @@ const tools: ToolDef<any>[] = [
     },
     zodSchema: z.object({ listId: z.string().min(1), itemId: z.string().min(1) }),
     async run(args: { listId: string; itemId: string }, ctx: ToolCtx) {
-      const [items, comments] = await Promise.all([
-        ctx.lists.listItems(args.listId),
-        ctx.lists.listComments(args.listId, args.itemId),
-      ])
-      const item = items.find((i) => i.id === args.itemId)
+      const item = await ctx.lists.getItem(args.listId, args.itemId, ctx.actor)
       if (!item) {
         throw new Error(`Item ${args.itemId} not found in list ${args.listId}`)
       }
+      const comments = await ctx.lists.listComments(args.listId, args.itemId, ctx.actor)
       return { ...item, comments }
     },
   },
@@ -213,7 +218,22 @@ const tools: ToolDef<any>[] = [
     },
     zodSchema: z.object({ listId: z.string().min(1), itemId: z.string().min(1) }),
     async run(args: { listId: string; itemId: string }, ctx: ToolCtx) {
-      return ctx.lists.updateListItem(args.listId, args.itemId, { completed: true }, ctx.actor)
+      // Dual-write invariant: `completed` and the custom-status id must
+      // agree (see update_item's statusId handling and
+      // packages/lists-shared/statuses.ts). A list with custom statuses
+      // (RPL v1.0.0 slice 1) has a `done`-category status that is the
+      // real source of truth for "done" in the UI's board/kanban view —
+      // setting only `completed` would leave the item parked on its old
+      // status while showing as complete. Resolve the list's terminal
+      // status and set both; a list with no custom statuses (empty
+      // array — statuses aren't lazily seeded by this read-only lookup)
+      // keeps the previous completed-only behavior.
+      const statuses = await ctx.lists.listStatuses(args.listId, ctx.actor)
+      const done = firstDoneStatus(statuses)
+      const patch: UpdateListItemInput = done
+        ? { completed: true, statusId: done.id }
+        : { completed: true }
+      return ctx.lists.updateListItem(args.listId, args.itemId, patch, ctx.actor)
     },
   },
 

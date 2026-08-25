@@ -28,8 +28,11 @@ export const GROUP_ROLE_RANK: Record<GroupRole, number> = { owner: 3, sidekick: 
 // **Attendee revocation also gates group access:** if the user has been
 // soft-removed from the parent event (event_attendees.removed_at IS NOT
 // NULL), every group under that event closes to them, even though
-// their group_members row still exists. The event owner is exempt
-// (they don't carry an event_attendees row).
+// their group_members row still exists. The event owner is exempt by
+// identity (the ownerUserId check below) — owners MAY carry an
+// event_attendees row since the self-join attendance endpoint landed,
+// and a soft-removed owner row means "not attending", never "no
+// access".
 export async function groupActorRole(
   c: Context<HonoApp>,
   group: GroupRecord,

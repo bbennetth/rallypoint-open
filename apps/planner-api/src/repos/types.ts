@@ -20,15 +20,24 @@ export interface PlannerSessionRecord {
   absoluteExpiresAt: Date
   ipHash: string
   uaHash: string
+  // Wall-clock of the most recent successful verifyRpidBearer (E4 O2).
+  // Null for legacy rows (pre-deploy) and brand-new rows that haven't
+  // yet been re-verified post-creation.
+  lastVerifiedAt: Date | null
 }
 
 export interface PlannerSessionRepo {
-  create(record: Omit<PlannerSessionRecord, 'createdAt' | 'lastSeenAt'> & {
+  create(record: Omit<PlannerSessionRecord, 'createdAt' | 'lastSeenAt' | 'lastVerifiedAt'> & {
     createdAt?: Date
     lastSeenAt?: Date
   }): Promise<void>
   findByIdHash(idHash: string): Promise<PlannerSessionRecord | null>
   touchLastSeen(idHash: string, when: Date): Promise<void>
+  // Stamp the wall-clock instant of a successful verifyRpidBearer (E4 O2).
+  // Best-effort: the session middleware fires-and-forgets so a slow DB
+  // doesn't add to request latency. Null-safe: the column was nullable
+  // before this method existed and stays so for backward compat.
+  markVerified(idHash: string, when: Date): Promise<void>
   deleteByIdHash(idHash: string): Promise<void>
 }
 
@@ -107,7 +116,38 @@ export interface ScheduledNotificationRepo {
   // Rows due for delivery: fire_at <= now, not sent, not cancelled.
   listDue(now: Date, limit: number): Promise<ScheduledNotificationRecord[]>
   markSent(id: string, when: Date): Promise<void>
-  recordFailure(id: string, error: string, when: Date): Promise<void>
+  // Atomically claim a row for sending BEFORE any push goes out: flip
+  // sent_at from NULL to `when` iff the row is still pending (not sent, not
+  // cancelled). Returns true when this caller won the claim. The claim IS
+  // the sent-mark, so two overlapping cron ticks can't both deliver — the
+  // loser sees zero changed rows and skips the row entirely. This closes
+  // the double-send race the old send-then-markSent flow left open.
+  claimForSend(id: string, when: Date): Promise<boolean>
+  // Resolve a total send failure for a row this caller claimed at
+  // `claimedAt`. One guarded write (WHERE sent_at = claimedAt): below
+  // `maxAttempts` it reverts the claim (sent_at → NULL) so the next cron
+  // pass retries; at the cap it keeps the claim so the row stays retired —
+  // no revert-then-re-mark window. Returns the new attempt count, or null
+  // when the guard missed (the row was revived by a reschedule upsert or
+  // re-claimed mid-send — it belongs to that newer schedule now, leave it).
+  recordFailure(
+    id: string,
+    error: string,
+    claimedAt: Date,
+    maxAttempts: number,
+  ): Promise<number | null>
+  // Conditional advance for recurring rows after a successful send (audit
+  // E2 #14). Atomically moves the row to `nextFireAt`, clearing
+  // sentAt/attempts so it's eligible for the NEXT occurrence — but ONLY if
+  // the row still points at `currentFireAt` AND still holds this caller's
+  // claim (sent_at = claimedAt). Returns true when this caller did the
+  // advance, false when a concurrent isolate advanced it or a reschedule
+  // upsert revived it (skip the `advanced` counter and leave the fresh
+  // schedule intact).
+  advanceFireAt(
+    input: { id: string; currentFireAt: Date; nextFireAt: Date; claimedAt: Date },
+    now: Date,
+  ): Promise<boolean>
 }
 
 // --- repo bag -------------------------------------------------------

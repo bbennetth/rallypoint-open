@@ -78,6 +78,7 @@ describe('D1 integration — custom statuses', () => {
       cookie: `${envVars.LISTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.LISTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.LISTS_UI_ORIGIN,
     }
   }
 
@@ -278,6 +279,11 @@ describe('D1 integration — custom statuses', () => {
     expect(moved.status_id).toBe(todo.id)
     expect(moved.status).toBe('todo')
     expect(moved.completed).toBe(false)
+
+    // The deleted status itself must be gone (soft-deleted) — both halves
+    // of reassignItemsAndSoftDelete's db.batch() must have landed.
+    const remaining = await getStatuses(bearer, listId)
+    expect(remaining.map((s) => s.id)).not.toContain(inProgress.id)
   })
 
   it('refuses to delete the last done status (409)', async () => {

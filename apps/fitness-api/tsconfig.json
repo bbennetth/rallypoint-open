@@ -1,0 +1,52 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "dist"
+  ],
+  "references": [
+    {
+      "path": "../../apps/id-api"
+    },
+    {
+      "path": "../../apps/ai-api"
+    },
+    {
+      "path": "../../packages/ai"
+    },
+    {
+      "path": "../../apps/events-api"
+    },
+    {
+      "path": "../../packages/api-kit"
+    },
+    {
+      "path": "../../packages/crypto"
+    },
+    {
+      "path": "../../packages/fitness-db"
+    },
+    {
+      "path": "../../packages/fitness-shared"
+    },
+    {
+      "path": "../../packages/id-client"
+    },
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/logger"
+    }
+  ]
+}

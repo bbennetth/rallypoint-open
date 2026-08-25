@@ -4,6 +4,8 @@ import { AppChrome } from './ui/AppChrome.js'
 import { EventOwnerLayout } from './ui/EventOwnerLayout.js'
 import { SsoCallbackPage } from './pages/SsoCallbackPage.js'
 import { MyEventsPage } from './pages/MyEventsPage.js'
+import { BrowsePage } from './pages/BrowsePage.js'
+import { EventPreviewPage } from './pages/EventPreviewPage.js'
 import { EventsNewPage } from './pages/EventsNewPage.js'
 import { EventJoinPage } from './pages/EventJoinPage.js'
 import { OverviewPage } from './pages/owner/OverviewPage.js'
@@ -17,20 +19,21 @@ import { SettingsPage } from './pages/owner/SettingsPage.js'
 import { PreviewPage } from './pages/owner/PreviewPage.js'
 import { GroupDetailPage } from './pages/GroupDetailPage.js'
 import { GroupJoinPage } from './pages/GroupJoinPage.js'
+import { GroupCreatePage } from './pages/GroupCreatePage.js'
 import { RalliesPage } from './pages/RalliesPage.js'
-import { MyDayPage } from './pages/MyDayPage.js'
-import { ChatPage } from './pages/ChatPage.js'
+import { GroupMapPage } from './pages/GroupMapPage.js'
 import { PublicEventPage } from './pages/PublicEventPage.js'
 import { NowPage } from './pages/NowPage.js'
 import { AttendeeLayout } from './ui/AttendeeChrome.js'
 import { AttendingLandingPage } from './pages/attendee/AttendingLandingPage.js'
 import { SoloAttendeeLayout } from './ui/SoloAttendeeChrome.js'
 import { SoloNowPage } from './pages/attendee/SoloNowPage.js'
-import { SoloMyDayPage } from './pages/attendee/SoloMyDayPage.js'
-import { SoloGroupEmptyPage } from './pages/attendee/SoloGroupEmptyPage.js'
+import { SoloDayRedirect, GroupDayRedirect } from './pages/attendee/redirects.js'
+import { AttendeeGroupsPage } from './pages/attendee/AttendeeGroupsPage.js'
 import { SoloRalliesEmptyPage } from './pages/attendee/SoloRalliesEmptyPage.js'
-import { SoloChatEmptyPage } from './pages/attendee/SoloChatEmptyPage.js'
+import { SoloMapPage } from './pages/attendee/SoloMapPage.js'
 import { SoloLineupPage } from './pages/attendee/SoloLineupPage.js'
+import { GroupLineupPage } from './pages/attendee/GroupLineupPage.js'
 
 export function App() {
   return (
@@ -48,6 +51,32 @@ export function App() {
             {() => (
               <AppChrome>
                 <MyEventsPage />
+              </AppChrome>
+            )}
+          </RequireSession>
+        }
+      />
+      {/* Browse tab (#browse-tab): top-level /browse prefix, deliberately
+          NOT under /events/ so it can't collide with the :slug tree. */}
+      <Route
+        path="/browse"
+        element={
+          <RequireSession>
+            {() => (
+              <AppChrome>
+                <BrowsePage />
+              </AppChrome>
+            )}
+          </RequireSession>
+        }
+      />
+      <Route
+        path="/browse/:slug"
+        element={
+          <RequireSession>
+            {() => (
+              <AppChrome>
+                <EventPreviewPage />
               </AppChrome>
             )}
           </RequireSession>
@@ -100,12 +129,14 @@ export function App() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="preview" element={<PreviewPage />} />
       </Route>
-      {/* Phase 4 (platform/v-1.1, #16): solo-attendee landing + shell.
+      {/* Phase 4 (platform/v-1.1, #16): attendee landing + event shell.
           A viewer-role invite-accept lands at /events/:slug/attend
           (the decision page). "Continue solo" routes to
-          /events/:slug/attending/* (a 5-tab shell where group-coupled
-          tabs render empty-state CTAs). Joining a group later flips
-          the user over to /groups/:groupId/* on AttendeeChrome. */}
+          /events/:slug/attending/*, whose Group tab lists every group
+          the viewer belongs to here and links into /groups/:groupId/*
+          on AttendeeChrome; Rallies stays group-coupled and
+          renders an empty-state CTA. Entry points choose between the two
+          shells via attendeeHomeHref (lib/attendee-route.ts). */}
       <Route
         path="/events/:slug/attend"
         element={
@@ -128,11 +159,14 @@ export function App() {
       >
         <Route index element={<Navigate to="now" replace />} />
         <Route path="now" element={<SoloNowPage />} />
-        <Route path="day" element={<SoloMyDayPage />} />
+        <Route path="day" element={<SoloDayRedirect />} />
         <Route path="lineup" element={<SoloLineupPage />} />
-        <Route path="group" element={<SoloGroupEmptyPage />} />
+        <Route path="group" element={<AttendeeGroupsPage />} />
         <Route path="rallies" element={<SoloRalliesEmptyPage />} />
-        <Route path="chat" element={<SoloChatEmptyPage />} />
+        <Route path="map" element={<SoloMapPage />} />
+        {/* Social was dropped (map took its slot); installed-PWA
+            shortcuts may still point at /chat. */}
+        <Route path="chat" element={<Navigate to="../map" replace />} />
       </Route>
       <Route
         path="/groups/join"
@@ -141,6 +175,20 @@ export function App() {
             {() => (
               <AppChrome>
                 <GroupJoinPage />
+              </AppChrome>
+            )}
+          </RequireSession>
+        }
+      />
+      {/* Start-a-group (the create half of "join or create"). Slug-scoped
+          so the page knows which event the group belongs to. */}
+      <Route
+        path="/events/:slug/groups/new"
+        element={
+          <RequireSession>
+            {() => (
+              <AppChrome>
+                <GroupCreatePage />
               </AppChrome>
             )}
           </RequireSession>
@@ -163,9 +211,13 @@ export function App() {
       >
         <Route index element={<GroupDetailPage />} />
         <Route path="now" element={<NowPage />} />
+        <Route path="lineup" element={<GroupLineupPage />} />
         <Route path="rallies" element={<RalliesPage />} />
-        <Route path="day" element={<MyDayPage />} />
-        <Route path="chat" element={<ChatPage />} />
+        <Route path="map" element={<GroupMapPage />} />
+        <Route path="day" element={<GroupDayRedirect />} />
+        {/* Social was dropped (map took its slot); installed-PWA
+            shortcuts may still point at /chat. */}
+        <Route path="chat" element={<Navigate to="../map" replace />} />
       </Route>
       {/* Public event page (slice 11). Lives outside any RequireSession
           wrap — anonymous visitors see the page directly. Crawler hits

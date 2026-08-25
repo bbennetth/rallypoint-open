@@ -15,7 +15,6 @@ import type { HolidayDto, PersonalEventDto, UpcomingItem } from './api.js'
 
 function makeEvent(overrides: Partial<PersonalEventDto> & { id: string }): PersonalEventDto {
   return {
-    id: overrides.id,
     name: overrides.name ?? 'Test Event',
     description: null,
     startAt: overrides.startAt ?? null,

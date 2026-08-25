@@ -1,0 +1,660 @@
+/* Rallypoint Events — "Soft Ink" surface classes (#762 PR7).
+ *
+ * Imported by apps/events-web/src/index.css AFTER tailwindcss +
+ * @rallypoint/ui/theme.css + shell.css. Lives in events-web rather than
+ * @rallypoint/ui because every class is events-specific (owner sidebar
+ * swap, My Events list, group member rows). Shared
+ * chrome (.pl-side, .pl-card, .pl-chip, .seg, .rp-swipe-*, buttons,
+ * inputs) comes from @rallypoint/ui — nothing here redefines it. Planner
+ * content classes (.pl-timeline, .wx-card, .md-summary, …) are NOT
+ * available in this bundle; only shell.css primitives are.
+ *
+ * Soft Ink recipes: surfaces separate by surface-step contrast + soft
+ * shadow, not borders — rows are --radius-lg + --shadow-card, panels
+ * --radius-xl + --shadow-panel, hairlines (--hairline-soft) survive only
+ * as internal dividers, accent tints derive via color-mix off --acid.
+ *
+ * The unconsumed MVP-handoff kit families that used to live here
+ * (.lu-*, .ses-*, .gm-*, .now-*, .ev-form/.ev-field, .ch-list/.ch-row
+ * conversation cluster) were deleted in #762 PR7 — zero TSX consumers.
+ * Recover from git history if a future page adopts them, and restyle to
+ * the recipes above when doing so. */
+
+:root {
+  /* Warning accent (RSVP "maybe", concurrency tags). Deliberately NOT
+     derived from --acid: the user-chosen accent must stay distinct from
+     the warning semantic on every data-color. */
+  --ev-warn: #f59e0b;
+}
+[data-mode='light'] { --ev-warn: #b45309; }
+
+/* ============================================================
+   SHARED (Ink kit) — stat tiles + tile row
+   ============================================================ */
+/* `.pl-stat` is the kit's soft tile holding a display-font value +
+   mono-eyebrow label. `.md-stats` is the responsive tile row. Both also
+   exist in planner-web/src/index.css (PR #607); duplicated here so
+   events-web's bundle has them without depending on planner-web's CSS.
+   Identical values — keep in lockstep with planner's block. */
+.md-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.pl-stat {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 13px 14px;
+}
+.pl-stat .v {
+  font-family: var(--font-display);
+  font-size: 26px;
+  color: var(--ink);
+  line-height: 1;
+}
+.pl-stat .k {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 600px) {
+  .md-stats {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .pl-stat { padding: 10px 12px; }
+  .pl-stat .v { font-size: 18px; }
+}
+
+/* ============================================================
+   OWNER — My Events list
+   ============================================================ */
+.ev-list {
+  display: grid;
+  gap: 12px;
+}
+.ev-listitem {
+  display: flex;
+  align-items: stretch;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.ev-listitem:hover { background: var(--surface-2); }
+.ev-listitem .body {
+  flex: 1;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.ev-listitem .title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.ev-listitem .planner-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-left: 1px solid var(--hairline-soft);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* ============================================================
+   OWNER / GROUP — soft editor row (stages, days, members, POIs,
+   sessions review). Flex-with-inputs row used as the SwipeActions
+   content face — must stay opaque so the tray can't bleed through. */
+.ev-editrow {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 10px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.ev-editrow:hover { background: var(--wash-hover); }
+
+/* ============================================================
+   OWNER — Event-scoped sidebar header (back link + event name)
+   ============================================================ */
+/* Replaces the global brand strip in `.pl-side` when you're inside an
+   event you own. The `← MY EVENTS` micro-link reads as a mono caps
+   label; the event name uses display-font for hierarchy; an accent
+   `.pl-chip.accent` role tag sits below. Sidebar band — hairline rule
+   only, no card chrome. */
+.ev-scope {
+  padding: 16px;
+  border-bottom: 1px solid var(--hairline-soft);
+  display: grid;
+  gap: 10px;
+}
+.ev-back {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.ev-back:hover { color: var(--ink); }
+.ev-back:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.ev-scope-name {
+  font-family: var(--font-display);
+  font-size: 17px;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+/* ============================================================
+   ATTENDEE — Group: member rows
+   ============================================================ */
+.grp-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 10px 14px;
+}
+.grp-main { min-width: 0; }
+.grp-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.grp-name {
+  font-size: 14px;
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grp-role {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--ink-mute);
+  text-transform: uppercase;
+}
+.grp-status {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink-dim);
+}
+.grp-status.is-empty {
+  color: var(--ink-mute);
+  font-style: italic;
+}
+
+/* ============================================================
+   ATTENDEE — Map tab (site plan: layers + POIs + crew + rally pins)
+   Ported from the events-map-social design handoff (.gm-* / .am-*).
+   ============================================================ */
+/* Schematic canvas: grid fallback when no plan image is uploaded for
+   the layer; when an image is present the inline style swaps the grid
+   out and the aspect ratio follows the image. */
+.gm-map {
+  position: relative;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  aspect-ratio: 4 / 3;
+  width: 100%;
+  overflow: hidden;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px);
+  background-size: 11.11% 11.11%;
+}
+.gm-label {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 2;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  padding: 1px 4px;
+}
+.gm-marker {
+  all: unset;
+  box-sizing: border-box;
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  z-index: 2;
+}
+.gm-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1.5px solid var(--ink-mute);
+}
+.gm-marker.stage .gm-dot { border-radius: 0; }
+.gm-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  padding: 1px 4px;
+}
+.am-map { cursor: crosshair; }
+.am-map.is-armed { cursor: copy; }
+.am-map .gm-marker.is-sel .gm-dot {
+  background: var(--acid);
+  border-color: var(--acid);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--acid) 28%, transparent);
+}
+.am-map .gm-marker.is-sel .gm-name { color: var(--ink); font-weight: 700; }
+.am-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.am-zones {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.am-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--acid);
+}
+.am-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.am-search { flex: 1 1 180px; min-width: 150px; }
+.am-layers { display: flex; gap: 8px; flex-wrap: wrap; }
+.am-layer {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 6px 12px;
+  border: 1.5px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.am-layer.on {
+  border-color: var(--acid);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.am-pinctl {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.am-pinbtn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 6px 12px;
+  border: 1.5px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.am-pinbtn:hover { border-color: var(--ink-dim); color: var(--ink); }
+.am-pinbtn.is-armed {
+  border-color: var(--acid);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.am-pinbtn.is-primary {
+  border-color: var(--acid);
+  background: var(--acid);
+  color: var(--accent-ink);
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+}
+.am-pinbtn:disabled { cursor: default; }
+.loc-chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
+.loc-chip {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 7px 12px;
+  border: 1.5px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--ink-dim);
+}
+.loc-chip:hover { border-color: var(--ink-dim); color: var(--ink); }
+.loc-chip.is-active {
+  border-color: var(--acid);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.am-crew {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  display: inline-flex;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--ink-mute);
+  pointer-events: none;
+}
+.am-crew.me {
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 0 0 3.5px var(--acid),
+    0 0 0 8px color-mix(in srgb, var(--acid) 22%, transparent);
+}
+.am-rally {
+  all: unset;
+  box-sizing: border-box;
+  position: absolute;
+  transform: translate(-50%, -100%);
+  margin-top: -6px;
+  z-index: 4;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  background: var(--acid);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  max-width: 150px;
+}
+.am-rally .ic { display: inline-flex; flex: 0 0 auto; }
+.am-rally .tx { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.am-rally::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--acid);
+}
+.am-rally.is-draft {
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1.5px dashed var(--acid);
+}
+.am-rally.is-draft::after { border-top-color: var(--surface-2); }
+.am-legend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.am-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.am-legend .sq,
+.am-legend .ci { width: 9px; height: 9px; background: var(--ink-mute); flex: none; }
+.am-legend .ci { border-radius: 999px; }
+.am-legend .av {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: 0 0 0 2px var(--acid);
+  flex: none;
+}
+.am-legend .ry {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--acid);
+  color: var(--accent-ink);
+  font-size: 8px;
+  flex: none;
+}
+.am-legend .hint {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--ink-mute);
+}
+.am-selrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  padding: 9px 12px;
+}
+.am-selrow .nm {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: capitalize;
+}
+.am-selcat {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--acid);
+  border: 1.5px solid var(--acid);
+  padding: 2px 7px;
+}
+.am-clear {
+  all: unset;
+  cursor: pointer;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.am-clear:hover { color: var(--ink); }
+
+/* Bottom sheet (rally creation; shared shell for future sheets). */
+.lu-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.lu-sheet {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface-2);
+  border-top: 1.5px solid var(--line);
+  color: var(--ink);
+  max-height: 80%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.lu-sheet-hd {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.lu-sheet-body { overflow-y: auto; padding: 14px; }
+
+/* ============================================================
+   ATTENDEE — Lineup rows (map/social handoff §4 redesign)
+   Long artist names wrap (never truncate) without reflowing the
+   star/avatars column: grid 1fr/auto + align-items:start.
+   ============================================================ */
+.lu-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+  border: 1.5px solid var(--line);
+  border-left: 3px solid transparent;
+  background: var(--surface);
+  padding: 10px 14px;
+}
+.lu-row + .lu-row { margin-top: 6px; }
+.lu-row.starred {
+  border-left-color: var(--hot);
+  background: var(--surface-2);
+}
+.lu-info { min-width: 0; }
+.lu-artist {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.lu-genre {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  margin-left: 2px;
+}
+.lu-meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  letter-spacing: 0.03em;
+  margin-top: 3px;
+}
+.lu-links {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-top: 8px;
+}
+.lu-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  text-decoration: none;
+  padding: 4px;
+  border-radius: 4px;
+  color: var(--ink-dim);
+  line-height: 0;
+}
+.lu-link:hover { border-color: var(--ink-dim); }
+.lu-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.lu-star {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  line-height: 0;
+  color: var(--ink-mute);
+  flex: 0 0 auto;
+  width: 30px;
+  display: inline-flex;
+  justify-content: center;
+}
+.lu-star.on { color: var(--hot); }
+.lu-crew { display: inline-flex; align-items: center; }
+.lu-crew > * + * { margin-left: -7px; }
+.lu-crew > img,
+.lu-crew > span:not(.more) {
+  box-shadow: 0 0 0 2px var(--surface);
+  border-radius: 999px;
+}
+.lu-row.starred .lu-crew > img,
+.lu-row.starred .lu-crew > span:not(.more) {
+  box-shadow: 0 0 0 2px var(--surface-2);
+}
+.lu-crew .more {
+  margin-left: 4px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--acid);
+  box-shadow: none;
+}

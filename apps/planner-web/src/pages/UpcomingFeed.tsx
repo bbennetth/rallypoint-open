@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
-  getSettings,
   setGroupEventPlannerPref,
   setTaskItemCompleted,
-  updateSettings,
-  SHOW_CHORES_IN_FEEDS_KEY,
   type EventDayDto,
   type HolidayDto,
   type MyDayEvent,
@@ -14,7 +11,6 @@ import {
   type Upcoming,
   type UpcomingItem,
 } from '../lib/api.js'
-import { choresInFeedsEnabled } from '../lib/chores-helpers.js'
 import { upcomingFeedGroups } from '../lib/holidays-helpers.js'
 import {
   eventDayWindow,
@@ -66,6 +62,14 @@ export interface UpcomingFeedProps {
    * row's badge reads "Chore" vs "Repeats" without depending on the lookup. */
   choresListId: string | null
   todayYmd: string
+  /** Whether chores are visible in the feed. Owned by the parent (MyDayPage)
+   * so the Upcoming feed and the My Day roll-up always show the same value —
+   * previously UpcomingFeed had an independent local state that diverged from
+   * MyDayPage's toggle on any update that didn't remount the component. */
+  showChores: boolean
+  /** Toggle callback — parent persists + optimistically patches its own state,
+   * then passes the updated value back down via `showChores`. */
+  onToggleShowChores: () => void
   /** Hide a holiday from every Planner surface (persists the setting upstream). */
   onHideHoliday: (h: HolidayDto) => void
   /** Called after a successful mutation so the parent can refetch if it wants. */
@@ -78,6 +82,8 @@ export function UpcomingFeed({
   seriesLookup,
   choresListId,
   todayYmd,
+  showChores,
+  onToggleShowChores,
   onHideHoliday,
   onChanged,
 }: UpcomingFeedProps) {
@@ -88,33 +94,9 @@ export function UpcomingFeed({
   useEffect(() => setData(dataProp), [dataProp])
 
   const [error, setError] = useState<string | null>(null)
-  // Chores-in-feeds inline toggle (#546). Loaded from the planner settings on
-  // mount; flipping it persists the setting and asks the parent to refetch so
-  // the feed reflects chores appearing/disappearing immediately.
-  const [showChores, setShowChores] = useState<boolean>(true)
-  useEffect(() => {
-    let cancelled = false
-    void getSettings('planner')
-      .then((s) => {
-        if (!cancelled) setShowChores(choresInFeedsEnabled(s))
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  async function onToggleShowChores() {
-    const next = !showChores
-    setShowChores(next)
-    try {
-      await updateSettings('planner', { [SHOW_CHORES_IN_FEEDS_KEY]: next })
-      onChanged() // re-pull the feed so chores appear/disappear now
-    } catch (err) {
-      setShowChores(!next)
-      setError(errMessage(err))
-    }
-  }
+  // showChores is now owned by MyDayPage (via plannerSettings) and passed down
+  // as a prop. The previous independent local state diverged from MyDayPage's
+  // toggle whenever the setting changed without a remount (audit P2).
 
   const [selected, setSelected] = useState<Selected | null>(null)
 
@@ -241,26 +223,20 @@ export function UpcomingFeed({
                               cursor: 'pointer',
                             }}
                           >
+                            <span style={{ fontSize: 13.5, color: 'var(--ink)', minWidth: 0 }}>
+                              {h.name}
+                            </span>
                             <span
                               style={{
                                 display: 'flex',
-                                flexDirection: 'column',
-                                gap: 5,
-                                minWidth: 0,
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                justifyContent: 'flex-end',
                               }}
                             >
-                              <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>{h.name}</span>
-                              <span
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 7,
-                                  flexWrap: 'wrap',
-                                }}
-                              >
-                                <span className="eyebrow" style={{ color: 'var(--ink-mute)' }}>
-                                  holiday
-                                </span>
+                              <span className="eyebrow" style={{ color: 'var(--ink-mute)' }}>
+                                holiday
                               </span>
                             </span>
                           </li>
@@ -280,53 +256,38 @@ export function UpcomingFeed({
                               cursor: 'pointer',
                             }}
                           >
-                            <span
-                              style={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: 5,
-                                minWidth: 0,
-                              }}
-                            >
-                              <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>{ed.name}</span>
-                              <span
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 7,
-                                  flexWrap: 'wrap',
-                                }}
-                              >
-                                <span className="eyebrow" style={{ color: 'var(--acid)' }}>
-                                  event
-                                </span>
-                                {ed.dayLabel && (
-                                  <span className="meta" style={{ color: 'var(--ink-mute)' }}>
-                                    {ed.dayLabel}
-                                  </span>
-                                )}
-                                {allDay && <span className="pl-chip">All day</span>}
-                                {ed.shared && (
-                                  <span
-                                    className="pl-chip"
-                                    style={{
-                                      borderColor: 'var(--acid-dim, var(--acid))',
-                                      color: 'var(--acid)',
-                                    }}
-                                  >
-                                    Shared
-                                  </span>
-                                )}
-                              </span>
+                            <span style={{ fontSize: 13.5, color: 'var(--ink)', minWidth: 0 }}>
+                              {ed.name}
                             </span>
                             <span
                               style={{
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: 9,
-                                alignSelf: 'flex-start',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                justifyContent: 'flex-end',
                               }}
                             >
+                              <span className="eyebrow" style={{ color: 'var(--acid)' }}>
+                                event
+                              </span>
+                              {ed.dayLabel && (
+                                <span className="meta" style={{ color: 'var(--ink-mute)' }}>
+                                  {ed.dayLabel}
+                                </span>
+                              )}
+                              {allDay && <span className="pl-chip">All day</span>}
+                              {ed.shared && (
+                                <span
+                                  className="pl-chip"
+                                  style={{
+                                    borderColor: 'var(--acid-dim, var(--acid))',
+                                    color: 'var(--acid)',
+                                  }}
+                                >
+                                  Shared
+                                </span>
+                              )}
                               {!allDay && (
                                 <span
                                   className="mono"
@@ -403,75 +364,46 @@ export function UpcomingFeed({
                               <Check
                                 done={completed}
                                 onClick={() => toggleTask(it.task.listId, it.task.id, completed)}
+                                label={completed ? `Mark ${title} not done` : `Mark ${title} done`}
                               />
                             </span>
                           )}
                           <span
                             style={{
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 5,
+                              fontSize: 13.5,
+                              color: completed ? 'var(--ink-mute)' : 'var(--ink)',
+                              textDecoration: completed ? 'line-through' : 'none',
                               minWidth: 0,
                             }}
                           >
-                            <span
-                              style={{
-                                fontSize: 13.5,
-                                color: completed ? 'var(--ink-mute)' : 'var(--ink)',
-                                textDecoration: completed ? 'line-through' : 'none',
-                              }}
-                            >
-                              {title}
-                            </span>
-                            <span
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 7,
-                                flexWrap: 'wrap',
-                              }}
-                            >
-                              <span
-                                className="eyebrow"
-                                style={{ color: isTask ? 'var(--ink-mute)' : 'var(--acid)' }}
-                              >
-                                {it.kind}
-                              </span>
-                              {isContinuation && <span className="pl-chip">Ongoing</span>}
-                              {loc && (
-                                <span
-                                  className="meta"
-                                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                                >
-                                  <Icon name="pin" size={10} />
-                                  {loc}
-                                </span>
-                              )}
-                              {repeats && it.kind === 'task' && it.task.seriesId && (
-                                <SeriesChip
-                                  seriesId={it.task.seriesId}
-                                  surface={it.task.listId === choresListId ? 'chores' : 'tasks'}
-                                  lookup={seriesLookup}
-                                  onEdit={(r) =>
-                                    setSelected({
-                                      kind: 'series',
-                                      series: r.series,
-                                      surface: r.surface,
-                                    })
-                                  }
-                                />
-                              )}
-                              {ticket && <span className="pl-chip accent">Ticket</span>}
-                            </span>
+                            {title}
                           </span>
                           <span
                             style={{
                               display: 'flex',
                               alignItems: 'center',
-                              gap: 9,
-                              alignSelf: 'flex-start',
+                              gap: 8,
+                              flexWrap: 'wrap',
+                              justifyContent: 'flex-end',
                             }}
                           >
+                            <span
+                              className="eyebrow"
+                              style={{ color: isTask ? 'var(--ink-mute)' : 'var(--acid)' }}
+                            >
+                              {it.kind}
+                            </span>
+                            {loc && (
+                              <span
+                                className="meta"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                              >
+                                <Icon name="pin" size={10} />
+                                {loc}
+                              </span>
+                            )}
+                            {isContinuation && <span className="pl-chip">Ongoing</span>}
+                            {ticket && <span className="pl-chip accent">Ticket</span>}
                             {timeLabel && (
                               <span
                                 className="mono"
@@ -481,6 +413,20 @@ export function UpcomingFeed({
                               </span>
                             )}
                             <PriTag p={priority} />
+                            {repeats && it.kind === 'task' && it.task.seriesId && (
+                              <SeriesChip
+                                seriesId={it.task.seriesId}
+                                surface={it.task.listId === choresListId ? 'chores' : 'tasks'}
+                                lookup={seriesLookup}
+                                onEdit={(r) =>
+                                  setSelected({
+                                    kind: 'series',
+                                    series: r.series,
+                                    surface: r.surface,
+                                  })
+                                }
+                              />
+                            )}
                           </span>
                         </li>
                       )
@@ -501,6 +447,10 @@ export function UpcomingFeed({
               <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 10 }}>
                 {data.undated.map((it) => {
                   if (it.kind === 'eventDay') return null
+                  // Holidays always carry a date, so they never land in the
+                  // undated backlog — but the shared UpcomingItem union still
+                  // includes the variant here, so narrow it out explicitly.
+                  if (it.kind === 'holiday') return null
                   if (it.kind === 'event') {
                     const ev = it.event
                     return (
@@ -530,6 +480,7 @@ export function UpcomingFeed({
                           done={tk.completed}
                           sz={18}
                           onClick={() => toggleTask(tk.listId, tk.id, tk.completed)}
+                          label={tk.completed ? `Mark ${tk.title} not done` : `Mark ${tk.title} done`}
                         />
                       </span>
                       <span

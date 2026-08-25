@@ -1,0 +1,21 @@
+# Security headers for events-web — issue #675 P2 bug sweep.
+# Format: Cloudflare Workers Assets `_headers` (per-path rules), modeled on
+# apps/www/_headers. Vite's default publicDir copies this into dist/, and
+# cf-deploy-app.yml copies dist/ -> apps/events-api/public (the Worker
+# assets dir) at deploy time — see apps/events-api/wrangler.toml [assets].
+#
+# Verify in production with:
+#   curl -sI https://events.rallypt.app/ | grep -iE 'strict|frame|content-type-opt|referrer|content-security'
+
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  # events-web talks to events-api same-origin at /api/v1/ui/* (relative
+  # fetches via apps/events-web/src/lib/api.ts's createCsrfClient); the only
+  # cross-origin traffic is a browser *navigation* (redirect) to id-web for
+  # SSO, which CSP connect-src does not gate. connect-src is 'self' plus
+  # the analytics hosts (PostHog via the t.rallypt.app reverse proxy).
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://t.rallypt.app https://static.cloudflareinsights.com 'sha256-gopMjDnBwg9lxgEEjjCKPvnGp9H5dUVpXCM2gHFbW1k='; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://t.rallypt.app https://cloudflareinsights.com https://us.i.posthog.com https://*.i.posthog.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()

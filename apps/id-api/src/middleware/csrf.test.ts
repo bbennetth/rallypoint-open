@@ -44,7 +44,7 @@ describe('GET /api/v1/ui/csrf — issuer', () => {
   it('preserves an existing CSRF cookie (idempotent)', async () => {
     const app = build()
     const res = await app.request('/api/v1/ui/csrf', {
-      headers: { cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}` },
+      headers: { cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}`, origin: ENV.UI_ORIGIN },
     })
     const body = (await res.json()) as { csrfToken: string }
     expect(body.csrfToken).toBe(TOKEN)
@@ -54,7 +54,10 @@ describe('GET /api/v1/ui/csrf — issuer', () => {
 describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
   it('rejects POST without cookie + header (403 csrf_token_invalid)', async () => {
     const app = build()
-    const res = await app.request('/api/v1/ui/signout', { method: 'POST' })
+    const res = await app.request('/api/v1/ui/signout', {
+      method: 'POST',
+      headers: { origin: ENV.UI_ORIGIN },
+    })
     expect(res.status).toBe(403)
     const body = (await res.json()) as { error?: { code?: string } }
     expect(body.error?.code).toBe('csrf_token_invalid')
@@ -64,7 +67,7 @@ describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
     const app = build()
     const res = await app.request('/api/v1/ui/signout', {
       method: 'POST',
-      headers: { cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}` },
+      headers: { cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}`, origin: ENV.UI_ORIGIN },
     })
     expect(res.status).toBe(403)
   })
@@ -73,7 +76,7 @@ describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
     const app = build()
     const res = await app.request('/api/v1/ui/signout', {
       method: 'POST',
-      headers: { 'x-rp-csrf': TOKEN },
+      headers: { 'x-rp-csrf': TOKEN, origin: ENV.UI_ORIGIN },
     })
     expect(res.status).toBe(403)
   })
@@ -85,6 +88,7 @@ describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
       headers: {
         cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}`,
         'x-rp-csrf': 'a-different-token-' + 'y'.repeat(40),
+        origin: ENV.UI_ORIGIN,
       },
     })
     expect(res.status).toBe(403)
@@ -97,6 +101,7 @@ describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
       headers: {
         cookie: `${ENV.CSRF_COOKIE_NAME}=${TOKEN}`,
         'x-rp-csrf': TOKEN,
+        origin: ENV.UI_ORIGIN,
       },
     })
     // signout returns 200 even without a session
@@ -113,15 +118,19 @@ describe('CSRF middleware — /api/v1/ui/* state-changing', () => {
   })
 
   it('does NOT apply to /api/v1/sdk/*', async () => {
+    // Since E1 #3b, /sdk/session/verify now requires a valid app API
+    // key (requireAppApiKey). The test env has no keys configured, so
+    // the middleware returns 404 (anti-fingerprint). The important
+    // invariant here is that it does NOT return 403 from CSRF — the
+    // CSRF check is bypassed for the SDK namespace entirely.
     const app = build()
     const res = await app.request('/api/v1/sdk/session/verify', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token: 'rps_live_nope' }),
     })
-    // 401 because the token is bad, NOT 403 from CSRF.
-    expect(res.status).toBe(401)
-    const body = (await res.json()) as { error?: { code?: string } }
-    expect(body.error?.code).toBe('bearer_invalid')
+    // 404 from requireAppApiKey (no keys configured) — not 403 from CSRF.
+    expect(res.status).toBe(404)
+    expect(res.status).not.toBe(403)
   })
 })

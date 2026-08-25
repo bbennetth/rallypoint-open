@@ -1,5 +1,7 @@
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import { listItemLabels, listLabels } from '@rallypoint/lists-db'
+import { chunkForBoundParams } from '@rallypoint/api-kit'
 import type { CreateLabelInput, ListLabelRecord, ListLabelRepo, UpdateLabelInput } from '../types.js'
 import type { Db } from './db.js'
 
@@ -86,14 +88,22 @@ export class D1ListLabelRepo implements ListLabelRepo {
 
   // Replace the full label set for one item. Delete-then-insert so the
   // join table stays consistent (no partial updates).
+  // The DELETE + insert chunks run in one db.batch() so the replace stays
+  // atomic, and each insert chunk stays under the D1 bound-param cap
+  // (2 params per join row — the 50-label cap sits exactly at the limit).
   async setItemLabels(itemId: string, labelIds: string[]): Promise<void> {
-    await this.db
-      .delete(listItemLabels)
-      .where(eq(listItemLabels.itemId, itemId))
-    if (labelIds.length === 0) return
-    await this.db
-      .insert(listItemLabels)
-      .values(labelIds.map((labelId) => ({ itemId, labelId })))
+    type Stmt = BatchItem<'sqlite'>
+    const stmts: [Stmt, ...Stmt[]] = [
+      this.db.delete(listItemLabels).where(eq(listItemLabels.itemId, itemId)),
+    ]
+    for (const chunk of chunkForBoundParams(labelIds, 2)) {
+      stmts.push(
+        this.db
+          .insert(listItemLabels)
+          .values(chunk.map((labelId) => ({ itemId, labelId }))),
+      )
+    }
+    await this.db.batch(stmts)
   }
 
   // Batch: map itemId → label ids for the given items. One query via
@@ -104,16 +114,21 @@ export class D1ListLabelRepo implements ListLabelRepo {
   async labelsForItems(itemIds: string[]): Promise<Map<string, string[]>> {
     const result = new Map<string, string[]>()
     if (itemIds.length === 0) return result
-    const rows = await this.db
-      .select({ itemId: listItemLabels.itemId, labelId: listItemLabels.labelId })
-      .from(listItemLabels)
-      .innerJoin(listLabels, eq(listItemLabels.labelId, listLabels.id))
-      .where(and(inArray(listItemLabels.itemId, itemIds), isNull(listLabels.deletedAt)))
-      .orderBy(asc(listLabels.position), asc(listLabels.id))
-    for (const row of rows) {
-      const arr = result.get(row.itemId) ?? []
-      arr.push(row.labelId)
-      result.set(row.itemId, arr)
+    // Chunked: a list GET can pass up to ITEM_SCAN_CAP ids, far past D1's
+    // bound-param limit. Per-item label order is preserved — each item's
+    // join rows live entirely in the chunk containing its id.
+    for (const chunk of chunkForBoundParams(itemIds, 1)) {
+      const rows = await this.db
+        .select({ itemId: listItemLabels.itemId, labelId: listItemLabels.labelId })
+        .from(listItemLabels)
+        .innerJoin(listLabels, eq(listItemLabels.labelId, listLabels.id))
+        .where(and(inArray(listItemLabels.itemId, chunk), isNull(listLabels.deletedAt)))
+        .orderBy(asc(listLabels.position), asc(listLabels.id))
+      for (const row of rows) {
+        const arr = result.get(row.itemId) ?? []
+        arr.push(row.labelId)
+        result.set(row.itemId, arr)
+      }
     }
     return result
   }

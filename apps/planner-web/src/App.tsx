@@ -6,8 +6,7 @@ import { MyDayPage } from './pages/MyDayPage.js'
 import { TasksPage } from './pages/TasksPage.js'
 import { ShoppingPage } from './pages/ShoppingPage.js'
 import { EventsPage } from './pages/EventsPage.js'
-import { NotesPage } from './pages/NotesPage.js'
-import { DiaryPage } from './pages/DiaryPage.js'
+import { BrainDumpPage } from './pages/BrainDumpPage.js'
 import { SettingsPage } from './pages/SettingsPage.js'
 
 export function App() {
@@ -73,25 +72,17 @@ export function App() {
       />
       {/* Calendar folded into My Day (Agenda · Month · Week lens). */}
       <Route path="/calendar" element={<Navigate to="/me" replace />} />
+      {/* Notes + Diary merged into the single Brain Dump surface; old links
+          land there and legacy entries appear in its merged stream. */}
+      <Route path="/notes" element={<Navigate to="/braindump" replace />} />
+      <Route path="/diary" element={<Navigate to="/braindump" replace />} />
       <Route
-        path="/notes"
+        path="/braindump"
         element={
           <RequireSession>
             {() => (
               <AppChrome>
-                <NotesPage />
-              </AppChrome>
-            )}
-          </RequireSession>
-        }
-      />
-      <Route
-        path="/diary"
-        element={
-          <RequireSession>
-            {() => (
-              <AppChrome>
-                <DiaryPage />
+                <BrainDumpPage />
               </AppChrome>
             )}
           </RequireSession>

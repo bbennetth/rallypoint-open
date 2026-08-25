@@ -20,6 +20,12 @@ export interface User {
   // Object-store key of an uploaded avatar, or null. The exposed
   // picture URL is computed from this, never the raw key.
   avatarKey: string | null
+  // Account-lockout bookkeeping. failedSigninCount is the running
+  // count of consecutive wrong-password signin attempts; lockedUntil
+  // is set once the count crosses the threshold and cleared on a
+  // correct password (see UserRepo.recordFailedSignin / clearSigninFailures).
+  failedSigninCount: number
+  lockedUntil: Date | null
   createdAt: Date
   updatedAt: Date
   deletedAt: Date | null
@@ -58,6 +64,22 @@ export interface UserRepo {
     },
   ): Promise<void>
   softDelete(id: UserId, when: Date): Promise<void>
+  // Ids of soft-deleted users. Consumed (via IdRPC.listDeletedUserIds) by
+  // downstream data owners — e.g. ai-api's deletion sweep — to purge their
+  // per-user data after an account deletion.
+  listDeletedIds(): Promise<UserId[]>
+  // Account-lockout bookkeeping (2.5). recordFailedSignin bumps the
+  // consecutive-failure counter atomically and, when the new count reaches
+  // `threshold`, stamps locked_until = now + lockMs. An expired lock is
+  // treated as a fresh window (count resets to 1), so a user who waited out
+  // one lock gets the full allowance again. clearSigninFailures resets both
+  // columns after a correct password. Policy (threshold, lockMs) lives in the
+  // caller, not the repo.
+  recordFailedSignin(
+    id: UserId,
+    opts: { now: Date; threshold: number; lockMs: number },
+  ): Promise<void>
+  clearSigninFailures(id: UserId): Promise<void>
 }
 
 // --- Auth methods --------------------------------------------------
@@ -143,6 +165,9 @@ export interface AuditRepo {
     eventType?: string
     sinceMs?: number
     limit?: number
+    // Keyset page boundary in (createdAt, id) DESC order — rows strictly older
+    // than this are returned. Absent → newest page.
+    cursor?: { createdAt: Date; id: string }
   }): Promise<AuditEvent[]>
 }
 
@@ -203,6 +228,15 @@ export interface UserAuthRepo {
     when: Date
   }): Promise<void>
 
+  // Email-verification confirm: mark the user verified AND consume the
+  // verification token in one batch, so a crash can't leave the account
+  // verified with a replayable token.
+  confirmEmailVerification(input: {
+    userId: UserId
+    tokenHash: string
+    when: Date
+  }): Promise<void>
+
   // Password-reset confirm: rotate the auth-method secret AND consume the
   // reset token in one batch, so the token can never outlive the rotation.
   confirmPasswordReset(input: {
@@ -212,7 +246,50 @@ export interface UserAuthRepo {
     tokenHash: string
     when: Date
   }): Promise<void>
+
+  // Social-signup: create the users row AND its first oauth_identities
+  // row in one batch, so a crash can't strand a user with no sign-in
+  // method (mirrors createUserWithAuthMethod). A (provider, subject) or
+  // email collision rolls the whole batch back as UniqueConstraintError.
+  createUserWithOAuthIdentity(
+    user: {
+      id: UserId
+      tenantId: string
+      email: string
+      username: string
+      firstName?: string | null
+      lastName?: string | null
+      emailVerified: boolean
+    },
+    identity: {
+      id: string
+      tenantId: string
+      provider: OAuthProviderSlug
+      subject: string
+      email?: string | null
+      emailVerified: boolean
+    },
+  ): Promise<{ user: User; identity: OAuthIdentityRecord }>
+
+  // Lockout-safe credential/identity removal. The count of remaining
+  // usable sign-in methods (password auth_methods + webauthn_credentials
+  // + oauth_identities, minus the row being removed) is evaluated in the
+  // same statement as the delete, so two concurrent removals can't both
+  // pass the check and strand the account with zero sign-in methods.
+  //   'deleted'     — removed; the account still has >=1 method.
+  //   'last_method' — refused; this was the only remaining method.
+  //   'not_found'   — no such row for this user.
+  deleteWebauthnCredentialGuarded(input: {
+    userId: UserId
+    credentialId: string
+  }): Promise<GuardedDeleteResult>
+  deleteOAuthIdentityGuarded(input: {
+    userId: UserId
+    identityId: string
+  }): Promise<GuardedDeleteResult>
 }
+
+export type GuardedDeleteResult = 'deleted' | 'last_method' | 'not_found'
 
 // --- Repos bag ------------------------------------------------------
 
@@ -222,6 +299,10 @@ import type { SigninChallengeRepo } from './signin-challenge.js'
 import type { PasswordResetRepo } from './password-reset.js'
 import type { EmailChangeRepo } from './email-change.js'
 import type { SsoCodeRepo } from './sso-code.js'
+import type { OAuthIdentityRepo, OAuthIdentityRecord, OAuthProviderSlug } from './oauth-identity.js'
+import type { WebAuthnCredentialRepo } from './webauthn-credential.js'
+import type { WebAuthnChallengeRepo } from './webauthn-challenge.js'
+import type { OAuthStateRepo } from './oauth-state.js'
 
 export interface Repos {
   users: UserRepo
@@ -236,4 +317,8 @@ export interface Repos {
   ssoCodes: SsoCodeRepo
   settings: SettingsRepo
   userAuth: UserAuthRepo
+  oauthIdentities: OAuthIdentityRepo
+  webauthnCredentials: WebAuthnCredentialRepo
+  webauthnChallenges: WebAuthnChallengeRepo
+  oauthStates: OAuthStateRepo
 }

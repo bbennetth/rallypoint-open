@@ -3,11 +3,13 @@ import { TENANT_DEFAULT, TOKEN_PREFIXES, SignupRequestSchema, type UserId } from
 import { errors, ApiError } from '../../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { dailySalt, hashIp, hashUserAgent } from '../../crypto/ip-hash.js'
+import { emailDomain } from '../../lib/email-domain.js'
+import { normalizeEmail } from '../../lib/normalize-email.js'
 import { renderVerifyEmail } from '../../mailer-templates/verify-email.js'
 import type { PasswordHasher } from '../../crypto/password.js'
 import type { Services } from '../../services/types.js'
 import type { Repos } from '../../repos/types.js'
-import { UniqueConstraintError } from '../../repos/memory.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type { Logger } from '../../logger.js'
 
 // Pure signup orchestration — testable without booting the full
@@ -25,6 +27,14 @@ export interface SignupCtx {
   userAgent: string
   logger?: Logger
   now?: () => Date
+  /**
+   * Dev-only: when true, skip the email-verification step entirely —
+   * a fresh signup lands as `email_verified=true` and no verification
+   * email is sent. Plumbed from the `DEV_AUTO_VERIFY_EMAIL` env var
+   * by the route layer. Pairs with `DEV_SIGNIN_CODE_OVERRIDE` so the
+   * dev:seed flow doesn't need to round-trip a real email.
+   */
+  devAutoVerifyEmail?: boolean
 }
 
 export interface SignupResult {
@@ -43,6 +53,10 @@ export async function handleSignup(
     throw errors.validation({ issues: parsed.error.issues })
   }
   const input = parsed.data
+  // Case/whitespace-insensitive email identity (#675): normalize once
+  // here so signup's create + existing-user lookup, and every audit
+  // meta below, all agree on the same canonical string.
+  const email = normalizeEmail(input.email)
   const tenantId = ctx.tenantId ?? TENANT_DEFAULT
   const now = ctx.now ?? (() => new Date())
   const salt = dailySalt(ctx.argon2PepperKey, now())
@@ -99,21 +113,37 @@ export async function handleSignup(
   // 4. Check for an existing user by email (the only unique key).
   //    We must NOT disclose existence via the response — but we do
   //    branch internally.
-  const existingByEmail = await ctx.repos.users.findByEmail(tenantId, input.email)
+  const existingByEmail = await ctx.repos.users.findByEmail(tenantId, email)
 
   if (existingByEmail) {
     // Email taken — silently re-issue a verification email if the
     // existing user is unverified; otherwise audit and return ok.
     if (!existingByEmail.emailVerified) {
-      await issueAndSendVerification({
-        ctx,
-        user: existingByEmail,
-        tenantId,
-        now,
-        ipHash,
-        uaHash,
-        outcome: 'email_unverified_resent',
-      })
+      if (ctx.devAutoVerifyEmail) {
+        // Dev shortcut: instead of re-issuing a verification email,
+        // just mark the user verified. Keeps the seed flow idempotent
+        // — re-running the seed script over an existing unverified
+        // demo user lands at the same end state as a clean signup.
+        await ctx.repos.users.setEmailVerified(existingByEmail.id, true)
+        await ctx.repos.audit.write({
+          tenantId,
+          eventType: 'signup.attempt',
+          userId: existingByEmail.id,
+          ipHash,
+          uaHash,
+          meta: { outcome: 'email_unverified_dev_auto_verified' },
+        })
+      } else {
+        await issueAndSendVerification({
+          ctx,
+          user: existingByEmail,
+          tenantId,
+          now,
+          ipHash,
+          uaHash,
+          outcome: 'email_unverified_resent',
+        })
+      }
     } else {
       await ctx.repos.audit.write({
         tenantId,
@@ -139,7 +169,7 @@ export async function handleSignup(
       {
         id: userId,
         tenantId,
-        email: input.email,
+        email,
         username: input.name,
       },
       {
@@ -182,6 +212,23 @@ export async function handleSignup(
     return { ok: true }
   }
 
+  // Dev shortcut (DEV_AUTO_VERIFY_EMAIL=true): mark verified directly
+  // instead of issuing + emailing a verification token. NEVER taken in
+  // prod — the env var is unset/false there. Falls through to the
+  // normal issue-and-send path otherwise.
+  if (ctx.devAutoVerifyEmail) {
+    await ctx.repos.users.setEmailVerified(userId, true)
+    await ctx.repos.audit.write({
+      tenantId,
+      eventType: 'signup.success',
+      userId,
+      ipHash,
+      uaHash,
+      meta: { email_domain: emailDomain(email), dev_auto_verify_email: true },
+    })
+    return { ok: true }
+  }
+
   await issueAndSendVerification({
     ctx,
     user,
@@ -198,7 +245,7 @@ export async function handleSignup(
     userId,
     ipHash,
     uaHash,
-    meta: { email: input.email },
+    meta: { email_domain: emailDomain(email) },
   })
 
   return { ok: true }

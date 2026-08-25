@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import { Button, Drawer, useToast } from '@rallypoint/ui'
 import {
   ApiError,
@@ -52,21 +53,28 @@ export function ShareDrawer({ open, onClose, listId, listName }: ShareDrawerProp
   const [email, setEmail] = useState('')
   const [pendingCode, setPendingCode] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // The drawer stays mounted across list switches (deps [open, listId]); gate
+  // the commit so an older list's load can't overwrite the newer list's shares.
+  const run = useAsyncTask()
 
   async function load() {
     setState({ status: STATUS_LOADING })
-    try {
-      const [shares, invites] = await Promise.all([
-        listListShares(listId),
-        listListInvites(listId),
-      ])
-      setState({ status: STATUS_READY, shares: shares.items, invites: invites.items })
-    } catch (err) {
-      setState({
-        status: STATUS_ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load shares.',
-      })
-    }
+    await run(async (ctx) => {
+      try {
+        const [shares, invites] = await Promise.all([
+          listListShares(listId),
+          listListInvites(listId),
+        ])
+        if (ctx.stale()) return
+        setState({ status: STATUS_READY, shares: shares.items, invites: invites.items })
+      } catch (err) {
+        if (ctx.stale()) return
+        setState({
+          status: STATUS_ERROR,
+          message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load shares.',
+        })
+      }
+    })
   }
 
   useEffect(() => {

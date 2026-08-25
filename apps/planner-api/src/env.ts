@@ -19,23 +19,15 @@ const EnvSchema = z.object({
   // env var — see src/repos/d1/db.ts. No PLANNER_DATABASE_URL in the
   // native-Cloudflare build.
 
-  // Rallypoint ID coordinates. planner-api consumes RPID over HTTP via
-  // @rallypoint/id-client (session verify) and the SSO exchange.
-  RPID_API_URL: z.string().url().default('http://localhost:8080'),
+  // Rallypoint ID UI origin (browser-facing). The id-api / lists-api /
+  // events-api server-to-server origins moved off HTTP in PR 3 of
+  // feat/rpc-bindings — planner-api now reaches the three producers
+  // through their `Service<XRPC>` bindings.
   RPID_UI_URL: z.string().url().default('http://localhost:5173'),
 
-  // Rallypoint Lists API coordinates. planner-api composes the Lists SDK
-  // (@rallypoint/lists-client) over HTTP to manage a user's personal task
-  // lists — it presents PLANNER_API_KEY as the bearer and the session
-  // userId as the x-actor. planner-api owns NO task storage of its own.
-  LISTS_API_URL: z.string().url().default('http://localhost:8082'),
-
-  // Rallypoint Events API coordinates. planner-api composes the Events SDK
-  // (@rallypoint/events-client) authenticated /sdk/personal-events surface
-  // over HTTP to manage a user's personal events + ticket attachments — it
-  // presents PLANNER_API_KEY as the bearer and the session userId as the
-  // x-actor. planner-api owns NO event storage of its own.
-  EVENTS_API_URL: z.string().url().default('http://localhost:8081'),
+  // The fitness integration (My Day "today's training") moved to the
+  // FitnessRPC binding when fitness-api caught up to feat/rpc-bindings —
+  // FITNESS_API_URL and PLANNER_API_KEY (the last *_API_KEY var) are gone.
 
   // Trust policy for IP-extraction headers (#33).
   //   legacy           — current behavior: leftmost XFF, then
@@ -56,12 +48,6 @@ const EnvSchema = z.object({
     .enum(['legacy', 'xff', 'cf-connecting-ip', 'none'])
     .default('legacy'),
 
-  // Bearer presented to RPID's *_API_KEY-gated SDK endpoints
-  // (/sdk/sso/exchange). MUST match the value RPID parses for the
-  // planner app. Required in production; a dev default is supplied
-  // post-parse so the local stack boots unconfigured.
-  PLANNER_API_KEY: z.string().min(32).optional(),
-
   // Symmetric key material for sealing the RPID session bearer at rest
   // (crypto/encryption.ts). Active version is PLANNER_SESSION_KEY_VERSION;
   // rows store the version they were sealed under so a rotation can add
@@ -78,17 +64,49 @@ const EnvSchema = z.object({
   PLANNER_SSO_STATE_COOKIE_NAME: z.string().min(1).optional(),
 
   // VAPID keys for Web Push (planner-owned notifications). The public key
-  // is the browser applicationServerKey (also shipped to planner-web as
-  // VITE_VAPID_PUBLIC_KEY); the private key signs the VAPID JWT and is a
-  // secret. Subject is the contact URI (mailto:/https). Required in
+  // is the browser applicationServerKey (served to planner-web at runtime
+  // via GET /api/v1/push/public-key); the private key signs the VAPID JWT
+  // and is a secret. Subject is the contact URI (mailto:/https). Required in
   // production; dev defaults supplied post-parse so the local stack boots.
   VAPID_PUBLIC_KEY: z.string().min(1).optional(),
   VAPID_PRIVATE_KEY: z.string().min(1).optional(),
   VAPID_SUBJECT: z.string().min(1).optional(),
 
+  // AI Gateway id for the AI Assist Workers AI call (routes/assist.ts).
+  // When set, `ai.run` routes through the named Cloudflare AI Gateway
+  // (logging / caching / cost visibility); unset (local dev) → the call
+  // goes straight to Workers AI. Mirrors fitness-api's AI_GATEWAY_ID.
+  AI_GATEWAY_ID: z.string().min(1).optional(),
+
+  // Workers AI model override for AI Assist. Unset → lib/assist.ts's
+  // ASSIST_MODEL default (Mistral Small 3.1). Exists so a smaller open
+  // model can be A/B'd for latency on QA with a config flip — never a
+  // Meta/xAI model (policy).
+  ASSIST_MODEL: z.string().min(1).optional(),
+
+  // PostHog server-side error tracking. The project API key is a public
+  // `phc_…` write key (same class of value the web bundles ship), so it
+  // lives in wrangler.toml [vars], not secrets. Unset (local dev/FOSS) →
+  // exception capture is a no-op.
+  POSTHOG_KEY: z.string().min(1).optional(),
+  POSTHOG_HOST: z.string().url().optional(),
+  // Deploy target (qa/prod) — becomes the OTel
+  // `deployment.environment` resource attribute on forwarded logs.
+  // QA and prod share one PostHog project, so without it their logs
+  // are indistinguishable. Unset locally.
+  DEPLOY_ENV: z.enum(['qa', 'prod']).optional(),
+
   // Build metadata — set by the Dockerfile at image-build time.
   BUILD_VERSION: z.string().default('dev'),
   BUILD_COMMIT: z.string().default('dev'),
+
+  // Offline-grace window (E4 O2): when id-api's /sdk/session/verify is
+  // unreachable, the session middleware silently accepts a request if
+  // the row's last_verified_at is within this many hours. 0 disables
+  // grace entirely (back to the old "503 on transport error" semantics).
+  // Default 24h matches the planner's "stay usable on the train" UX
+  // requirement; per-user override is intentionally deferred to v2.
+  SESSION_OFFLINE_TTL_HOURS: z.coerce.number().int().min(0).max(72).default(24),
 })
 
 type ParsedEnv = z.infer<typeof EnvSchema>
@@ -98,7 +116,6 @@ type ParsedEnv = z.infer<typeof EnvSchema>
 // derivation) and strips their optionality.
 export type Env = Omit<
   ParsedEnv,
-  | 'PLANNER_API_KEY'
   | 'PLANNER_SESSION_KEY_V1'
   | 'PLANNER_SESSION_COOKIE_NAME'
   | 'PLANNER_CSRF_COOKIE_NAME'
@@ -107,7 +124,6 @@ export type Env = Omit<
   | 'VAPID_PRIVATE_KEY'
   | 'VAPID_SUBJECT'
 > & {
-  PLANNER_API_KEY: string
   PLANNER_SESSION_KEY_V1: string
   PLANNER_SESSION_COOKIE_NAME: string
   PLANNER_CSRF_COOKIE_NAME: string
@@ -117,13 +133,6 @@ export type Env = Omit<
   VAPID_SUBJECT: string
 }
 
-// Dev-only fallbacks for the two required secrets. Production refuses
-// to boot without explicit values; dev/test get a fixed stand-in so
-// the local stack and the test suite run unconfigured. Must match
-// the local dev stack and .env.example so the SSO exchange works even when
-// an app is started outside the dev stack (RPID and planner-api must present
-// the SAME key or RPID 403s the exchange).
-const DEV_API_KEY = 'dev-planner-api-key-do-not-use-in-production-32+chars'
 const DEV_SESSION_KEY_V1 = 'dev-planner-session-key-v1-0000000000000'
 
 // Dev-only VAPID keypair (P-256). Local-stack stand-in so Web Push works
@@ -146,15 +155,13 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = result.data
   const isProd = parsed.NODE_ENV === 'production'
 
-  const apiKey = parsed.PLANNER_API_KEY ?? (isProd ? undefined : DEV_API_KEY)
   const sessionKeyV1 =
     parsed.PLANNER_SESSION_KEY_V1 ?? (isProd ? undefined : DEV_SESSION_KEY_V1)
   const vapidPublicKey = parsed.VAPID_PUBLIC_KEY ?? (isProd ? undefined : DEV_VAPID_PUBLIC_KEY)
   const vapidPrivateKey = parsed.VAPID_PRIVATE_KEY ?? (isProd ? undefined : DEV_VAPID_PRIVATE_KEY)
   const vapidSubject = parsed.VAPID_SUBJECT ?? (isProd ? undefined : DEV_VAPID_SUBJECT)
-  if (!apiKey || !sessionKeyV1 || !vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
+  if (!sessionKeyV1 || !vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
     const missing = [
-      !apiKey ? 'PLANNER_API_KEY' : null,
       !sessionKeyV1 ? 'PLANNER_SESSION_KEY_V1' : null,
       !vapidPublicKey ? 'VAPID_PUBLIC_KEY' : null,
       !vapidPrivateKey ? 'VAPID_PRIVATE_KEY' : null,
@@ -167,7 +174,6 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
   return {
     ...parsed,
-    PLANNER_API_KEY: apiKey,
     PLANNER_SESSION_KEY_V1: sessionKeyV1,
     VAPID_PUBLIC_KEY: vapidPublicKey,
     VAPID_PRIVATE_KEY: vapidPrivateKey,

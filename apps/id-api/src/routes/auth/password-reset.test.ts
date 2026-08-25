@@ -21,6 +21,7 @@ import { hashToken } from '@rallypoint/crypto'
 
 const PEPPER = 'pepper-12345678901234567890123456789012'
 const CODE_KEY = 'signin-hmac-key-1234567890123456789012345678'
+const SESSION_KEY = 'session-hmac-key-123456789012345678901234567'
 
 function buildCtx() {
   const repos = buildInMemoryRepos()
@@ -39,6 +40,7 @@ function buildCtx() {
       publicBaseUrl: 'https://id.example.com',
       argon2PepperKey: PEPPER,
       signinCodeHmacKey: CODE_KEY,
+      sessionHmacKey: SESSION_KEY,
       ipAddress: '203.0.113.5',
       userAgent: 'test-agent/1.0',
     },
@@ -122,12 +124,14 @@ describe('handlePasswordResetConfirm', () => {
       tenantId: 'rallypoint',
       ipHash: 'a'.repeat(64),
       uaHash: 'b'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
     })
     await issueSession(setup.repos.sessions, {
       userId,
       tenantId: 'rallypoint',
       ipHash: 'c'.repeat(64),
       uaHash: 'd'.repeat(64),
+      sessionHmacKey: SESSION_KEY,
     })
 
     await handlePasswordResetRequest(

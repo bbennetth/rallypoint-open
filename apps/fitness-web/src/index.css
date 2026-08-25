@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+@import '@rallypoint/ui/theme.css';
+@import '@rallypoint/ui/fonts.css';
+@import '@rallypoint/ui/shell.css';
+/* Fitness content styles, ported from the Ink design handoff prototype
+   (see /tmp/desiogn/design_handoff_fitness/design_files/fitness/fitness.css).
+   Every color/space resolves to a CSS variable defined in
+   @rallypoint/ui/theme.css — re-tints with data-color and inverts with
+   data-mode. */
+@import './fitness.css';

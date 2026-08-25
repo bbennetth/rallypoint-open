@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useAsync } from '@rallypoint/web-kit'
 import {
   getEventWeather,
   type AirQualityDailyDto,
@@ -35,36 +35,20 @@ function pickDay<T extends { date: string }>(items: readonly T[] | undefined, da
   return items.find((d) => d.date === dayIso) ?? null
 }
 
-type State =
-  | { status: 'loading' }
-  | { status: 'hidden' }
-  | { status: 'ready'; weather: WeatherDto }
-
 export function WeatherPanel({ eventId, dayIso }: { eventId: string; dayIso: string | null }) {
-  const [state, setState] = useState<State>({ status: 'loading' })
-
-  useEffect(() => {
-    let active = true
-    setState({ status: 'loading' })
-    getEventWeather(eventId)
-      .then((weather) => {
-        if (!active) return
-        if (!weather.forecast && !weather.airQuality) {
-          setState({ status: 'hidden' })
-          return
-        }
-        setState({ status: 'ready', weather })
-      })
-      .catch(() => {
-        if (active) setState({ status: 'hidden' })
-      })
-    return () => {
-      active = false
+  // Empty forecast/airQuality (no coords / outside window) and fetch
+  // failure both resolve to `data === null`, hiding the panel.
+  const { data: weather } = useAsync<WeatherDto | null>(async () => {
+    try {
+      const w = await getEventWeather(eventId)
+      if (!w.forecast && !w.airQuality) return null
+      return w
+    } catch {
+      return null
     }
   }, [eventId])
 
-  if (state.status !== 'ready' || !dayIso) return null
-  const { weather } = state
+  if (!weather || !dayIso) return null
   const forecast: WeatherForecastDailyDto | null = pickDay(weather.forecast?.daily, dayIso)
   const aq: AirQualityDailyDto | null = pickDay(weather.airQuality?.daily, dayIso)
   if (!forecast) return null
@@ -82,10 +66,8 @@ export function WeatherPanel({ eventId, dayIso }: { eventId: string; dayIso: str
 
   return (
     <div
-      className="mono"
+      className="mono pl-card"
       style={{
-        border: '1.5px solid var(--line)',
-        background: 'var(--surface)',
         padding: '8px 12px',
       }}
     >
@@ -133,7 +115,8 @@ export function WeatherPanel({ eventId, dayIso }: { eventId: string; dayIso: str
               alignItems: 'center',
               gap: 4,
               padding: '1px 5px',
-              border: `1.5px solid ${uvColor}`,
+              background: `color-mix(in srgb, ${uvColor} 16%, transparent)`,
+              borderRadius: 'var(--radius-round)',
               color: uvColor,
               fontSize: 9,
               fontWeight: 700,
@@ -180,8 +163,9 @@ export function WeatherPanel({ eventId, dayIso }: { eventId: string; dayIso: str
             style={{
               marginLeft: 'auto',
               padding: '0 4px',
-              border: '1px solid var(--hot)',
-              color: 'var(--hot)',
+              background: 'var(--hot-soft)',
+              borderRadius: 'var(--radius-round)',
+              color: 'var(--hot-text)',
               fontWeight: 700,
             }}
           >

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button, useToast } from '@rallypoint/ui'
+import { useAsyncTask } from '@rallypoint/web-kit'
 import {
   ApiError,
   createMcpToken,
@@ -50,22 +51,32 @@ export function McpTokensPage() {
   // The raw secret from the most recent create — shown once, then dismissed.
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
 
-  async function load() {
-    setState({ status: LOADING })
-    try {
-      const page = await listMcpTokens()
-      setState({ status: READY, tokens: page.items })
-    } catch (err) {
-      setState({
-        status: ERROR,
-        message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load tokens.',
-      })
-    }
-  }
+  // useAsyncTask (#675 R5): a fast Revoke-then-reload can supersede a
+  // still-in-flight initial load — stale() drops the older commit so it
+  // never clobbers the newer one.
+  const run = useAsyncTask()
+  const load = useCallback(
+    () =>
+      run(async (ctx) => {
+        setState({ status: LOADING })
+        try {
+          const page = await listMcpTokens()
+          if (ctx.stale()) return
+          setState({ status: READY, tokens: page.items })
+        } catch (err) {
+          if (ctx.stale()) return
+          setState({
+            status: ERROR,
+            message: err instanceof ApiError ? `${err.code}: ${err.message}` : 'Failed to load tokens.',
+          })
+        }
+      }),
+    [run],
+  )
 
   useEffect(() => {
     void load()
-  }, [])
+  }, [load])
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()

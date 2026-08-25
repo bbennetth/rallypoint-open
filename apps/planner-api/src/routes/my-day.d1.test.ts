@@ -12,6 +12,7 @@ import type {
   ListItemDto,
   ListsClient,
 } from '@rallypoint/lists-client'
+import type { FitnessClient, WorkoutSummaryDto } from '@rallypoint/fitness-client'
 import { PERSONAL_GROUP_NAME_LEGACY } from '../lib/personal-scope.js'
 import { parseEnv, type Env } from '../env.js'
 import { buildApp } from '../build-app.js'
@@ -46,6 +47,10 @@ interface FakeLists {
       seriesId?: string | null
     },
   ): void
+  /** Create the actor's chores list (listType 'chores') and return its id. */
+  seedChoresList(actor: string): string
+  /** Seed a chore item into the actor's chores list (seedChoresList first). */
+  seedChore(actor: string, item: { id: string; title?: string; dueDate: string | null }): void
 }
 
 // A minimal Lists SDK: one personal `list_group` per actor and a single list
@@ -116,6 +121,51 @@ function makeFakeLists(): FakeLists {
         position: items.length,
         customFields: {},
         seriesId: item.seriesId ?? null,
+        createdBy: actor,
+        createdAt: ISO,
+        updatedAt: ISO,
+      })
+    },
+    seedChoresList(actor) {
+      ensureList(actor) // materialise the personal group first
+      const id = `chores_${actor}`
+      if (!lists.some((l) => l.id === id)) {
+        lists.push({
+          id,
+          scopeType: 'list_group',
+          scopeId: `grp_${actor}`,
+          listType: 'chores',
+          name: 'Chores',
+          visibility: 'all',
+          color: null,
+          incompleteCount: 0,
+          createdBy: actor,
+          createdAt: ISO,
+          updatedAt: ISO,
+        })
+        itemsByList.set(id, [])
+      }
+      return id
+    },
+    seedChore(actor, item) {
+      const listId = this.seedChoresList(actor)
+      const items = itemsByList.get(listId)!
+      items.push({
+        id: item.id,
+        listId,
+        title: item.title ?? item.id,
+        notes: null,
+        assignedTo: null,
+        completed: false,
+        completedAt: null,
+        status: null,
+        statusId: null,
+        parentId: null,
+        priority: null,
+        dueDate: item.dueDate,
+        position: items.length,
+        customFields: {},
+        seriesId: null,
         createdBy: actor,
         createdAt: ISO,
         updatedAt: ISO,
@@ -219,6 +269,40 @@ interface MyDayResponse {
   tasks: { id: string; dueDate: string | null }[]
   events: { id: string }[]
   eventDays: { eventId: string; date: string; owned: boolean; shared?: boolean }[]
+  training: { id: string; modality: string; title: string | null; setCount: number; performedAt: string }[]
+  choresListId: string | null
+}
+
+// FakeFitness — minimal stub of @rallypoint/fitness-client for the My Day
+// fold-in tests. `seedWorkout` adds a workout for an actor; `mode` lets a
+// test simulate fitness-api being down so we can confirm the `bestEffort`
+// degradation path returns `training: []` and the rest of My Day still loads.
+interface FakeFitness {
+  client: FitnessClient
+  seedWorkout(actor: string, w: Omit<WorkoutSummaryDto, 'modality'> & { modality?: WorkoutSummaryDto['modality'] }): void
+  fail(): void
+}
+
+function makeFakeFitness(): FakeFitness {
+  const byActor = new Map<string, WorkoutSummaryDto[]>()
+  let failing = false
+  const client: FitnessClient = {
+    listWorkouts: async ({ actor }) => {
+      if (failing) throw new Error('fitness-api down')
+      return byActor.get(actor) ?? []
+    },
+  }
+  return {
+    client,
+    seedWorkout(actor, w) {
+      const list = byActor.get(actor) ?? []
+      list.push({ modality: w.modality ?? 'strength', ...w } as WorkoutSummaryDto)
+      byActor.set(actor, list)
+    },
+    fail() {
+      failing = true
+    },
+  }
 }
 
 describe('D1 integration — Planner My Day BFF', () => {
@@ -227,6 +311,7 @@ describe('D1 integration — Planner My Day BFF', () => {
   let app: Hono<HonoApp>
   let lists: FakeLists
   let events: FakeEvents
+  let fitness: FakeFitness
 
   const baseServices = (): Services => ({
     idClient: {
@@ -236,6 +321,7 @@ describe('D1 integration — Planner My Day BFF', () => {
     rpidSso: { exchange: vi.fn().mockResolvedValue({ ok: false, reason: 'invalid' }) },
     listsClient: lists.client,
     eventsClient: events.client,
+    fitnessClient: fitness.client,
     settings: {
       get: async () => ({}),
       patch: async () => ({}),
@@ -250,6 +336,7 @@ describe('D1 integration — Planner My Day BFF', () => {
   beforeEach(() => {
     lists = makeFakeLists()
     events = makeFakeEvents()
+    fitness = makeFakeFitness()
     app = buildApp({ env, logger: undefined, repos, services: baseServices() })
   })
 
@@ -329,6 +416,16 @@ describe('D1 integration — Planner My Day BFF', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as MyDayResponse
     expect(body).toMatchObject({ date: '2026-06-03', timezone: 'UTC', tasks: [], events: [] })
+    expect(body.choresListId).toBeNull()
+  })
+
+  it('returns the chores-list id (and its due-today items) when a chores list exists', async () => {
+    const bearer = await loginAs('user_a')
+    const choresId = lists.seedChoresList('user_a')
+    lists.seedChore('user_a', { id: 'chore_1', dueDate: '2026-06-03T09:00:00.000Z' })
+    const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as MyDayResponse
+    expect(body.choresListId).toBe(choresId)
+    expect(body.tasks.map((t) => t.id)).toContain('chore_1')
   })
 
   it('merges only the tasks and events that fall on the day, sorted', async () => {
@@ -446,7 +543,7 @@ describe('D1 integration — Planner My Day BFF', () => {
     // 23h of real time. Midnight is EST (−05:00) but the next midnight is EDT
     // (−04:00), so the half-open window is [05:00Z, next-day 04:00Z). This
     // proves the DST resolution holds through the real Hono handler, not just
-    // the day-window unit test.
+    // the @rallypoint/shared timezone unit test.
     const bearer = await loginAs('user_dst')
     await get(bearer, 'date=2026-03-08&tz=America/New_York')
     expect(events.calls).toHaveLength(1)
@@ -543,5 +640,42 @@ describe('D1 integration — Planner My Day BFF', () => {
 
     const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as MyDayResponse
     expect(body.eventDays.map((d) => d.eventId)).toEqual(['evt_safe'])
+  })
+
+  it('folds today\'s training into the My Day response', async () => {
+    const bearer = await loginAs('user_fit_happy')
+    fitness.seedWorkout('user_fit_happy', {
+      id: 'fs_morning',
+      performedAt: '2026-06-03T08:00:00.000Z',
+      title: 'Morning Lift',
+      durationS: 2400,
+      setCount: 12,
+    })
+
+    const body = (await (await get(bearer, 'date=2026-06-03&tz=UTC')).json()) as MyDayResponse
+    expect(body.training).toHaveLength(1)
+    expect(body.training[0]).toMatchObject({
+      id: 'fs_morning',
+      title: 'Morning Lift',
+      setCount: 12,
+      modality: 'strength',
+    })
+  })
+
+  it('degrades to training: [] when fitness-api is down (best-effort)', async () => {
+    const bearer = await loginAs('user_fit_degraded')
+    // Seed a task so we can confirm the rest of My Day still loads.
+    lists.seedTask('user_fit_degraded', {
+      id: 'lit_t1',
+      title: 'Pick up groceries',
+      dueDate: '2026-06-03',
+    })
+    fitness.fail()
+
+    const res = await get(bearer, 'date=2026-06-03&tz=UTC')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as MyDayResponse
+    expect(body.training).toEqual([])
+    expect(body.tasks.length).toBeGreaterThanOrEqual(1)
   })
 })

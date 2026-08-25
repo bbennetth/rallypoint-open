@@ -1,4 +1,5 @@
 import { ulid } from 'ulid'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import type { UserId } from '@rallypoint/shared'
 import type {
   AuditEvent,
@@ -8,18 +9,24 @@ import type {
   AuthMethodRepo,
   EmailVerification,
   EmailVerificationRepo,
+  GuardedDeleteResult,
   Repos,
   SettingsRepo,
   User,
   UserAuthRepo,
   UserRepo,
 } from './types.js'
+import type { OAuthIdentityRecord } from './oauth-identity.js'
 import { InMemoryRateLimitRepo } from './memory-rate-limit.js'
 import { InMemorySessionRepo } from './memory-sessions.js'
 import { InMemorySigninChallengeRepo } from './memory-signin-challenges.js'
 import { InMemoryPasswordResetRepo } from './memory-password-resets.js'
 import { InMemoryEmailChangeRepo } from './memory-email-changes.js'
 import { InMemorySsoCodeRepo } from './memory-sso-codes.js'
+import { InMemoryOAuthIdentityRepo } from './memory-oauth-identities.js'
+import { InMemoryWebAuthnCredentialRepo } from './memory-webauthn-credentials.js'
+import { InMemoryWebAuthnChallengeRepo } from './memory-webauthn-challenges.js'
+import { InMemoryOAuthStateRepo } from './memory-oauth-states.js'
 
 // In-memory repos for unit tests. Deliberately stupid — no shared
 // abstraction with the Postgres impls — so a bug in shared
@@ -35,8 +42,9 @@ class InMemoryUserRepo implements UserRepo {
   }
 
   async findManyByIds(ids: ReadonlyArray<UserId>): Promise<User[]> {
+    // Mirrors the D1 impl: duplicate input ids yield each user once.
     const out: User[] = []
-    for (const id of ids) {
+    for (const id of new Set(ids)) {
       const u = this.byId.get(id)
       if (u && !u.deletedAt) out.push(u)
     }
@@ -76,6 +84,8 @@ class InMemoryUserRepo implements UserRepo {
       lastName: input.lastName ?? null,
       pictureUrl: null,
       avatarKey: null,
+      failedSigninCount: 0,
+      lockedUntil: null,
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
@@ -129,6 +139,36 @@ class InMemoryUserRepo implements UserRepo {
     const u = this.byId.get(id)
     if (!u) return
     this.byId.set(id, { ...u, deletedAt: when, updatedAt: when })
+  }
+
+  async listDeletedIds(): Promise<UserId[]> {
+    const out: UserId[] = []
+    for (const u of this.byId.values()) {
+      if (u.deletedAt) out.push(u.id)
+    }
+    return out
+  }
+
+  async recordFailedSignin(
+    id: UserId,
+    opts: { now: Date; threshold: number; lockMs: number },
+  ): Promise<void> {
+    const u = this.byId.get(id)
+    if (!u) return
+    // Mirror the D1 CASE logic: an expired lock opens a fresh window at 1,
+    // otherwise increment; lock when the effective count reaches the
+    // threshold, else clear any stale lock.
+    const lockExpired = u.lockedUntil !== null && u.lockedUntil.getTime() <= opts.now.getTime()
+    const nextCount = lockExpired ? 1 : u.failedSigninCount + 1
+    const lockedUntil =
+      nextCount >= opts.threshold ? new Date(opts.now.getTime() + opts.lockMs) : null
+    this.byId.set(id, { ...u, failedSigninCount: nextCount, lockedUntil })
+  }
+
+  async clearSigninFailures(id: UserId): Promise<void> {
+    const u = this.byId.get(id)
+    if (!u) return
+    this.byId.set(id, { ...u, failedSigninCount: 0, lockedUntil: null })
   }
 }
 
@@ -268,15 +308,25 @@ class InMemoryAuditRepo implements AuditRepo {
     eventType?: string
     sinceMs?: number
     limit?: number
+    cursor?: { createdAt: Date; id: string }
   }): Promise<AuditEvent[]> {
     const cutoff = opts.sinceMs ? Date.now() - opts.sinceMs : null
     const limit = opts.limit ?? 100
+    const cursor = opts.cursor
     return this.events
       .filter((e) => e.tenantId === opts.tenantId)
       .filter((e) => (opts.userId ? e.userId === opts.userId : true))
       .filter((e) => (opts.eventType ? e.eventType === opts.eventType : true))
       .filter((e) => (cutoff ? e.createdAt.getTime() >= cutoff : true))
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      // Keyset (createdAt, id) DESC: strictly older than the cursor row.
+      .filter((e) => {
+        if (!cursor) return true
+        const et = e.createdAt.getTime()
+        const ct = cursor.createdAt.getTime()
+        if (et !== ct) return et < ct
+        return e.id < cursor.id
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
       .slice(0, limit)
   }
 }
@@ -285,7 +335,7 @@ class InMemorySettingsRepo implements SettingsRepo {
   private byKey = new Map<string, Record<string, unknown>>()
 
   private key(userId: UserId, namespace: string): string {
-    return `${userId} ${namespace}`
+    return `${userId}\0${namespace}`
   }
 
   async get(userId: UserId, namespace: string): Promise<Record<string, unknown> | null> {
@@ -319,6 +369,9 @@ class InMemoryUserAuthRepo implements UserAuthRepo {
     private readonly authMethods: InMemoryAuthMethodRepo,
     private readonly emailChanges: InMemoryEmailChangeRepo,
     private readonly passwordResets: InMemoryPasswordResetRepo,
+    private readonly emailVerifications: InMemoryEmailVerificationRepo,
+    private readonly oauthIdentities: InMemoryOAuthIdentityRepo,
+    private readonly webauthnCredentials: InMemoryWebAuthnCredentialRepo,
   ) {}
 
   async createUserWithAuthMethod(
@@ -348,18 +401,84 @@ class InMemoryUserAuthRepo implements UserAuthRepo {
     await this.emailChanges.markConsumed(input.tokenHash, input.when)
   }
 
+  async confirmEmailVerification(
+    input: Parameters<UserAuthRepo['confirmEmailVerification']>[0],
+  ): Promise<void> {
+    await this.users.setEmailVerified(input.userId, true)
+    await this.emailVerifications.markConsumed(input.tokenHash, input.when)
+  }
+
   async confirmPasswordReset(
     input: Parameters<UserAuthRepo['confirmPasswordReset']>[0],
   ): Promise<void> {
     await this.authMethods.updateSecret(input.authMethodId, input.secretHash, input.keyVersion)
     await this.passwordResets.markConsumed(input.tokenHash, input.when)
   }
-}
 
-export class UniqueConstraintError extends Error {
-  constructor(public readonly constraint: string) {
-    super(`unique constraint violated: ${constraint}`)
-    this.name = 'UniqueConstraintError'
+  async createUserWithOAuthIdentity(
+    user: Parameters<UserAuthRepo['createUserWithOAuthIdentity']>[0],
+    identity: Parameters<UserAuthRepo['createUserWithOAuthIdentity']>[1],
+  ): Promise<{ user: User; identity: OAuthIdentityRecord }> {
+    // users.create throws on email collision (no partial state). Then set
+    // the provider-verified flag, then create the identity — compensating
+    // the user row if the (provider, subject) unique index trips.
+    const createdUser = await this.users.create(user)
+    if (user.emailVerified) await this.users.setEmailVerified(createdUser.id, true)
+    let createdIdentity: OAuthIdentityRecord
+    try {
+      createdIdentity = await this.oauthIdentities.create({
+        id: identity.id,
+        userId: createdUser.id,
+        tenantId: identity.tenantId,
+        provider: identity.provider,
+        subject: identity.subject,
+        email: identity.email ?? null,
+        emailVerified: identity.emailVerified,
+      })
+    } catch (err: unknown) {
+      await this.users.softDelete(createdUser.id, new Date())
+      throw err
+    }
+    const refreshed = (await this.users.findById(createdUser.id)) ?? createdUser
+    return { user: refreshed, identity: createdIdentity }
+  }
+
+  private async remainingMethods(
+    userId: UserId,
+    exclude: { table: 'webauthn' | 'oauth'; id: string },
+  ): Promise<number> {
+    const hasPassword = (await this.authMethods.findByUserAndKind(userId, 'password')) ? 1 : 0
+    const webauthn =
+      this.webauthnCredentials._countByUser(userId) -
+      (exclude.table === 'webauthn' && this.webauthnCredentials._getById(exclude.id) ? 1 : 0)
+    const oauth =
+      this.oauthIdentities._countByUser(userId) -
+      (exclude.table === 'oauth' && this.oauthIdentities._getById(exclude.id) ? 1 : 0)
+    return hasPassword + webauthn + oauth
+  }
+
+  async deleteWebauthnCredentialGuarded(input: {
+    userId: UserId
+    credentialId: string
+  }): Promise<GuardedDeleteResult> {
+    const cred = this.webauthnCredentials._getById(input.credentialId)
+    if (!cred || cred.userId !== input.userId) return 'not_found'
+    if ((await this.remainingMethods(input.userId, { table: 'webauthn', id: input.credentialId })) < 1)
+      return 'last_method'
+    this.webauthnCredentials._delete(input.credentialId)
+    return 'deleted'
+  }
+
+  async deleteOAuthIdentityGuarded(input: {
+    userId: UserId
+    identityId: string
+  }): Promise<GuardedDeleteResult> {
+    const ident = this.oauthIdentities._getById(input.identityId)
+    if (!ident || ident.userId !== input.userId) return 'not_found'
+    if ((await this.remainingMethods(input.userId, { table: 'oauth', id: input.identityId })) < 1)
+      return 'last_method'
+    this.oauthIdentities._delete(input.identityId)
+    return 'deleted'
   }
 }
 
@@ -372,15 +491,22 @@ export function buildInMemoryRepos(): Repos & {
   emailChanges: InMemoryEmailChangeRepo
   ssoCodes: InMemorySsoCodeRepo
   settings: InMemorySettingsRepo
+  oauthIdentities: InMemoryOAuthIdentityRepo
+  webauthnCredentials: InMemoryWebAuthnCredentialRepo
+  webauthnChallenges: InMemoryWebAuthnChallengeRepo
+  oauthStates: InMemoryOAuthStateRepo
 } {
   const users = new InMemoryUserRepo()
   const authMethods = new InMemoryAuthMethodRepo()
   const passwordResets = new InMemoryPasswordResetRepo()
   const emailChanges = new InMemoryEmailChangeRepo()
+  const emailVerifications = new InMemoryEmailVerificationRepo()
+  const oauthIdentities = new InMemoryOAuthIdentityRepo()
+  const webauthnCredentials = new InMemoryWebAuthnCredentialRepo()
   return {
     users,
     authMethods,
-    emailVerifications: new InMemoryEmailVerificationRepo(),
+    emailVerifications,
     audit: new InMemoryAuditRepo(),
     rateLimit: new InMemoryRateLimitRepo(),
     sessions: new InMemorySessionRepo(),
@@ -389,6 +515,18 @@ export function buildInMemoryRepos(): Repos & {
     emailChanges,
     ssoCodes: new InMemorySsoCodeRepo(),
     settings: new InMemorySettingsRepo(),
-    userAuth: new InMemoryUserAuthRepo(users, authMethods, emailChanges, passwordResets),
+    userAuth: new InMemoryUserAuthRepo(
+      users,
+      authMethods,
+      emailChanges,
+      passwordResets,
+      emailVerifications,
+      oauthIdentities,
+      webauthnCredentials,
+    ),
+    oauthIdentities,
+    webauthnCredentials,
+    webauthnChallenges: new InMemoryWebAuthnChallengeRepo(),
+    oauthStates: new InMemoryOAuthStateRepo(),
   }
 }

@@ -191,12 +191,16 @@ export const statusesRoutes = new Hono<HonoApp>()
       defaultStatusForCategory(remaining, status.category) ??
       remaining.slice().sort((a, b) => a.position - b.position)[0]!
 
-    await c.var.repos.listStatuses.reassignItems(listId, status.id, {
-      statusId: fallback.id,
-      status: fallback.category,
-      completed: categoryMirrorsCompleted(fallback.category).completed,
-    })
-    await c.var.repos.listStatuses.softDelete(status.id, new Date())
+    await c.var.repos.listStatuses.reassignItemsAndSoftDelete(
+      listId,
+      status.id,
+      {
+        statusId: fallback.id,
+        status: fallback.category,
+        completed: categoryMirrorsCompleted(fallback.category).completed,
+      },
+      new Date(),
+    )
     publish(c, listChannel(listId), envelope('list_statuses', 'delete', status.id, userId))
     return c.body(null, 204)
   })

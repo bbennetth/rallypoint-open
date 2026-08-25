@@ -15,6 +15,9 @@ import { loadLedgerForAction, recordActivity, TENANT } from './_access.js'
 
 // All ledger rows share the platform default tenant in V1.
 
+const ACTIVITY_DEFAULT_LIMIT = 50
+const ACTIVITY_MAX_LIMIT = 200
+
 function serializeLedger(l: LedgerRecord): Record<string, unknown> {
   return {
     id: l.id,
@@ -160,20 +163,18 @@ export const ledgersRoutes = new Hono<HonoApp>()
       )
     }
 
-    // Demote the previous owner into a member row, hand the role over,
-    // and stamp the ledger's owner_user_id. Done sequentially — a
-    // transactional helper can be hoisted into the repo later if needed.
+    // Atomic owner swap (audit E2 #6): demote the new owner's member
+    // row, hand the role over on the ledger, and add the old owner
+    // back as a member — all in ONE D1 batch. Previously this ran as
+    // 3 separate awaits; a mid-flow Worker crash could leave the
+    // ledger with a transferred owner AND the old owner with no
+    // member row, locked out with no recovery path.
     const oldOwnerUserId = ledger.ownerUserId
-    await c.var.repos.ledgerMembers.remove(ledger.id, newOwnerUserId)
-    await c.var.repos.ledgers.transferOwnership({
+    await c.var.repos.ledgers.transferOwnershipAtomic({
       ledgerId: ledger.id,
       newOwnerUserId,
-    })
-    await c.var.repos.ledgerMembers.add({
-      id: `lmm_${ulid()}`,
-      ledgerId: ledger.id,
-      userId: oldOwnerUserId,
-      role: 'member',
+      oldOwnerUserId,
+      oldOwnerMemberId: `lmm_${ulid()}`,
     })
     await recordActivity(c, ledger.id, 'ledger.ownership_transferred', {
       from_user_id: oldOwnerUserId,
@@ -243,16 +244,23 @@ export const ledgersRoutes = new Hono<HonoApp>()
   // --- activity feed (owner only) ------------------------------------
   .get('/api/v1/ui/ledgers/:id/activity', async (c) => {
     const { ledger } = await loadLedgerForAction(c, c.req.param('id'), 'owner')
-    const rows = await c.var.repos.ledgerActivity.listForLedger(ledger.id, {
-      limit: 200,
+    const rawLimit = Number(c.req.query('limit') ?? ACTIVITY_DEFAULT_LIMIT)
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(ACTIVITY_MAX_LIMIT, Math.max(1, Math.floor(rawLimit)))
+      : ACTIVITY_DEFAULT_LIMIT
+    const cursor = c.req.query('cursor') ?? null
+    const page = await c.var.repos.ledgerActivity.listForLedger(ledger.id, {
+      limit,
+      cursor,
     })
     return c.json({
-      items: rows.map((r) => ({
+      items: page.items.map((r) => ({
         id: r.id,
         actor_user_id: r.actorUserId,
         event_type: r.eventType,
         meta: r.meta,
         created_at: r.createdAt.toISOString(),
       })),
+      next_cursor: page.nextCursor,
     })
   })

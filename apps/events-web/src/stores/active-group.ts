@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { MemberRole } from '../lib/api.js'
+import type { GroupRole } from '../lib/api.js'
 
 // Active-group context for the attendee shell (slice 13). Populated by
 // AttendeeChrome when the user navigates into a /groups/:groupId/* route;
@@ -16,7 +16,10 @@ export interface ActiveGroupState {
   eventId: string | null
   eventSlug: string | null
   eventName: string | null
-  viewerRole: MemberRole | null
+  // Whether the parent event has an uploaded app icon — drives the
+  // per-event PWA `apple-touch-icon` swap on the group surface.
+  eventHasAppIcon: boolean
+  viewerRole: GroupRole | null
   set(input: Omit<ActiveGroupState, 'set' | 'clear'>): void
   clear(): void
 }
@@ -27,6 +30,7 @@ const EMPTY: Omit<ActiveGroupState, 'set' | 'clear'> = {
   eventId: null,
   eventSlug: null,
   eventName: null,
+  eventHasAppIcon: false,
   viewerRole: null,
 }
 

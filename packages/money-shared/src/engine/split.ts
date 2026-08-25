@@ -85,11 +85,17 @@ function assertNoDuplicateUsers(splits: readonly SplitRow[]): void {
 
 // Validate that `by_amount` rows sum to the total. Throws on mismatch.
 // Ported invariant from festival-planner's `validateCustomAmounts`.
+//
+// Audit E3 #18: accumulate as BigInt. Individual amountCents values
+// are capped at Number.MAX_SAFE_INTEGER by the per-field validator,
+// but two ~MAX_SAFE_INTEGER/2 values sum to a number that loses low-bit
+// precision, so a corrupt payload would compare equal to a valid total
+// even when the cents don't actually match. BigInt eliminates that path.
 export function validateCustomAmounts(
   splits: readonly SplitRow[],
   totalCents: number,
 ): void {
-  let sum = 0
+  let sum = 0n
   for (const s of splits) {
     if (s.amountCents === null) {
       throw new SplitInvariantError('mixed_split_fields', { userId: s.userId })
@@ -100,11 +106,11 @@ export function validateCustomAmounts(
     if (s.amountCents < 0) {
       throw new SplitInvariantError('negative_amount', { userId: s.userId })
     }
-    sum += s.amountCents
+    sum += BigInt(s.amountCents)
   }
-  if (sum !== totalCents) {
+  if (sum !== BigInt(totalCents)) {
     throw new SplitInvariantError('by_amount_sum_mismatch', {
-      sum,
+      sum: Number(sum),
       totalCents,
     })
   }
@@ -137,23 +143,35 @@ export function largestRemainder(total: number, weights: readonly number[]): num
     throw new SplitInvariantError('by_share_all_zero', { weights: [...weights] })
   }
 
-  // Floor allocation + remainders.
+  // Floor allocation + remainders (BigInt math — audit E3 #18).
+  // The product `total * weights[i]` can overflow Number.MAX_SAFE_INTEGER
+  // for totals > ~$90M with max share weights (1_000_000), corrupting the
+  // fractional remainder used for largest-remainder tie-breaking. BigInt
+  // makes the multiplication exact; the floor + leftover counts fit back
+  // in Number because each individual cents value is bounded by `total`
+  // (capped at MAX_SAFE_INTEGER by the per-field validator).
+  const totalBig = BigInt(total)
+  const weightSumBig = BigInt(weightSum)
   const floors = new Array<number>(weights.length).fill(0)
-  const remainders = new Array<{ idx: number; rem: number }>(weights.length)
+  // `rem` is the EXACT integer numerator of the remainder (denominator
+  // is weightSumBig for every row, so we can compare numerators directly).
+  const remainders = new Array<{ idx: number; rem: bigint }>(weights.length)
   let assigned = 0
   for (let i = 0; i < weights.length; i++) {
-    const raw = (total * weights[i]!) / weightSum
-    const floor = Math.floor(raw)
-    floors[i] = floor
-    remainders[i] = { idx: i, rem: raw - floor }
-    assigned += floor
+    const product = totalBig * BigInt(weights[i]!)
+    const floor = product / weightSumBig // BigInt division floors toward zero (operands non-negative)
+    const rem = product - floor * weightSumBig
+    const floorN = Number(floor)
+    floors[i] = floorN
+    remainders[i] = { idx: i, rem }
+    assigned += floorN
   }
   let leftover = total - assigned
 
   // Distribute the leftover pennies: largest fractional remainder
-  // first, ties broken by lower index.
+  // first (BigInt comparison — exact), ties broken by lower index.
   remainders.sort((a, b) => {
-    if (b.rem !== a.rem) return b.rem - a.rem
+    if (a.rem !== b.rem) return a.rem < b.rem ? 1 : -1
     return a.idx - b.idx
   })
   for (let i = 0; i < remainders.length && leftover > 0; i++) {

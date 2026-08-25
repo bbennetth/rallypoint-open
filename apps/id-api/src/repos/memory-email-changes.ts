@@ -1,6 +1,6 @@
 import type { UserId } from '@rallypoint/shared'
 import type { EmailChangeRecord, EmailChangeRepo } from './email-change.js'
-import { UniqueConstraintError } from './memory.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 
 export class InMemoryEmailChangeRepo implements EmailChangeRepo {
   private readonly byTokenHash = new Map<string, EmailChangeRecord>()

@@ -11,11 +11,19 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@rallypoint/ai": "*",
+    "@rallypoint/api-kit": "*",
     "@rallypoint/crypto": "*",
+    "@rallypoint/events-api": "*",
     "@rallypoint/events-client": "*",
     "@rallypoint/events-shared": "*",
+    "@rallypoint/fitness-api": "*",
+    "@rallypoint/fitness-client": "*",
+    "@rallypoint/id-api": "*",
     "@rallypoint/id-client": "*",
+    "@rallypoint/lists-api": "*",
     "@rallypoint/lists-client": "*",
+    "@rallypoint/lists-rpc-client": "*",
     "@rallypoint/lists-shared": "*",
     "@rallypoint/logger": "*",
     "@rallypoint/planner-db": "*",
@@ -23,7 +31,7 @@
     "@rallypoint/shared": "*",
     "@rallypoint/web-push": "*",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.6.0",
+    "hono": "^4.13.3",
     "ulid": "^2.3.0",
     "zod": "^3.23.0"
   },

@@ -20,6 +20,9 @@ function serializeSettlement(s: SettlementRecord): Record<string, unknown> {
     settled_at: s.settledAt,
     created_by: s.createdBy,
     created_at: s.createdAt.toISOString(),
+    // Audit E2 #7: echo the idempotency key back so clients can
+    // confirm their ref landed on the persisted row.
+    ref: s.ref,
   }
 }
 
@@ -58,6 +61,15 @@ export const settlementsRoutes = new Hono<HonoApp>()
     }
 
     const userId = c.var.session!.userId
+    // Idempotency check (audit E2 #7): when the client supplies `ref`,
+    // a prior POST with the same (ledgerId, ref) tuple short-circuits
+    // here and returns the existing settlement — same 201 + body shape
+    // as the original create — so a retried request after a network
+    // timeout doesn't duplicate the payment.
+    if (body.ref) {
+      const existing = await c.var.repos.settlements.findByRef(ledger.id, body.ref)
+      if (existing) return c.json(serializeSettlement(existing), 201)
+    }
     const settlement = await c.var.repos.settlements.create({
       id: `stl_${ulid()}`,
       ledgerId: ledger.id,
@@ -67,6 +79,7 @@ export const settlementsRoutes = new Hono<HonoApp>()
       note: body.note ?? null,
       settledAt: body.settledAt,
       createdBy: userId,
+      ref: body.ref ?? null,
     })
     await recordActivity(c, ledger.id, 'settlement.recorded', {
       settlement_id: settlement.id,

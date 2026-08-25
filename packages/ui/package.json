@@ -19,7 +19,7 @@
   },
   "peerDependencies": {
     "react": ">=18",
-    "react-router-dom": ">=6"
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
     "@testing-library/react": "^16.1.0",

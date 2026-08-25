@@ -10,6 +10,7 @@ function makeFakeClient(overrides: Partial<ListsClient> = {}): ListsClient {
     health: vi.fn(),
     listLists: vi.fn().mockResolvedValue([]),
     listItems: vi.fn().mockResolvedValue([]),
+    getItem: vi.fn().mockResolvedValue(null),
     listFieldDefs: vi.fn(),
     listStatuses: vi.fn().mockResolvedValue([]),
     listLabels: vi.fn(),

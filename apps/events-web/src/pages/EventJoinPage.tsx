@@ -59,10 +59,11 @@ export function EventJoinPage() {
 
         {error && (
           <div
-            className="p-3 text-sm text-white/80"
+            className="p-3 text-sm"
             style={{
-              border: '1.5px solid var(--hot)',
-              background: 'color-mix(in srgb, var(--hot) 12%, transparent)',
+              background: 'var(--hot-soft)',
+              color: 'var(--hot-text)',
+              borderRadius: 'var(--radius-lg)',
             }}
           >
             {error}

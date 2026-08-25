@@ -9,7 +9,7 @@ import {
 } from '@rallypoint/events-shared'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
-import type { CreateSessionInput, SessionRecord } from '../repos/types.js'
+import type { CreateSessionInput, MemberRole, SessionRecord } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
 import { loadForAction, recordActivity } from './_access.js'
 import { assertFeatureEnabled } from './_features.js'
@@ -61,6 +61,47 @@ async function loadSession(
     throw errors.notFound('Session not found.')
   }
   return session
+}
+
+// Read-visibility gate for a session (epic #675 — sessions had NO read
+// enforcement, so any attendee could list every draft/restricted session).
+// Staff (owner/editor) see everything, incl. the pending/rejected queue.
+// A plain attendee sees only APPROVED sessions, and then only those whose
+// visibility admits them:
+//   admin   → staff only (never an attendee)
+//   private → the creator only
+//   custom  → the explicit shared_with set
+//   group   → any event participant when group_id is null (the default,
+//             event-wide); when group_id is set, only that subgroup's members
+// `groupCache` dedupes the per-group membership lookup across a list.
+async function canViewerSeeSession(
+  c: Context<HonoApp>,
+  session: SessionRecord,
+  role: MemberRole,
+  groupCache: Map<string, boolean>,
+): Promise<boolean> {
+  if (role === 'owner' || role === 'editor') return true
+  if (session.approvalStatus !== 'approved') return false
+  const userId = c.var.session!.userId
+  switch (session.visibility) {
+    case 'private':
+      return session.createdByUserId === userId
+    case 'custom':
+      return (session.sharedWith ?? []).includes(userId)
+    case 'group': {
+      // Event-wide (no subgroup) → any participant with viewer access.
+      if (!session.groupId) return true
+      const cached = groupCache.get(session.groupId)
+      if (cached !== undefined) return cached
+      const member = await c.var.repos.groupMembers.findByGroupAndUser(session.groupId, userId)
+      const ok = member !== null
+      groupCache.set(session.groupId, ok)
+      return ok
+    }
+    default:
+      // 'admin' and any unknown value → staff-only (fail closed).
+      return false
+  }
 }
 
 // Reject a dayId that doesn't belong to this event (the FK only proves
@@ -130,7 +171,12 @@ export const sessionsRoutes = new Hono<HonoApp>()
         : {}),
       ...(dayId ? { dayId } : {}),
     })
-    return c.json({ items: items.map(serializeSession) })
+    const groupCache = new Map<string, boolean>()
+    const visible: SessionRecord[] = []
+    for (const s of items) {
+      if (await canViewerSeeSession(c, s, role, groupCache)) visible.push(s)
+    }
+    return c.json({ items: visible.map(serializeSession) })
   })
   .post('/api/v1/ui/events/:id/sessions', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'editor')
@@ -178,6 +224,10 @@ export const sessionsRoutes = new Hono<HonoApp>()
     const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
     assertFeatureEnabled(event, role, 'sessions')
     const session = await loadSession(c, event.id, c.req.param('sessionId'))
+    // Don't leak a restricted / unapproved session's existence to an attendee.
+    if (!(await canViewerSeeSession(c, session, role, new Map()))) {
+      throw errors.notFound('Session not found.')
+    }
     return c.json(serializeSession(session))
   })
   .patch('/api/v1/ui/events/:id/sessions/:sessionId', async (c) => {
@@ -189,7 +239,19 @@ export const sessionsRoutes = new Hono<HonoApp>()
     if (parsed.data.dayId !== undefined) await assertDayInEvent(c, event.id, parsed.data.dayId)
     if (parsed.data.stageId !== undefined) await assertStageInEvent(c, event.id, parsed.data.stageId)
     if (parsed.data.groupId !== undefined) await assertGroupInEvent(c, event.id, parsed.data.groupId)
-    const updated = await c.var.repos.eventSessions.patch(session.id, parsed.data)
+    let updated = await c.var.repos.eventSessions.patch(session.id, parsed.data)
+    // A non-owner editing an already-approved session voids the approval:
+    // the content the owner signed off on (title/visibility/sharedWith/…)
+    // just changed, so it must re-enter the queue rather than stay approved
+    // with unreviewed content. Owner edits keep their own approval.
+    if (role !== 'owner' && session.approvalStatus === 'approved') {
+      updated = await c.var.repos.eventSessions.setApproval(session.id, {
+        status: 'pending',
+        approvedByUserId: null,
+        approvedAt: null,
+        submittedByUserId: c.var.session!.userId,
+      })
+    }
     await recordActivity(c, event.id, 'event.session_updated', { session_id: session.id })
     return c.json(serializeSession(updated!))
   })
@@ -312,8 +374,20 @@ export const sessionsRoutes = new Hono<HonoApp>()
     // Capture a pre-apply version before any destructive op (updates or
     // deletes overwrite/remove existing rows). Pure-create applies lose
     // nothing, so they don't snapshot (#191 Phase 2).
+    // Snapshot is best-effort history — a failure here must NOT abort the
+    // bulk write, which is the primary user-visible operation. Log + continue.
     if ((body.updates ?? []).length > 0 || (body.deletes ?? []).length > 0) {
-      await captureSnapshot(c, event.id, 'sessions', 'before bulk sessions edit', userId)
+      try {
+        await captureSnapshot(c.var.repos, event.id, 'sessions', 'before bulk sessions edit', userId)
+      } catch (snapshotErr: unknown) {
+        c.var.logger.warn(
+          {
+            err: snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr),
+            event_id: event.id,
+          },
+          'sessions bulk: snapshot failed (non-fatal); continuing with apply',
+        )
+      }
     }
 
     const { created, updated } = await c.var.repos.eventSessions.bulkApply({

@@ -1,6 +1,10 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { hashToken } from '@rallypoint/crypto'
+import {
+  isAllowedPushEndpoint,
+  PUSH_ENDPOINT_INVALID_MESSAGE,
+} from '@rallypoint/web-push'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
@@ -15,21 +19,47 @@ import { deliverToUser } from '../lib/notifications.js'
 // browser endpoint upserts in place. Session-gated + CSRF-fronted like every
 // other /api/v1/ui/* route; the subject is always the session user.
 
+// SSRF guard: `endpoint` is fetched server-side by every cron tick, so it
+// MUST be locked down to the known push services. `z.string().url()` alone
+// accepts any http(s) host (including internal CF metadata addresses and
+// look-alike domains), so we wrap it with isAllowedPushEndpoint — HTTPS-only
+// + curated host suffix allowlist (FCM / Apple / Mozilla). See
+// packages/web-push/src/endpoint-validator.ts for the canonical list.
+const endpointField = z
+  .string()
+  .url()
+  .refine((v) => isAllowedPushEndpoint(v), {
+    message: PUSH_ENDPOINT_INVALID_MESSAGE,
+  })
+
 // The shape of a browser PushSubscription.toJSON(): endpoint + the p256dh/auth
 // keys. expirationTime is ignored (always null in practice).
-const SubscriptionSchema = z.object({
-  endpoint: z.string().url(),
+// Exported so the SSRF guard wiring can be asserted from a unit test without
+// spinning up the whole Hono app (see push-schema.test.ts).
+export const SubscriptionSchema = z.object({
+  endpoint: endpointField,
   keys: z.object({
     p256dh: z.string().min(1),
     auth: z.string().min(1),
   }),
 })
 
-const UnsubscribeSchema = z.object({
-  endpoint: z.string().url(),
+export const UnsubscribeSchema = z.object({
+  endpoint: endpointField,
 })
 
 export const pushRoutes = new Hono<HonoApp>()
+  // Public — no session/CSRF (outside /api/v1/ui/*, like /api/v1/health).
+  // The VAPID public key is not a secret; it's the applicationServerKey the
+  // browser subscribes with. Served at runtime instead of baked into the web
+  // build so planner-web always subscribes with the keypair THIS deploy's
+  // worker actually signs with (qa and prod hold different keypairs; see
+  // scripts/check-vapid-isolation.sh). Stable per deploy, so cacheable.
+  .get('/api/v1/push/public-key', (c) => {
+    c.header('Cache-Control', 'public, max-age=300')
+    return c.json({ publicKey: c.var.env.VAPID_PUBLIC_KEY })
+  })
+
   // Register (or refresh) a push subscription for the session user.
   .post('/api/v1/ui/push/subscription', requireSession(), async (c) => {
     const userId = c.var.session!.userId
@@ -62,7 +92,11 @@ export const pushRoutes = new Hono<HonoApp>()
 
   // Send a test notification to the session user's registered devices right
   // now (bypassing the scheduled queue) so they can confirm push works.
-  // Returns { subscriptions, sent, reaped } so the UI can report the outcome.
+  // Returns only a minimal summary — the raw deliverToUser() result
+  // (subscriptions/sent/reaped counts) leaks the user's registered device
+  // count to the client, which isn't needed for the UI's confirmation toast.
+  // `registered` is a boolean (any devices at all?) so the UI can tell
+  // "turn notifications on first" apart from "sends failed" without a count.
   .post('/api/v1/ui/push/test', requireSession(), async (c) => {
     const userId = c.var.session!.userId
     const payload = JSON.stringify({
@@ -77,5 +111,9 @@ export const pushRoutes = new Hono<HonoApp>()
       payload,
       new Date(),
     )
-    return c.json(result)
+    return c.json({
+      ok: true,
+      registered: result.subscriptions > 0,
+      delivered: result.sent > 0,
+    })
   })

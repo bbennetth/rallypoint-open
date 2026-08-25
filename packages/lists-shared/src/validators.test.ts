@@ -159,6 +159,33 @@ describe('CreateListItemSchema', () => {
   it('rejects an invalid priority string even with nullable', () => {
     expect(CreateListItemSchema.safeParse({ title: 'A', priority: 'bad' }).success).toBe(false)
   })
+
+  // Idempotency-key field (offline create-retry dedup, mirrors money-shared's
+  // expenseRefField).
+  it('accepts a 40-char tmp_<uuid> ref', () => {
+    const ref = `tmp_${'a1b2c3d4-e5f6-47a8-89b0-c1d2e3f4a5b6'}`
+    expect(ref).toHaveLength(40)
+    const parsed = CreateListItemSchema.parse({ title: 'A', ref })
+    expect(parsed.ref).toBe(ref)
+  })
+
+  it('rejects a ref over 256 characters', () => {
+    expect(
+      CreateListItemSchema.safeParse({ title: 'A', ref: 'x'.repeat(257) }).success,
+    ).toBe(false)
+  })
+
+  it('rejects an empty-string ref', () => {
+    expect(CreateListItemSchema.safeParse({ title: 'A', ref: '   ' }).success).toBe(false)
+  })
+
+  it('omits ref when not supplied (unconstrained create)', () => {
+    expect(CreateListItemSchema.parse({ title: 'A' }).ref).toBeUndefined()
+  })
+
+  it('passes an explicit null ref through unchanged', () => {
+    expect(CreateListItemSchema.parse({ title: 'A', ref: null }).ref).toBeNull()
+  })
 })
 
 describe('UpdateListItemSchema', () => {

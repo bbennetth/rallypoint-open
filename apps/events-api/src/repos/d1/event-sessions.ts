@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { eventSessions } from '@rallypoint/events-db'
+import { chunkForBoundParams } from '@rallypoint/api-kit'
 import type {
   BulkApplySessionsInput,
   BulkApplySessionsResult,
@@ -266,12 +267,14 @@ export class D1EventSessionRepo implements EventSessionRepo {
           .onConflictDoUpdate({ target: eventSessions.id, set }),
       )
     }
-    if (toDelete.length > 0) {
+    // Chunked so the delete-delta stays under D1's bound-param cap (an event
+    // can carry >100 active sessions); the chunks stay inside the one batch.
+    for (const chunk of chunkForBoundParams(toDelete, 1, 3)) {
       stmts.push(
         this.db
           .update(eventSessions)
           .set({ deletedAt: when, updatedAt: when })
-          .where(and(eq(eventSessions.eventId, eventId), inArray(eventSessions.id, toDelete))),
+          .where(and(eq(eventSessions.eventId, eventId), inArray(eventSessions.id, chunk))),
       )
     }
 

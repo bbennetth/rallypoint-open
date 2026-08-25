@@ -9,6 +9,7 @@ import type { HonoApp } from '../context.js'
 import type { Repos } from '../repos/types.js'
 import type { Services } from '../services/types.js'
 import { makeNoopMoneyClient, makeNoopListsClient, makeStubObjectStore } from './_test-services.js'
+import type { RealtimeBus, RealtimeEnvelope, Subscription } from '@rallypoint/realtime'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
 import { encryptBearer } from '../crypto/encryption.js'
 import { EVENTS_SESSION_BEARER_PREFIX } from '../middleware/session.js'
@@ -21,10 +22,30 @@ import { EVENTS_SESSION_BEARER_PREFIX } from '../middleware/session.js'
 
 const CSRF = 'csrf_token_value_aaaaaaaaaaaaaaaaaaaaaaaaaa'
 
+// Recording bus captures publish() so we can assert the pointer envelopes
+// rally mutations fan onto the group channel (mirrors maps.d1.test.ts).
+interface RecordingBus extends RealtimeBus {
+  published: { channel: string; env: RealtimeEnvelope }[]
+}
+function makeRecordingBus(): RecordingBus {
+  const published: { channel: string; env: RealtimeEnvelope }[] = []
+  return {
+    published,
+    async publish(channel, env) {
+      published.push({ channel, env })
+    },
+    subscribe(): Subscription {
+      return { unsubscribe() {} }
+    },
+    async close() {},
+  }
+}
+
 describe('D1 integration — rallies + attendees', () => {
   let repos: Repos
   let envVars: Env
   let app: Hono<HonoApp>
+  const bus = makeRecordingBus()
 
   const services: Services = {
     idClient: {
@@ -49,7 +70,7 @@ describe('D1 integration — rallies + attendees', () => {
   beforeAll(() => {
     repos = buildD1Repos(createDb(env.DB))
     envVars = parseEnv({ NODE_ENV: 'test', LOG_LEVEL: 'fatal' })
-    app = buildApp({ env: envVars, logger: undefined, repos, services })
+    app = buildApp({ env: envVars, logger: undefined, repos, services, realtime: bus })
   })
 
 
@@ -80,6 +101,7 @@ describe('D1 integration — rallies + attendees', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -222,7 +244,7 @@ describe('D1 integration — rallies + attendees', () => {
     )
   })
 
-  it('enforces the sidekick write gate; members can read but not write', async () => {
+  it('lets any member create; patch/delete stay sidekick-gated', async () => {
     const owner = `user_${Date.now()}_gate`
     const member = `${owner}_member`
     const ownerBearer = await loginAs(owner)
@@ -234,20 +256,113 @@ describe('D1 integration — rallies + attendees', () => {
     // Member can list.
     expect((await req(memberBearer, 'GET', `/api/v1/ui/groups/${group.id}/rallies`)).status).toBe(200)
 
-    // Member cannot create (needs sidekick+).
-    const forbidden = await req(memberBearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
-      title: 'Nope',
+    // Member can create (relaxed from sidekick+ with the attendee Map tab).
+    const created = await req(memberBearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
+      title: 'Member rally',
     })
-    expect(forbidden.status).toBe(403)
+    expect(created.status).toBe(201)
+    const rally = (await created.json()) as { id: string }
 
-    // Promote to sidekick → now allowed.
+    // Patch and delete still need sidekick+.
+    const patchForbidden = await req(
+      memberBearer,
+      'PATCH',
+      `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`,
+      { status: 'cancelled' },
+    )
+    expect(patchForbidden.status).toBe(403)
+    const deleteForbidden = await req(
+      memberBearer,
+      'DELETE',
+      `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`,
+    )
+    expect(deleteForbidden.status).toBe(403)
+
+    // Promote to sidekick → patch allowed.
     await req(ownerBearer, 'POST', `/api/v1/ui/groups/${group.id}/members/${member}/role`, {
       role: 'sidekick',
     })
-    const allowed = await req(memberBearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
-      title: 'Now yes',
+    const patched = await req(
+      memberBearer,
+      'PATCH',
+      `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`,
+      { status: 'active' },
+    )
+    expect(patched.status).toBe(200)
+  })
+
+  it('round-trips a map pin and rejects a partial pin', async () => {
+    const owner = `user_${Date.now()}_pin`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Rally Pin Event')
+    const group = await createGroup(bearer, eventId, 'Pinned')
+
+    const created = await req(bearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
+      title: 'Meet at the oak',
+      pinLayer: 'site',
+      pinXPct: 42.5,
+      pinYPct: 61,
     })
-    expect(allowed.status).toBe(201)
+    expect(created.status).toBe(201)
+    const rally = (await created.json()) as {
+      id: string
+      pin: { layer: string; x_pct: number; y_pct: number } | null
+    }
+    expect(rally.pin).toEqual({ layer: 'site', x_pct: 42.5, y_pct: 61 })
+
+    // List echoes the pin.
+    const list = await req(bearer, 'GET', `/api/v1/ui/groups/${group.id}/rallies`)
+    const items = ((await list.json()) as { items: { id: string; pin: unknown }[] }).items
+    expect(items.find((r) => r.id === rally.id)?.pin).toEqual({
+      layer: 'site',
+      x_pct: 42.5,
+      y_pct: 61,
+    })
+
+    // A partial pin 400s.
+    const half = await req(bearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
+      title: 'Half pin',
+      pinLayer: 'site',
+      pinXPct: 10,
+    })
+    expect(half.status).toBe(400)
+
+    // Patch can clear the whole pin (all three nulls).
+    const cleared = await req(bearer, 'PATCH', `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`, {
+      pinLayer: null,
+      pinXPct: null,
+      pinYPct: null,
+    })
+    expect(cleared.status).toBe(200)
+    expect(((await cleared.json()) as { pin: unknown }).pin).toBeNull()
+  })
+
+  it('publishes group-channel envelopes on create / rsvp / patch / delete', async () => {
+    const owner = `user_${Date.now()}_pub`
+    const bearer = await loginAs(owner)
+    const eventId = await createEvent(bearer, 'Rally Pub Event')
+    const group = await createGroup(bearer, eventId, 'Publishers')
+    bus.published.length = 0
+
+    const created = await req(bearer, 'POST', `/api/v1/ui/groups/${group.id}/rallies`, {
+      title: 'Pub rally',
+    })
+    const rally = (await created.json()) as { id: string }
+    await req(bearer, 'PUT', `/api/v1/ui/groups/${group.id}/rallies/${rally.id}/rsvp`, {
+      status: 'going',
+    })
+    await req(bearer, 'PATCH', `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`, {
+      status: 'active',
+    })
+    await req(bearer, 'DELETE', `/api/v1/ui/groups/${group.id}/rallies/${rally.id}`)
+
+    const rallyEnvs = bus.published.filter((p) => p.env.resource === 'rallies')
+    expect(rallyEnvs.map((p) => p.env.operation)).toEqual(['create', 'update', 'update', 'delete'])
+    for (const p of rallyEnvs) {
+      expect(p.channel).toContain(group.id)
+      expect(p.env.authorId).toBe(owner)
+      expect(p.env.payload.id).toBe(rally.id)
+    }
   })
 
   it('404s rallies for a non-member (no existence leak)', async () => {

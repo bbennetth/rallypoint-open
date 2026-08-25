@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { AuthCard } from '../ui/AuthCard.js'
 import { Banner } from '@rallypoint/ui'
 import { buildLoginRequiredUrl, clearStaleSsoHint, isTrustedReturnTo } from '../lib/sso-authorize.js'
+import { useAsyncTask } from '@rallypoint/web-kit'
 
 // SSO authorize page — slice 2a (Rallypoint Events #87).
 //
@@ -79,14 +80,13 @@ function buildRedirectUrl(returnTo: string, code: string, state: string): string
 export function SsoAuthorizePage() {
   const [searchParams] = useSearchParams()
   const [phase, setPhase] = useState<Phase>({ kind: 'checking-params' })
+  const run = useAsyncTask()
 
   // currentUrl for signin redirect (capture once on mount).
   const currentUrl = window.location.href
 
   useEffect(() => {
-    let cancelled = false
-
-    async function run() {
+    void run(async (ctx) => {
       // Step 1: validate params.
       const parsed = parseParams(searchParams)
       if (!parsed.ok) {
@@ -104,8 +104,8 @@ export function SsoAuthorizePage() {
           headers: { Accept: 'application/json' },
         })
       } catch {
-        if (!cancelled)
-          setPhase({ kind: 'error', code: 'network_error', message: 'Network error.' })
+        if (ctx.stale()) return
+        setPhase({ kind: 'error', code: 'network_error', message: 'Network error.' })
         return
       }
 
@@ -134,12 +134,12 @@ export function SsoAuthorizePage() {
       }
 
       if (!sessionRes.ok) {
-        if (!cancelled)
-          setPhase({
-            kind: 'error',
-            code: 'session_check_failed',
-            message: 'Could not verify your session.',
-          })
+        if (ctx.stale()) return
+        setPhase({
+          kind: 'error',
+          code: 'session_check_failed',
+          message: 'Could not verify your session.',
+        })
         return
       }
 
@@ -160,17 +160,16 @@ export function SsoAuthorizePage() {
         csrfToken = csrfBody?.csrfToken ?? null
         if (!csrfToken) throw new Error('csrf body missing csrfToken')
       } catch {
-        if (!cancelled) {
-          setPhase({
-            kind: 'error',
-            code: 'csrf_fetch_failed',
-            message: 'Could not initialize the request. Please reload and try again.',
-          })
-        }
+        if (ctx.stale()) return
+        setPhase({
+          kind: 'error',
+          code: 'csrf_fetch_failed',
+          message: 'Could not initialize the request. Please reload and try again.',
+        })
         return
       }
 
-      if (cancelled) return
+      if (ctx.stale()) return
       setPhase({ kind: 'minting' })
 
       // Step 4: mint the SSO code. csrfToken is guaranteed non-null
@@ -190,17 +189,18 @@ export function SsoAuthorizePage() {
           body: JSON.stringify({ client, return_to_host: returnToHost }),
         })
       } catch {
-        if (!cancelled)
-          setPhase({ kind: 'error', code: 'network_error', message: 'Network error.' })
+        if (ctx.stale()) return
+        setPhase({ kind: 'error', code: 'network_error', message: 'Network error.' })
         return
       }
 
-      if (cancelled) return
+      if (ctx.stale()) return
 
       if (!mintRes.ok) {
         const errBody = (await mintRes.json().catch(() => null)) as {
           error?: { code?: string; message?: string }
         } | null
+        if (ctx.stale()) return
         setPhase({
           kind: 'error',
           code: errBody?.error?.code ?? 'unexpected_error',
@@ -210,6 +210,7 @@ export function SsoAuthorizePage() {
       }
 
       const mintBody = (await mintRes.json()) as { code?: string }
+      if (ctx.stale()) return
       if (!mintBody.code) {
         setPhase({
           kind: 'error',
@@ -222,14 +223,10 @@ export function SsoAuthorizePage() {
       // Step 5: redirect back to the app.
       setPhase({ kind: 'redirecting' })
       window.location.replace(buildRedirectUrl(returnTo, mintBody.code, state))
-    }
-
-    void run()
-    return () => {
-      cancelled = true
-    }
+    })
     // searchParams identity is stable for the mount; currentUrl is captured once.
-  }, [])
+    // `run` is a stable identity from useAsyncTask.
+  }, [run])
 
   if (phase.kind === 'params-error') {
     return (

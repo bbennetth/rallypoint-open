@@ -1,0 +1,213 @@
+/* Rallypoint "Ink" — base reset + utility primitives.
+ *
+ * Ported from the Ink design-kit primitives layer: the brutalist button
+ * family (.btn-brutal / .btn-ghost / .btn-hot), chips, the cyber input +
+ * checkbox, progress bar, dividers, and type helpers. These resolve
+ * entirely off the color/typography tokens so they invert correctly in
+ * light mode and re-tint with the live accent.
+ *
+ * NOTE: app shells (apps/*-web) also import shell.css for `.pl-*` chrome
+ * (sidebar, tab-bar, FAB) — this file only carries the standalone
+ * primitives that any surface can drop in. */
+
+/* ─── TYPE HELPERS ─────────────────────────────────────────── */
+.display {
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-display);
+  line-height: var(--leading-display);
+}
+/* `.mono` is intentionally bodyless: kept so the ~45 existing
+   `className="mono"` call-sites compile and render at body font. Code /
+   ID / timestamp displays that genuinely need monospace use the
+   `font-mono` Tailwind utility instead. */
+.mono    {}
+
+/* `.eyebrow` and `.meta` are also defined in shell.css for the planner
+   sidebar context. Definitions here match the kit's primitives layer and
+   apply globally; shell.css uses the same values, so there is no drift. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-eyebrow);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-meta);
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+
+/* ─── CHIPS ────────────────────────────────────────────────── */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+  font-family: var(--font-body); font-size: var(--text-xs); font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.chip-solid {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 2px 8px; border-radius: var(--radius-sm);
+  background: var(--acid); color: var(--accent-ink);
+  font-family: var(--font-body); font-size: var(--text-xs); font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.chip-solid:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* NOTE: `.pl-chip` (and its `.accent` / `.repeat` / `.toggle` modifiers)
+   is owned by ../shell.css — the kit's planner sidebar context. Listing
+   it here too would create a same-value-but-cascade-shadowed duplicate
+   (shell.css wins via source order); future edits to one half would
+   silently fall out of sync. Use shell.css as the single source. */
+
+/* ─── BUTTONS ──────────────────────────────────────────────── */
+.btn-brutal {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--control-h-md);
+  padding: 10px 16px; background: var(--acid); color: var(--accent-ink);
+  font-family: var(--font-body); font-size: var(--text-md); font-weight: 600;
+  border: none; border-radius: var(--radius-md); cursor: pointer;
+  width: 100%;
+}
+.btn-brutal:hover { opacity: 0.9; }
+/* Shrink-to-content modifier — the base class defaults to width:100%
+   (auth-card CTAs rely on it); dialogs/toolbars that need an inline
+   button use `.fit` instead of undoing the width per-site. */
+.btn-brutal.fit { width: auto; }
+.btn-brutal:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-brutal:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--control-h-md);
+  padding: 10px 16px; background: transparent; color: var(--ink);
+  border: var(--border-width-thin) solid var(--line); border-radius: var(--radius-md);
+  font-family: var(--font-body); font-size: var(--text-md); font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+.btn-ghost:hover { background: var(--accent-soft); }
+.btn-ghost:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-hot {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--control-h-md);
+  padding: 10px 16px; background: var(--hot); color: #ffffff;
+  font-family: var(--font-body); font-size: var(--text-md); font-weight: 600;
+  border: none; border-radius: var(--radius-md); cursor: pointer;
+  width: 100%;
+}
+.btn-hot:hover { opacity: 0.9; }
+.btn-hot:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.btn-hot:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─── INPUTS ───────────────────────────────────────────────── */
+/* `--text-lg` (16px) is the iOS auto-zoom threshold — do not undercut it. */
+.cyber-input {
+  width: 100%;
+  background: var(--bg);
+  border: var(--border-width-thin) solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--text-lg);
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.cyber-input:focus { border-color: var(--acid); outline: 2px solid var(--focus-ring); outline-offset: -1px; }
+.cyber-input::placeholder { color: var(--ink-mute); }
+
+/* Used by checkbox inputs in events-web (MyEventsPage) to re-tint the
+   native check glyph + sharpen the box border. Keeps the native a11y
+   semantics (so screen readers + keyboard nav still work) — purely a
+   visual repaint to the Ink palette. */
+.cyber-checkbox {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--acid);
+  border-radius: var(--radius-sm);
+}
+
+.checkbox-field { display: grid; gap: 5px; }
+.checkbox-field__control { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; color: var(--ink); font-size: var(--text-md); line-height: 1.4; }
+.checkbox-field__control:has(input:disabled) { cursor: not-allowed; opacity: 0.55; }
+.checkbox-field__message,
+.image-picker__message { color: var(--ink-mute); font-size: var(--text-sm); line-height: 1.4; }
+.checkbox-field__message { padding-left: 25px; }
+.checkbox-field__message--error,
+.image-picker__message--error { color: var(--hot); }
+
+/* ─── IMAGE PICKER ─────────────────────────────────────────── */
+.image-picker { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 7px; }
+.image-picker__label { padding: 0; color: var(--ink); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.image-picker__surface { position: relative; overflow: hidden; min-height: 112px; border: var(--border-width-thin) dashed var(--line); border-radius: var(--radius-md); background: var(--surface); display: grid; place-items: center; }
+.image-picker--idle .image-picker__surface { border-color: var(--acid); background: var(--accent-soft-2); }
+.image-picker--working .image-picker__surface,
+.image-picker--success .image-picker__surface { border-style: solid; }
+.image-picker--error .image-picker__surface { border-color: var(--hot); }
+.image-picker__preview { width: 100%; height: 100%; position: absolute; inset: 0; object-fit: cover; }
+.image-picker__placeholder { color: var(--acid); }
+.image-picker__state { position: absolute; left: 8px; bottom: 8px; z-index: 1; display: inline-flex; align-items: center; gap: 6px; padding: 3px 7px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bg) 84%, transparent); color: var(--ink); font-family: var(--font-mono); font-size: var(--text-xs); }
+.image-picker__spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--acid); border-radius: 999px; animation: image-picker-spin .7s linear infinite; }
+@keyframes image-picker-spin { to { transform: rotate(360deg); } }
+.image-picker__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.image-picker__actions .btn-ghost { flex: 1 1 auto; padding: 8px 10px; font-size: var(--text-sm); }
+/* Card = compact row: a small square thumb beside the buttons, and NO box
+   at all until there's a photo to put in it. The old full-width 112px
+   surface spent a third of a sheet on an empty dashed rectangle. The tile
+   variant below keeps its big preview — there the photo IS the content. */
+.image-picker--card.image-picker--empty .image-picker__surface { display: none; }
+.image-picker--card:not(.image-picker--empty) {
+  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-areas: "label label" "thumb actions" "message message";
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
+}
+.image-picker--card:not(.image-picker--empty) .image-picker__label { grid-area: label; }
+.image-picker--card:not(.image-picker--empty) .image-picker__surface {
+  grid-area: thumb;
+  min-height: 0;
+  width: 56px;
+  height: 56px;
+}
+.image-picker--card:not(.image-picker--empty) .image-picker__actions { grid-area: actions; }
+.image-picker--card:not(.image-picker--empty) .image-picker__message { grid-area: message; }
+/* No room for the badge text beside a 56px thumb — the overlay keeps only
+   the spinner. The words are hidden with the clip-rect recipe rather than
+   font-size: 0, which a browser/OS minimum-font-size override would undo
+   and pop the text back into the thumb. */
+.image-picker--card .image-picker__state {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border-radius: inherit;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  gap: 0;
+}
+/* The card variant hides the words by putting `sr-only` on the text span
+   in the component — same clip-rect recipe, one definition. */
+.image-picker--card.image-picker--working .image-picker__state {
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.image-picker--tile .image-picker__surface { min-height: 0; aspect-ratio: 3 / 4; }
+.image-picker--tile .image-picker__state { left: 5px; right: 5px; bottom: 5px; justify-content: center; }
+.image-picker--tile .image-picker__actions { display: grid; grid-template-columns: 1fr 1fr; }
+.image-picker--tile .image-picker__actions .btn-ghost { min-width: 0; padding: 6px 4px; font-size: var(--text-xs); }
+.image-picker--tile .image-picker__actions .btn-ghost:last-child:nth-child(3) { grid-column: 1 / -1; }
+.image-picker:disabled { opacity: 0.7; }
+
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+
+/* ─── PROGRESS / DIVIDER ───────────────────────────────────── */
+.progress { height: 4px; background: var(--surface-2); border-radius: var(--radius-round); position: relative; overflow: hidden; }
+.progress > div { position: absolute; inset: 0; background: var(--accent); border-radius: var(--radius-round); transform-origin: left; }
+.divider { height: 1px; background: var(--line); }

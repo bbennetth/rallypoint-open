@@ -1,43 +1,12 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import {
-  ApiError,
-  deleteList,
-  getList,
-  listFieldDefs,
-  listGroupMembers,
-  listGroups,
-  listItems,
-  listLabels,
-  listLists,
-  listStatuses,
-  restoreItem,
-  updateItem,
-  type FieldDefDto,
-  type GroupMemberDto,
-  type LabelDto,
-  type ListDto,
-  type ListItemDto,
-  type ListStatusDto,
-} from '../lib/api.js'
-import { getDb } from '../lib/offline/db.js'
-import {
-  readListSnapshot,
-  readPendingOps,
-  writeListSnapshot,
-} from '../lib/offline/cache-accessors.js'
-import { applyOpToItems, applyOpsToItems } from '../lib/offline/outbox-reducers.js'
-import { newTempId, type OutboxOp } from '../lib/offline/outbox-ops.js'
-import { enqueueItemOp } from '../lib/offline/engine.js'
-import { subscribeRefresh } from '../lib/offline/refresh-bus.js'
+import { ApiError, type FieldDefDto, type ListItemDto } from '../lib/api.js'
 import { TaskBoard } from '../components/TaskBoard.js'
 import { ShareDrawer } from '../components/ShareDrawer.js'
 import { FieldManagerDrawer } from '../components/FieldManagerDrawer.js'
 import { StatusManagerDrawer } from '../components/StatusManagerDrawer.js'
 import { ItemCommentsDrawer } from '../components/ItemCommentsDrawer.js'
 import { LabelManagerDrawer } from '../components/LabelManagerDrawer.js'
-import { LabelChips } from '../components/LabelChips.js'
-import { CustomFieldsEditor } from '../components/CustomFieldsEditor.js'
 import {
   FilterSortBar,
   type FilterableField,
@@ -46,18 +15,20 @@ import {
 import { ViewSwitcher } from '../components/ViewSwitcher.js'
 import { BulkToolbar } from '../components/BulkToolbar.js'
 import { GridView } from '../components/GridView.js'
+import { ItemRow } from '../components/ItemRow.js'
+import { AddSubItemRow } from '../components/AddSubItemRow.js'
+import { ListDetailHeader } from '../components/ListDetailHeader.js'
+import { ListAddItemForm } from '../components/ListAddItemForm.js'
+import { ListUndoBar } from '../components/ListUndoBar.js'
 import { resolveQueryField, type ViewMode } from '@rallypoint/lists-shared'
-import { missingRequiredFieldIds } from '../lib/field-form.js'
-import { shouldRefetch, subscribeListStream } from '../lib/realtime.js'
 import { useSelection } from '../lib/selection.js'
-import { groupItemsByStatus } from '../lib/board.js'
-import { applyBoardDrop, planBoardDrop, reindexPatches, type DropTarget } from '../lib/board-dnd.js'
 import {
   buildItemTree,
   flattenVisible,
-  progressPercent,
   type ItemTreeNode,
 } from '../lib/hierarchy-view.js'
+import { useListLoad } from '../lib/use-list-load.js'
+import { useListItemMutations } from '../lib/use-list-item-mutations.js'
 
 // Built-in columns offered in the filter/sort bar on a standard list.
 // Task-only columns (status/priority/due_date) and ordering hints
@@ -101,31 +72,9 @@ function buildFilterableFields(fieldDefs: FieldDefDto[]): FilterableField[] {
 // renders this flat checklist (one type covers packing/shopping/meals
 // with the generic item fields — no per-purpose columns).
 
-type LoadState =
-  | { status: 'loading' }
-  | {
-      status: 'ready'
-      list: ListDto
-      items: ListItemDto[]
-      fieldDefs: FieldDefDto[]
-      // Custom kanban statuses — only fetched for `tasks` lists (the board
-      // surface); empty for standard lists, which key off `completed`.
-      statuses: ListStatusDto[]
-      // Per-list labels (RPL v1.0.0 S12) — any list type may carry labels.
-      labels: LabelDto[]
-      // True when the list lives in a Planner-provisioned group — the UI
-      // surface serves it read-only (#531), so mutating affordances hide.
-      readOnly: boolean
-    }
-  | { status: 'error'; error: ApiError | Error }
-
 export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
   const { listId } = useParams<{ listId: string }>()
   const navigate = useNavigate()
-  const [state, setState] = useState<LoadState>({ status: 'loading' })
-  const [members, setMembers] = useState<GroupMemberDto[]>([])
-  // Other lists in the same scope, offered as move targets on task cards.
-  const [moveTargets, setMoveTargets] = useState<ListDto[]>([])
   const [newTitle, setNewTitle] = useState('')
   // Draft custom-field values for the item being added (fieldId → wire
   // value); cleared after a successful add. A null from a control clears
@@ -146,9 +95,6 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
   const [labelsOpen, setLabelsOpen] = useState(false)
   // Filter/sort applied server-side via the items query (Lists v2 slice 4).
   const [query, setQuery] = useState<FilterSortValue>({ filters: [], sort: [] })
-  // Bumped on a realtime list_views envelope to reload the saved-view list
-  // (slice 5). The view set lives in ViewSwitcher's own state.
-  const [viewsReloadKey, setViewsReloadKey] = useState(0)
   // Row selection for bulk actions, shared across checklist / grid / board
   // (slice 6 + RPL v1.0.0 S6). The bulk toolbar appears while non-empty;
   // cleared on list change / refetch.
@@ -164,116 +110,45 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
   // The item whose comments thread is open (RPL v1.0.0 S7 UI), or null.
   const [commentsItem, setCommentsItem] = useState<{ id: string; title: string } | null>(null)
 
-  // `silent` skips the loading flash — used by realtime refetches so a
-  // collaborator's edit doesn't blank the page out from under the viewer.
-  async function load(opts: { silent?: boolean } = {}) {
-    if (!listId) return
-    if (!opts.silent) setState({ status: 'loading' })
-    try {
-      const [list, page, defs, labelPage] = await Promise.all([
-        getList(listId),
-        listItems(listId, query),
-        listFieldDefs(listId),
-        listLabels(listId),
-      ])
-      // Statuses back the kanban board only; fetching also lazy-seeds the
-      // defaults server-side, so don't touch them on a standard list. The
-      // board can't render without them, so let a failure bubble to the
-      // outer catch (page error state) rather than silently show no columns.
-      const statuses: ListStatusDto[] =
-        list.list_type === 'tasks' ? (await listStatuses(listId)).items : []
-      // Planner-origin groups are read-only on this surface (#531). The
-      // group lookup is best-effort: on failure the page renders writable
-      // and the server's 403 still backstops every mutation.
-      let readOnly = false
-      if (list.scope_type === 'list_group') {
-        try {
-          const groups = await listGroups()
-          readOnly = groups.items.find((g) => g.id === list.scope_id)?.origin === 'planner'
-        } catch {
-          readOnly = false
-        }
-      }
-      // Write the whole page through to the offline cache, then fold any
-      // still-pending outbox ops over the server truth so a just-made
-      // optimistic edit isn't clobbered by this refetch.
-      const db = getDb(selfUserId)
-      void writeListSnapshot(db, listId, {
-        list,
-        items: page.items,
-        fieldDefs: defs.items,
-        labels: labelPage.items,
-        statuses,
-        readOnly,
-      })
-      const pending = await readPendingOps(db, listId)
-      setState({
-        status: 'ready',
-        list,
-        items: applyOpsToItems(page.items, pending, selfUserId),
-        fieldDefs: defs.items,
-        statuses,
-        labels: labelPage.items,
-        readOnly,
-      })
-      // Group-scoped lists can assign items to a member; group scopes
-      // defer to the Events group roster (not wired in this slice).
-      if (list.scope_type === 'list_group') {
-        try {
-          setMembers((await listGroupMembers(list.scope_id)).items)
-        } catch {
-          setMembers([])
-        }
-      } else {
-        setMembers([])
-      }
-      // Move targets only matter on the task board; load the sibling
-      // task lists in this scope (drop the current one and any non-task
-      // list — a kanban task only moves between task lists).
-      if (list.list_type === 'tasks') {
-        try {
-          const page = await listLists({ scopeType: list.scope_type, scopeId: list.scope_id })
-          setMoveTargets(
-            page.items.filter((l) => l.id !== list.id && l.list_type === 'tasks'),
-          )
-        } catch {
-          setMoveTargets([])
-        }
-      } else {
-        setMoveTargets([])
-      }
-    } catch (err) {
-      // Offline: rehydrate the page from the cached snapshot (folding pending
-      // ops on top) instead of a hard error. Only when actually offline — an
-      // online failure (e.g. 404 deleted list) should still surface.
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        const db = getDb(selfUserId)
-        const snap = await readListSnapshot(db, listId)
-        if (snap) {
-          const pending = await readPendingOps(db, listId)
-          setState({
-            status: 'ready',
-            list: snap.list,
-            items: applyOpsToItems(snap.items, pending, selfUserId),
-            fieldDefs: snap.fieldDefs,
-            statuses: snap.statuses,
-            labels: snap.labels,
-            readOnly: snap.readOnly,
-          })
-          return
-        }
-      }
-      setState({ status: 'error', error: err instanceof Error ? err : new Error(String(err)) })
-    }
-  }
+  const { state, setState, members, moveTargets, viewsReloadKey, load, queryKey } = useListLoad(
+    listId,
+    selfUserId,
+    query,
+  )
 
-  // Refetch on list change and whenever the filter/sort query changes.
-  // The query is keyed by its encoded form so the effect only re-runs on
-  // an actual spec change, not on every render.
-  const queryKey = useMemo(() => JSON.stringify(query), [query])
-  useEffect(() => {
-    void load()
-  }, [listId, queryKey])
+  const {
+    reportError,
+    handleDeleteList,
+    handleAdd,
+    setNewCustomField,
+    patch,
+    handleDelete,
+    handleUndo,
+    handleReorder,
+    move,
+    handleAddSubItem,
+  } = useListItemMutations({
+    listId,
+    selfUserId,
+    state,
+    setState,
+    navigate,
+    load,
+    newTitle,
+    setNewTitle,
+    newCustomFields,
+    setNewCustomFields,
+    adding,
+    setAdding,
+    setAddResetKey,
+    setActionError,
+    lastDeleted,
+    setLastDeleted,
+    addingSub,
+    setAddingSub,
+    setAddSubParent,
+    setCollapsed,
+  })
 
   // Drop any stale selection / nesting UI state when the list or filter
   // changes — those ids may no longer be in view.
@@ -283,189 +158,6 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
     setAddSubParent(null)
   }, [listId, queryKey])
 
-  // Live updates: refetch (silently) when another client changes an item
-  // on this list. loadRef keeps the subscription stable across renders
-  // while always calling the freshest load.
-  const loadRef = useRef(load)
-  loadRef.current = load
-  useEffect(() => {
-    if (!listId) return undefined
-    return subscribeListStream(listId, {
-      onEvent: (env) => {
-        if (!shouldRefetch(env, selfUserId)) return
-        if (env.resource === 'list_views') setViewsReloadKey((k) => k + 1)
-        else void loadRef.current({ silent: true })
-      },
-      onReconnect: () => {
-        // A view add/rename/delete may have been missed while the
-        // connection was down — reload the switcher too, not just items.
-        setViewsReloadKey((k) => k + 1)
-        void loadRef.current({ silent: true })
-      },
-    })
-  }, [listId, selfUserId])
-
-  // The outbox flusher publishes on this bus after it drains (e.g. an offline
-  // create just flushed and got its real id) — refetch silently to reconcile.
-  useEffect(() => subscribeRefresh(() => void loadRef.current({ silent: true })), [])
-
-  function reportError(err: unknown) {
-    setActionError(err instanceof ApiError ? `${err.code}: ${err.message}` : 'Action failed.')
-  }
-
-  // Apply an item op optimistically to the in-memory list so the UI updates
-  // instantly, then persist it to the outbox (which flushes when online). The
-  // optimistic apply mirrors what `load()` will reconstruct from cache+pending,
-  // so an offline reload shows the same state.
-  function applyOptimistic(op: OutboxOp) {
-    setState((prev) =>
-      prev.status === 'ready' ? { ...prev, items: applyOpToItems(prev.items, op, selfUserId) } : prev,
-    )
-  }
-
-  async function runItemOp(op: OutboxOp) {
-    if (!listId) return
-    setActionError(null)
-    applyOptimistic(op)
-    try {
-      await enqueueItemOp(selfUserId, op)
-    } catch (err) {
-      // Persisting to IndexedDB failed (quota / private mode) — fall back to a
-      // resync so the UI doesn't drift from a change we couldn't queue.
-      reportError(err)
-      void load({ silent: true })
-    }
-  }
-
-  async function handleDeleteList() {
-    if (!listId) return
-    const listName = state.status === 'ready' ? state.list.name : 'this list'
-    if (!window.confirm(`Delete "${listName}"? This cannot be undone.`)) return
-    setActionError(null)
-    try {
-      await deleteList(listId)
-      navigate('/me/lists')
-    } catch (err) {
-      reportError(err)
-    }
-  }
-
-  async function handleAdd(e: React.FormEvent) {
-    e.preventDefault()
-    if (!listId || adding || newTitle.trim().length === 0) return
-    // Mirror the Add button's gate: don't submit (and trigger a server 400)
-    // when a required custom field is unset, e.g. on Enter in the title.
-    const fieldDefs = state.status === 'ready' ? state.fieldDefs : []
-    if (missingRequiredFieldIds(fieldDefs, newCustomFields).length > 0) return
-    setAdding(true)
-    const customFields = Object.keys(newCustomFields).length > 0 ? newCustomFields : undefined
-    try {
-      await runItemOp({
-        type: 'item:create',
-        listId,
-        tmpId: newTempId(),
-        input: { title: newTitle, ...(customFields ? { customFields } : {}) },
-      })
-      setNewTitle('')
-      setNewCustomFields({})
-      setAddResetKey((k) => k + 1)
-    } finally {
-      setAdding(false)
-    }
-  }
-
-  function setNewCustomField(fieldId: string, value: unknown | null) {
-    setNewCustomFields((prev) => {
-      const next = { ...prev }
-      if (value === null) delete next[fieldId]
-      else next[fieldId] = value
-      return next
-    })
-  }
-
-  // Item edits go through the outbox: optimistic apply + queued PATCH that
-  // flushes on reconnect. The legacy `silent` option is moot now (no reload),
-  // kept in the signature so the many call sites don't need touching.
-  async function patch(
-    itemId: string,
-    fields: Parameters<typeof updateItem>[2],
-    _opts: { silent?: boolean } = {},
-  ) {
-    if (!listId) return
-    await runItemOp({ type: 'item:update', listId, itemId, patch: fields })
-  }
-
-  async function handleDelete(itemId: string) {
-    if (!listId) return
-    setLastDeleted(itemId)
-    await runItemOp({ type: 'item:delete', listId, itemId })
-  }
-
-  async function handleUndo() {
-    if (!listId || !lastDeleted) return
-    setActionError(null)
-    try {
-      await restoreItem(listId, lastDeleted)
-      setLastDeleted(null)
-      await load()
-    } catch (err) {
-      reportError(err)
-    }
-  }
-
-
-  // Kanban drag-drop (S3): move `activeId` onto a card or column. Plan the
-  // move purely (lib/board-dnd), apply it optimistically, then persist the
-  // status change + the target column's position reindex. The PATCHes are
-  // self-authored, so the realtime echo is skipped; a silent reload
-  // reconciles to server truth (and a failure restores it loudly).
-  async function handleReorder(activeId: string, target: DropTarget) {
-    if (!listId || state.status !== 'ready') return
-    const cols = groupItemsByStatus(state.items, state.statuses).map((c) => ({
-      statusId: c.status.id,
-      itemIds: c.items.map((i) => i.id),
-    }))
-    const plan = planBoardDrop(cols, activeId, target)
-    if (!plan) return
-
-    const ready = state
-    setState({ ...ready, items: applyBoardDrop(ready.items, plan) })
-    setActionError(null)
-    try {
-      await Promise.all(
-        reindexPatches(plan).map((p) =>
-          updateItem(listId, p.id, {
-            position: p.position,
-            ...(p.id === plan.itemId && plan.statusChanged ? { statusId: plan.toStatusId } : {}),
-          }),
-        ),
-      )
-      await load({ silent: true })
-    } catch (err) {
-      reportError(err)
-      await load()
-    }
-  }
-
-  // Move an item up/down by swapping position values with its neighbour.
-  // Appended items hold distinct positions (0,1,2,…), so the swap keeps
-  // the ordering well-defined.
-  async function move(items: ListItemDto[], index: number, dir: -1 | 1) {
-    const other = items[index + dir]
-    const cur = items[index]
-    if (!other || !cur || !listId) return
-    setActionError(null)
-    try {
-      await Promise.all([
-        updateItem(listId, cur.id, { position: other.position }),
-        updateItem(listId, other.id, { position: cur.position }),
-      ])
-      await load()
-    } catch (err) {
-      reportError(err)
-    }
-  }
-
   function toggleCollapse(itemId: string) {
     setCollapsed((prev) => {
       const next = new Set(prev)
@@ -473,31 +165,6 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
       else next.add(itemId)
       return next
     })
-  }
-
-  // Add a sub-item under `parentId` from the inline affordance. The
-  // in-flight guard stops a fast double-Enter from creating two children.
-  async function handleAddSubItem(parentId: string, title: string) {
-    if (!listId || addingSub || title.trim().length === 0) return
-    setAddingSub(true)
-    try {
-      await runItemOp({
-        type: 'item:create',
-        listId,
-        tmpId: newTempId(),
-        input: { title: title.trim(), parentId },
-      })
-      setAddSubParent(null)
-      // Make sure the new child is visible.
-      setCollapsed((prev) => {
-        if (!prev.has(parentId)) return prev
-        const next = new Set(prev)
-        next.delete(parentId)
-        return next
-      })
-    } finally {
-      setAddingSub(false)
-    }
   }
 
   // The item ids currently visible in the active view — all items in the
@@ -621,85 +288,16 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
 
         {state.status === 'ready' && (
           <>
-            <header className="flex items-start justify-between gap-3 flex-wrap">
-              <div>
-                <p className="text-xs capitalize" style={{ color: 'var(--ink-dim)' }}>
-                  {state.list.list_type} · {state.list.visibility}
-                </p>
-                <h1 className="display text-2xl mt-1">{state.list.name}</h1>
-              </div>
-              <div className="flex items-center gap-2">
-                {state.readOnly && (
-                  <span className="chip" style={{ color: 'var(--ink-dim)' }}>
-                    Planner · read-only
-                  </span>
-                )}
-                {/* Statuses button — board columns; creator-only on a
-                    tasks list (the API enforces the same). */}
-                {!state.readOnly &&
-                  state.list.list_type === 'tasks' &&
-                  state.list.created_by === selfUserId && (
-                    <button
-                      type="button"
-                      onClick={() => setStatusesOpen(true)}
-                      className="btn-ghost"
-                      style={{ width: 'auto' }}
-                    >
-                      Statuses
-                    </button>
-                  )}
-                {/* Labels button — creator-only (the API enforces the
-                    same); labels apply to any list type. */}
-                {!state.readOnly && state.list.created_by === selfUserId && (
-                  <button
-                    type="button"
-                    onClick={() => setLabelsOpen(true)}
-                    className="btn-ghost"
-                    style={{ width: 'auto' }}
-                  >
-                    Labels
-                  </button>
-                )}
-                {/* Fields button — only the list creator can define
-                    custom columns (the API enforces the same). */}
-                {!state.readOnly && state.list.created_by === selfUserId && (
-                  <button
-                    type="button"
-                    onClick={() => setFieldsOpen(true)}
-                    className="btn-ghost"
-                    style={{ width: 'auto' }}
-                  >
-                    Fields
-                  </button>
-                )}
-                {/* Share button — only the creator of a 'private' list
-                    can mint share invites. 'all' lists are scope-wide
-                    already; no separate sharing surface. */}
-                {!state.readOnly &&
-                  state.list.visibility === 'private' &&
-                  state.list.created_by === selfUserId && (
-                    <button
-                      type="button"
-                      onClick={() => setShareOpen(true)}
-                      className="btn-ghost"
-                      style={{ width: 'auto' }}
-                    >
-                      Share
-                    </button>
-                  )}
-                {/* Delete list — creator-only; the API enforces the same. */}
-                {!state.readOnly && state.list.created_by === selfUserId && (
-                  <button
-                    type="button"
-                    onClick={() => void handleDeleteList()}
-                    className="btn-ghost"
-                    style={{ width: 'auto', color: 'var(--hot)', borderColor: 'var(--hot)' }}
-                  >
-                    Delete list
-                  </button>
-                )}
-              </div>
-            </header>
+            <ListDetailHeader
+              list={state.list}
+              readOnly={state.readOnly}
+              selfUserId={selfUserId}
+              onStatusesOpen={() => setStatusesOpen(true)}
+              onLabelsOpen={() => setLabelsOpen(true)}
+              onFieldsOpen={() => setFieldsOpen(true)}
+              onShareOpen={() => setShareOpen(true)}
+              onDeleteList={() => void handleDeleteList()}
+            />
 
             {state.readOnly && (
               <div
@@ -716,68 +314,25 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
             )}
 
             {!state.readOnly && (
-            <form
+            <ListAddItemForm
+              isBoard={isBoard}
               onSubmit={(e) => void handleAdd(e)}
-              className="space-y-3"
-              style={isBoard ? { maxWidth: '640px' } : undefined}
-            >
-              <div className="flex items-end gap-3">
-                <label className="flex-1 text-sm text-[color:var(--ink-dim)]">
-                  Add an item
-                  <input
-                    value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
-                    placeholder="e.g. Bring the tent"
-                    className="cyber-input mt-1"
-                  />
-                </label>
-                <button
-                  type="submit"
-                  disabled={
-                    adding ||
-                    newTitle.trim().length === 0 ||
-                    missingRequiredFieldIds(state.fieldDefs, newCustomFields).length > 0
-                  }
-                  className="btn-brutal"
-                  style={{ width: 'auto' }}
-                >
-                  {adding ? 'Adding…' : 'Add'}
-                </button>
-              </div>
-              {state.fieldDefs.length > 0 && (
-                <CustomFieldsEditor
-                  key={addResetKey}
-                  defs={state.fieldDefs}
-                  values={newCustomFields}
-                  members={members}
-                  onChange={setNewCustomField}
-                />
-              )}
-            </form>
+              newTitle={newTitle}
+              onTitleChange={setNewTitle}
+              adding={adding}
+              fieldDefs={state.fieldDefs}
+              newCustomFields={newCustomFields}
+              addResetKey={addResetKey}
+              members={members}
+              onCustomFieldChange={setNewCustomField}
+            />
             )}
 
-            {actionError && (
-              <p className="text-sm" style={{ color: 'var(--hot)' }}>
-                {actionError}
-              </p>
-            )}
-
-            {lastDeleted && (
-              <div
-                className="flex items-center justify-between gap-3 px-4 py-2 text-sm text-[color:var(--ink)]"
-                style={{ border: '1.5px solid var(--line)', background: 'var(--surface)' }}
-              >
-                <span>Item deleted.</span>
-                <button
-                  type="button"
-                  onClick={() => void handleUndo()}
-                  className="underline"
-                  style={{ color: 'var(--ink-dim)' }}
-                >
-                  Undo
-                </button>
-              </div>
-            )}
+            <ListUndoBar
+              actionError={actionError}
+              lastDeleted={lastDeleted}
+              onUndo={() => void handleUndo()}
+            />
 
             {state.list.list_type !== 'tasks' && (
               <div className="space-y-2">
@@ -834,6 +389,7 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                       void load({ silent: true })
                     }}
                     onError={reportError}
+                    onNotice={(msg) => setActionError(msg)}
                     onClear={() => selection.clear()}
                   />
                 )}
@@ -885,6 +441,7 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
                       void load({ silent: true })
                     }}
                     onError={reportError}
+                    onNotice={(msg) => setActionError(msg)}
                     onClear={() => selection.clear()}
                   />
                 )}
@@ -1014,309 +571,5 @@ export function ListDetailPage({ selfUserId }: { selfUserId: string }) {
         </>
       )}
     </main>
-  )
-}
-
-interface ItemRowProps {
-  item: ListItemDto
-  depth: number
-  hasChildren: boolean
-  collapsed: boolean
-  onToggleCollapse: () => void
-  onAddSubItem: () => void
-  onComments: () => void
-  labels: LabelDto[]
-  onSetLabels: (labelIds: string[]) => void
-  members: GroupMemberDto[]
-  fieldDefs: FieldDefDto[]
-  selected: boolean
-  onSelect: (on: boolean) => void
-  // Shift-click on the select box — extend the selection to this row.
-  onRangeSelect: () => void
-  canMoveUp: boolean
-  canMoveDown: boolean
-  onToggle: (completed: boolean) => void
-  onRename: (title: string) => void
-  onAssign: (assignedTo: string) => void
-  onSetCustomField: (fieldId: string, value: unknown | null) => void
-  onDelete: () => void
-  onMoveUp: () => void
-  onMoveDown: () => void
-}
-
-function ItemRow({
-  item,
-  depth,
-  hasChildren,
-  collapsed,
-  onToggleCollapse,
-  onAddSubItem,
-  onComments,
-  labels,
-  onSetLabels,
-  members,
-  fieldDefs,
-  selected,
-  onSelect,
-  onRangeSelect,
-  canMoveUp,
-  canMoveDown,
-  onToggle,
-  onRename,
-  onAssign,
-  onSetCustomField,
-  onDelete,
-  onMoveUp,
-  onMoveDown,
-}: ItemRowProps) {
-  const [title, setTitle] = useState(item.title)
-
-  // Re-sync when the server returns a normalized title (the row stays
-  // mounted across reloads because the key is item.id).
-  useEffect(() => {
-    setTitle(item.title)
-  }, [item.title])
-
-  function commitTitle() {
-    const next = title.trim()
-    if (next.length > 0 && next !== item.title) onRename(next)
-    else setTitle(item.title)
-  }
-
-  const childTotal = item.child_count ?? 0
-  const childDone = item.child_done_count ?? 0
-
-  return (
-    <li
-      className="space-y-2 px-3 py-2"
-      style={{
-        border: '1.5px solid var(--line)',
-        background: 'var(--surface)',
-        marginLeft: depth * 20,
-      }}
-    >
-      <div className="flex items-center gap-3">
-      {/* Collapse caret (parents only); a fixed-width spacer keeps leaf
-          rows aligned with their parent's controls. */}
-      {hasChildren ? (
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          aria-label={collapsed ? 'Expand sub-items' : 'Collapse sub-items'}
-          aria-expanded={!collapsed}
-          className="w-4 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
-        >
-          {collapsed ? '▸' : '▾'}
-        </button>
-      ) : (
-        <span aria-hidden className="w-4" />
-      )}
-      <input
-        type="checkbox"
-        checked={selected}
-        onClick={(e) => {
-          // Shift-click selects the range from the anchor; let a plain click
-          // fall through to onChange for the normal toggle.
-          if (e.shiftKey) {
-            e.preventDefault()
-            onRangeSelect()
-          }
-        }}
-        onChange={(e) => onSelect(e.target.checked)}
-        className="h-4 w-4"
-        style={{ accentColor: 'var(--hot)' }}
-        title="Select for bulk actions (shift-click for a range)"
-        aria-label={selected ? 'Deselect item' : 'Select item'}
-      />
-      {/* Divider so the bulk-select box reads as separate from the
-          adjacent (green) complete box, which they otherwise look like. */}
-      <span aria-hidden style={{ alignSelf: 'stretch', borderLeft: '1px solid var(--line)' }} />
-      <input
-        type="checkbox"
-        checked={item.completed}
-        onChange={(e) => onToggle(e.target.checked)}
-        className="h-4 w-4"
-        style={{ accentColor: 'var(--acid)' }}
-        title={item.completed ? 'Mark incomplete' : 'Mark complete'}
-        aria-label={item.completed ? 'Mark incomplete' : 'Mark complete'}
-      />
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        onBlur={commitTitle}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        }}
-        className={`flex-1 bg-transparent text-sm focus:outline-none ${
-          item.completed ? 'line-through text-[color:var(--ink-mute)]' : ''
-        }`}
-      />
-
-      <select
-        value={item.assigned_to ?? ''}
-        onChange={(e) => onAssign(e.target.value)}
-        className="cyber-input"
-        style={{ width: 'auto', padding: '4px 8px' }}
-        aria-label="Assignee"
-      >
-        <option value="">Unassigned</option>
-        {/* Keep the current assignee selectable even if they're not in
-            the member list (e.g. a group-scoped list). */}
-        {item.assigned_to && !members.some((m) => m.user_id === item.assigned_to) && (
-          <option value={item.assigned_to}>{item.assigned_to}</option>
-        )}
-        {members.map((m) => (
-          <option key={m.id} value={m.user_id}>
-            {m.user_id}
-          </option>
-        ))}
-      </select>
-
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onClick={onComments}
-          aria-label="Comments"
-          title="Comments"
-          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
-        >
-          💬
-        </button>
-        <button
-          type="button"
-          onClick={onAddSubItem}
-          aria-label="Add sub-item"
-          title="Add sub-item"
-          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)]"
-        >
-          + sub
-        </button>
-        <button
-          type="button"
-          onClick={onMoveUp}
-          disabled={!canMoveUp}
-          aria-label="Move up"
-          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)] disabled:opacity-30"
-        >
-          ↑
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDown}
-          disabled={!canMoveDown}
-          aria-label="Move down"
-          className="rounded px-1.5 py-0.5 text-[color:var(--ink-dim)] hover:text-[color:var(--ink)] disabled:opacity-30"
-        >
-          ↓
-        </button>
-        <button
-          type="button"
-          onClick={onDelete}
-          aria-label="Delete item"
-          className="rounded px-1.5 py-0.5"
-          style={{ color: 'var(--hot)' }}
-        >
-          ✕
-        </button>
-      </div>
-      </div>
-
-      <div className="pl-8">
-        <LabelChips labelIds={item.label_ids} labels={labels} onSetLabels={onSetLabels} />
-      </div>
-
-      {childTotal > 0 && (
-        <div className="flex items-center gap-2 pl-8 text-xs" style={{ color: 'var(--ink-dim)' }}>
-          <div
-            className="h-1.5 flex-1 overflow-hidden rounded-full"
-            style={{ background: 'var(--surface-2)' }}
-            role="progressbar"
-            aria-valuenow={progressPercent(childDone, childTotal)}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label="Sub-item progress"
-          >
-            <div
-              className="h-full rounded-full"
-              style={{
-                width: `${progressPercent(childDone, childTotal)}%`,
-                background: 'var(--acid)',
-              }}
-            />
-          </div>
-          <span className="shrink-0 tabular-nums">
-            {childDone}/{childTotal}
-          </span>
-        </div>
-      )}
-
-      {fieldDefs.length > 0 && (
-        <div className="pl-8">
-          <CustomFieldsEditor
-            defs={fieldDefs}
-            values={item.custom_fields}
-            members={members}
-            onChange={onSetCustomField}
-          />
-        </div>
-      )}
-    </li>
-  )
-}
-
-// Inline add-sub-item input, opened under a parent row. Indented to match
-// its parent's children; Enter or the Add button creates, Esc or ✕ cancels.
-function AddSubItemRow({
-  depth,
-  submitting,
-  onCancel,
-  onSubmit,
-}: {
-  depth: number
-  submitting: boolean
-  onCancel: () => void
-  onSubmit: (title: string) => void
-}) {
-  const [title, setTitle] = useState('')
-  return (
-    <li
-      className="flex items-center gap-2 px-3 py-2"
-      style={{
-        border: '1.5px dashed var(--line)',
-        background: 'var(--surface)',
-        marginLeft: depth * 20,
-      }}
-    >
-      <input
-        autoFocus
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && title.trim().length > 0) onSubmit(title)
-          else if (e.key === 'Escape') onCancel()
-        }}
-        placeholder="Sub-item title…"
-        className="cyber-input flex-1"
-        style={{ padding: '4px 8px' }}
-      />
-      <button
-        type="button"
-        onClick={() => title.trim().length > 0 && onSubmit(title)}
-        disabled={title.trim().length === 0 || submitting}
-        className="btn-ghost"
-        style={{ width: 'auto' }}
-      >
-        Add
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        aria-label="Cancel"
-        className="rounded px-1.5 py-0.5"
-        style={{ color: 'var(--ink-dim)' }}
-      >
-        ✕
-      </button>
-    </li>
   )
 }

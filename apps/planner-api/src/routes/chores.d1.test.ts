@@ -75,6 +75,15 @@ function makeFakeLists(): { client: ListsClient } {
     listLists: async (scope) =>
       lists.filter((l) => l.scopeType === scope.scopeType && l.scopeId === scope.scopeId),
     listItems: async (listId) => items.filter((i) => i.listId === listId),
+    listItemsPage: async (listId, _actor, page) => {
+      const all = items
+        .filter((i) => i.listId === listId)
+        .sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
+      const start = page?.cursor ? all.findIndex((i) => i.id === page.cursor) + 1 : 0
+      const slice = all.slice(start, start + (page?.limit ?? 100))
+      const hasMore = start + (page?.limit ?? 100) < all.length
+      return { items: slice, nextCursor: hasMore && slice.length ? slice[slice.length - 1]!.id : null }
+    },
     createList: async (input, actor) => {
       if (input.scopeType === 'list_group' && !ownsGroup(actor, input.scopeId)) {
         throw new ListsClientError(404, 'not_found', 'List group not found.')
@@ -95,7 +104,7 @@ function makeFakeLists(): { client: ListsClient } {
       lists.push(l)
       return l
     },
-    createListItem: async (listId, input, actor) => {
+    createListItem: vi.fn(async (listId, input, actor) => {
       const list = listOf(listId)
       if (!list || (list.scopeType === 'list_group' && !ownsGroup(actor, list.scopeId))) {
         throw new ListsClientError(404, 'not_found', 'List not found.')
@@ -121,7 +130,7 @@ function makeFakeLists(): { client: ListsClient } {
       }
       items.push(it)
       return it
-    },
+    }),
     updateListItem: async (listId, itemId, patch, _actor) => {
       const it = items.find((x) => x.id === itemId && x.listId === listId)
       if (!it) throw new ListsClientError(404, 'item_not_found', 'Item not found.')
@@ -148,7 +157,7 @@ function makeFakeLists(): { client: ListsClient } {
     updateFieldDef: async () => { throw new Error('not stubbed') },
     deleteFieldDef: async () => {},
     listSeries: async (listId) => series.filter((s) => s.listId === listId),
-    createListItemSeries: async (listId, input, actor) => {
+    createListItemSeries: vi.fn(async (listId, input, actor) => {
       const list = listOf(listId)
       if (!list) throw new ListsClientError(404, 'not_found', 'List not found.')
       const s: ListItemSeriesDto = {
@@ -205,7 +214,7 @@ function makeFakeLists(): { client: ListsClient } {
         })
       }
       return s
-    },
+    }),
     updateSeries: async (seriesId, patch, _actor) => {
       const s = series.find((x) => x.id === seriesId)
       if (!s) throw new ListsClientError(404, 'not_found', 'Series not found.')
@@ -226,6 +235,7 @@ function makeFakeEvents(): { client: EventsClient } {
   const client = {
     listPersonalEvents: async () => [],
     listUserEvents: async () => [],
+    listPlannerGroupEvents: async () => [],
   } as unknown as EventsClient
   return { client }
 }
@@ -234,6 +244,7 @@ describe('D1 integration — Planner Chores BFF', () => {
   let repos: Repos
   let env: Env
   let app: Hono<HonoApp>
+  let services: Services
 
   const baseServices = (): Services => ({
     idClient: {
@@ -252,7 +263,8 @@ describe('D1 integration — Planner Chores BFF', () => {
   })
 
   beforeEach(() => {
-    app = buildApp({ env, logger: undefined, repos, services: baseServices() })
+    services = baseServices()
+    app = buildApp({ env, logger: undefined, repos, services })
   })
 
   async function loginAs(userId: string): Promise<string> {
@@ -282,6 +294,7 @@ describe('D1 integration — Planner Chores BFF', () => {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: env.PLANNER_UI_ORIGIN,
     }
   }
 
@@ -337,6 +350,52 @@ describe('D1 integration — Planner Chores BFF', () => {
     expect(item.dueDate).toBe('2026-06-15T00:00:00.000Z')
   })
 
+  it('opt-in pagination: no params → array; ?limit → {items, next_cursor} (dues still resolved)', async () => {
+    const bearer = await loginAs('user_chore_pager')
+    const listId = ((await (await req(bearer, 'GET', '/api/v1/ui/chores/list')).json()) as Record<
+      string,
+      unknown
+    >).id as string
+    for (const t of ['a', 'b', 'c']) {
+      await req(bearer, 'POST', `/api/v1/ui/chores/${listId}/items`, { title: t })
+    }
+
+    // No params → legacy array.
+    const arr = (await (
+      await req(bearer, 'GET', `/api/v1/ui/chores/${listId}/items?tz=UTC`)
+    ).json()) as unknown[]
+    expect(Array.isArray(arr)).toBe(true)
+    expect(arr).toHaveLength(3)
+
+    // ?limit → paged shape; walk to next_cursor: null.
+    const seen: string[] = []
+    let cursor: string | null = null
+    let guard = 0
+    do {
+      const path = `/api/v1/ui/chores/${listId}/items?tz=UTC&limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const body = (await (await req(bearer, 'GET', path)).json()) as {
+        items: Array<{ id: string }>
+        next_cursor: string | null
+      }
+      for (const it of body.items) seen.push(it.id)
+      cursor = body.next_cursor
+    } while (cursor && ++guard < 10)
+    expect(cursor).toBeNull()
+    expect(new Set(seen).size).toBe(3)
+  })
+
+  it('forwards a client-supplied ref (offline outbox idempotency key) on item create', async () => {
+    const bearer = await loginAs('user_chore_ref_item')
+    const listId = ((await (await req(bearer, 'GET', '/api/v1/ui/chores/list')).json()) as Record<string, unknown>).id as string
+    const itemRes = await req(bearer, 'POST', `/api/v1/ui/chores/${listId}/items`, {
+      title: 'Take out trash',
+      ref: 'tmp_chore_abc123',
+    })
+    expect(itemRes.status).toBe(201)
+    const createListItem = services.listsClient.createListItem as ReturnType<typeof vi.fn>
+    expect(createListItem.mock.calls[0]?.[1]).toMatchObject({ ref: 'tmp_chore_abc123' })
+  })
+
   it('can check off and delete a chores item', async () => {
     const bearer = await loginAs('user_chore_toggle')
     const listId = ((await (await req(bearer, 'GET', '/api/v1/ui/chores/list')).json()) as Record<string, unknown>).id as string
@@ -366,6 +425,22 @@ describe('D1 integration — Planner Chores BFF', () => {
     expect(items.length).toBeGreaterThan(0)
     expect(items.every((i) => i.seriesId !== null)).toBe(true)
     expect(items.every((i) => typeof i.dueDate === 'string')).toBe(true)
+  })
+
+  it('forwards a client-supplied ref (offline outbox idempotency key) on series create', async () => {
+    const bearer = await loginAs('user_chore_ref_series')
+    const listId = ((await (await req(bearer, 'GET', '/api/v1/ui/chores/list')).json()) as Record<string, unknown>).id as string
+    const seriesRes = await req(bearer, 'POST', `/api/v1/ui/chores/${listId}/series`, {
+      title: 'Water plants',
+      freq: 'weekly',
+      interval: 1,
+      byDay: ['MO'],
+      dtstart: '2026-06-08',
+      ref: 'tmp_series_abc123',
+    })
+    expect(seriesRes.status).toBe(201)
+    const createListItemSeries = services.listsClient.createListItemSeries as ReturnType<typeof vi.fn>
+    expect(createListItemSeries.mock.calls[0]?.[1]).toMatchObject({ ref: 'tmp_series_abc123' })
   })
 
   // The BFF is the SINGLE resolver of a recurring occurrence's floating local
@@ -520,7 +595,10 @@ describe('D1 integration — Planner Chores BFF', () => {
     expect(body).toContain('Feed cat')
   })
 
-  it('My Day EXCLUDES chores items when the toggle is off', async () => {
+  it('My Day INCLUDES today\'s chores even when the toggle is off (My Day bypasses it)', async () => {
+    // The showChoresInFeeds toggle only gates future-scope surfaces (Upcoming).
+    // My Day is scope 'today', which always renders the current day's chores
+    // regardless of the toggle — see lib/chores-feed.ts and routes/my-day.ts.
     const { app: a } = appWith({ get: async () => ({ showChoresInFeeds: false }) })
     const bearer = await loginAs('user_chore_myday_off')
     const listId = ((await (await reqOn(a, bearer, 'GET', '/api/v1/ui/chores/list')).json()) as Record<string, unknown>).id as string
@@ -531,6 +609,6 @@ describe('D1 integration — Planner Chores BFF', () => {
     const res = await reqOn(a, bearer, 'GET', '/api/v1/ui/my-day?date=2026-06-08&tz=UTC')
     expect(res.status).toBe(200)
     const body = JSON.stringify(await res.json())
-    expect(body).not.toContain('Feed cat')
+    expect(body).toContain('Feed cat')
   })
 })

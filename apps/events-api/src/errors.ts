@@ -1,78 +1,14 @@
-import type { ContentfulStatusCode } from 'hono/utils/http-status'
+import { ApiError, isApiError, coreErrors } from '@rallypoint/api-kit'
 
-// Domain-error class. Throwing one of these from any handler is
-// the supported way to surface a structured 4xx — the
-// error-handler middleware converts the throw into the standard
-// envelope (docs/design/error-shape.md, which both services share).
+export { ApiError, isApiError }
 
-export class ApiError extends Error {
-  readonly code: string
-  readonly status: ContentfulStatusCode
-  readonly details?: Record<string, unknown>
-
-  constructor(input: {
-    code: string
-    message: string
-    status: ContentfulStatusCode
-    details?: Record<string, unknown>
-  }) {
-    super(input.message)
-    this.code = input.code
-    this.status = input.status
-    if (input.details !== undefined) this.details = input.details
-    this.name = 'ApiError'
-  }
-}
-
-export function isApiError(err: unknown): err is ApiError {
-  return err instanceof ApiError
-}
-
-// Global convenience constructors mirroring the platform error
-// envelope. Slice 2 grows this with events-specific codes
-// (`event_not_found`, `event_slug_taken`, etc.) per
-// docs/design/events-v1.md §9.
+// Global/shared codes (validation, notFound, forbidden, csrfInvalid,
+// unauthorized, upstreamUnavailable, conflict, rateLimited, ...) come from
+// @rallypoint/api-kit's coreErrors. Events-specific codes live below
+// (docs/design/events-v1.md §9).
 
 export const errors = {
-  validation(details: Record<string, unknown>): ApiError {
-    return new ApiError({
-      code: 'validation_failed',
-      message: 'Request body failed validation.',
-      status: 400,
-      details,
-    })
-  },
-  bodyInvalid(): ApiError {
-    return new ApiError({
-      code: 'body_invalid',
-      message: 'Request body was not valid JSON.',
-      status: 400,
-    })
-  },
-  notFound(message = 'Resource not found.'): ApiError {
-    return new ApiError({ code: 'not_found', message, status: 404 })
-  },
-  forbidden(message = 'Forbidden.'): ApiError {
-    return new ApiError({ code: 'forbidden', message, status: 403 })
-  },
-  csrfInvalid(): ApiError {
-    return new ApiError({
-      code: 'csrf_token_invalid',
-      message: 'CSRF token missing or invalid.',
-      status: 403,
-    })
-  },
-  // Session bearer missing / unrecognised / revoked. The session
-  // middleware pairs this with a Set-Cookie that clears the cookie.
-  unauthorized(message = 'Authentication required.'): ApiError {
-    return new ApiError({ code: 'unauthorized', message, status: 401 })
-  },
-  // RPID was unreachable while verifying the replayed bearer. NOT a
-  // revocation — the session row is preserved so a transient RPID
-  // hiccup doesn't sign everyone out.
-  upstreamUnavailable(message = 'Authentication service unavailable.'): ApiError {
-    return new ApiError({ code: 'upstream_unavailable', message, status: 503 })
-  },
+  ...coreErrors,
   eventNotFound(): ApiError {
     return new ApiError({ code: 'event_not_found', message: 'Event not found.', status: 404 })
   },
@@ -83,8 +19,16 @@ export const errors = {
       status: 409,
     })
   },
-  conflict(code: string, message: string): ApiError {
-    return new ApiError({ code, message, status: 409 })
+  // A ref-idempotency replay matched a soft-deleted event. Return 409
+  // rather than resurrecting the tombstone (mirrors lists-api's
+  // item_ref_taken_by_deleted / money-api's expense_ref_taken_by_deleted).
+  eventRefTakenByDeleted(detail: Record<string, unknown>): ApiError {
+    return new ApiError({
+      code: 'event_ref_taken_by_deleted',
+      message: 'A tombstoned event already claims this ref.',
+      status: 409,
+      details: detail,
+    })
   },
   // --- map upload (slice 5, design §3.9/§9) ------------------------
   // Declared image too big — either byte length (field) or a decoded
@@ -105,10 +49,13 @@ export const errors = {
       details,
     })
   },
-  unsupportedImageType(): ApiError {
+  // `message` is overridable because not every image surface accepts the
+  // same set: app icons are PNG-only (iOS apple-touch-icon only renders
+  // PNG reliably), so the default map-oriented text would misinform.
+  unsupportedImageType(message = 'Image must be JPEG, PNG, or WebP.'): ApiError {
     return new ApiError({
       code: 'unsupported_image_type',
-      message: 'Image must be JPEG, PNG, or WebP.',
+      message,
       status: 400,
     })
   },
@@ -138,14 +85,5 @@ export const errors = {
   // --- rallies (slice 9b) ------------------------------------------
   rallyNotFound(): ApiError {
     return new ApiError({ code: 'rally_not_found', message: 'Rally not found.', status: 404 })
-  },
-  // --- rate limiting -----------------------------------------------
-  rateLimited(retryAfterSeconds: number, bucket: string): ApiError {
-    return new ApiError({
-      code: 'rate_limited',
-      message: 'Too many requests, try again later.',
-      status: 429,
-      details: { retry_after_seconds: retryAfterSeconds, bucket },
-    })
   },
 } as const

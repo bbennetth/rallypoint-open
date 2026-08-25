@@ -88,6 +88,22 @@ async function derive(
   return Buffer.from(await scryptAsync(peppered, salt, opts))
 }
 
+// Module-level cache for the dummy hash used by dummyVerify(), keyed
+// by (pepper key_version, pepper value). Previously this lived inside
+// the createPasswordHasher() closure, so every call site that built its
+// own hasher (each request handler that constructs one, plus every
+// test) paid a fresh ~32 MiB scrypt derivation the first time
+// dummyVerify() ran, even though the pepper/version — and therefore
+// the resulting hash — is identical across all of them within a
+// worker isolate. Hoisting to a shared cache means the expensive
+// derivation happens at most once per (version, pepper) pair per
+// isolate, not once per hasher instance.
+//
+// Cached as a Promise (not the resolved string) so concurrent first
+// callers within the same isolate share the in-flight derivation
+// instead of racing to compute it twice.
+const dummyHashCache = new Map<string, Promise<string>>()
+
 export function createPasswordHasher(config: PasswordHasherConfig): PasswordHasher {
   const currentKeyVersion = config.pepperVersion ?? 1
   const peppers: Record<number, string> = {
@@ -103,15 +119,27 @@ export function createPasswordHasher(config: PasswordHasherConfig): PasswordHash
   }
 
   // Precompute a dummy hash so dummyVerify() is constant-time on an
-  // attacker-controllable miss. Generated lazily on first call.
-  let dummyHash: string | null = null
-  async function ensureDummyHash(): Promise<string> {
-    if (dummyHash) return dummyHash
-    const peppered = pepper('rallypoint-dummy-password-not-a-real-secret', currentKeyVersion)
-    const salt = randomBytes(SALT_BYTES)
-    const dk = await derive(peppered, salt, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, dkLen: SCRYPT_DKLEN })
-    dummyHash = encodeHash(salt, dk)
-    return dummyHash
+  // attacker-controllable miss. Generated lazily on first call and
+  // shared across every hasher for this (version, pepper) pair via the
+  // module-level cache above.
+  function ensureDummyHash(): Promise<string> {
+    const cacheKey = `${currentKeyVersion}:${peppers[currentKeyVersion]}`
+    let cached = dummyHashCache.get(cacheKey)
+    if (!cached) {
+      cached = (async () => {
+        const peppered = pepper('rallypoint-dummy-password-not-a-real-secret', currentKeyVersion)
+        const salt = randomBytes(SALT_BYTES)
+        const dk = await derive(peppered, salt, {
+          N: SCRYPT_N,
+          r: SCRYPT_R,
+          p: SCRYPT_P,
+          dkLen: SCRYPT_DKLEN,
+        })
+        return encodeHash(salt, dk)
+      })()
+      dummyHashCache.set(cacheKey, cached)
+    }
+    return cached
   }
 
   return {

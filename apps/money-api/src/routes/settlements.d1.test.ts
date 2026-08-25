@@ -29,6 +29,9 @@ describe('D1 integration — settlements', () => {
     rpidSso: {
       exchange: async () => ({ ok: false as const, reason: 'invalid' as const }),
     },
+    profiles: {
+      lookup: async () => null,
+    },
     settings: {
       get: async () => ({}),
       patch: async (_u, _n, p) => p,
@@ -68,6 +71,9 @@ describe('D1 integration — settlements', () => {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${envVars.MONEY_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. All req() calls here are UI writes; supply the configured origin.
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 

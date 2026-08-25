@@ -17,6 +17,7 @@ import type { Context } from 'hono'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import type { ListItemRecord, ListRecord, UpdateListItemInput } from '../repos/types.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { readJsonBody } from './_body.js'
 import { envelope, listChannel } from '../realtime/channels.js'
 import { publish } from '../realtime/publish.js'
@@ -24,12 +25,9 @@ import { loadListForItemWrite, loadListForRead } from './_list-access.js'
 import { ensureStatuses, resolveStatus } from './_statuses.js'
 import { assertValidParent } from './_hierarchy.js'
 import { ITEM_SCAN_CAP, applyScanCap } from '../lib/scan-cap.js'
+import { isItemRestorable } from '../lib/item-restore.js'
 
 const TENANT = 'rallypoint'
-
-// 30-day soft-delete window; restoring past it is a conflict (the pruner
-// hard-purges the row at the boundary).
-const RESTORE_GRACE_MS = 30 * 24 * 60 * 60 * 1000
 
 function serializeItem(
   i: ListItemRecord,
@@ -51,6 +49,7 @@ function serializeItem(
     custom_fields: i.customFields,
     label_ids: labelIds,
     position: i.position,
+    ref: i.ref,
     created_by: i.createdBy,
     created_at: i.createdAt.toISOString(),
     updated_at: i.updatedAt.toISOString(),
@@ -120,6 +119,32 @@ export const listItemsRoutes = new Hono<HonoApp>()
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
     const body = parsed.data
 
+    const ref = body.ref ?? null
+
+    // Idempotent-create on (list_id, ref): a caller retrying a timed-out
+    // create (offline outbox replay) supplies the same stable ref and
+    // gets the original row back instead of a duplicate. Pre-flight
+    // check skips all the validation/side-effect work below when a
+    // steady-state cascade replays the same ref. Mirrors money-api's
+    // expense ref dedup (apps/money-api/src/routes/expenses.ts).
+    if (ref !== null) {
+      const existing = await c.var.repos.listItems.findByListAndRef(list.id, ref)
+      if (existing) {
+        if (existing.deletedAt !== null) {
+          throw errors.itemRefTakenByDeleted({
+            ref,
+            item_id: existing.id,
+            deleted_at: existing.deletedAt.toISOString(),
+          })
+        }
+        const existingLabels = await c.var.repos.listLabels.labelsForItems([existing.id])
+        return c.json(
+          { ...serializeItem(existing, existingLabels.get(existing.id) ?? []), idempotent: true },
+          200,
+        )
+      }
+    }
+
     // Task lists default status→'todo' and an omitted priority→'medium'
     // (port of festival-planner taskCreateDefaults), while an explicit
     // priority:null persists as no-priority. Non-task lists ignore any
@@ -184,26 +209,52 @@ export const listItemsRoutes = new Hono<HonoApp>()
       await validateLabelIds(c, list.id, labelIds)
     }
 
-    const item = await c.var.repos.listItems.create({
-      id: `lit_${ulid()}`,
-      tenantId: TENANT,
-      listId: list.id,
-      title: body.title,
-      notes: body.notes ?? null,
-      assignedTo: body.assignedTo ?? null,
-      status: resolved.status,
-      statusId: resolved.statusId,
-      parentId: body.parentId ?? null,
-      // body.priority is already resolved: schema default('medium') fills
-      // undefined → 'medium'; explicit null passes through as null (no-priority).
-      // The old `body.priority ?? 'medium'` would coerce null→'medium', so use
-      // direct assignment — the schema guarantee covers the default.
-      priority: isTasks ? body.priority : null,
-      dueDate: isTasks && body.dueDate != null ? new Date(body.dueDate) : null,
-      customFields: persistedFields,
-      position: body.position,
-      createdBy: userId,
-    })
+    let item: ListItemRecord
+    try {
+      item = await c.var.repos.listItems.create({
+        id: `lit_${ulid()}`,
+        tenantId: TENANT,
+        listId: list.id,
+        title: body.title,
+        notes: body.notes ?? null,
+        assignedTo: body.assignedTo ?? null,
+        status: resolved.status,
+        statusId: resolved.statusId,
+        parentId: body.parentId ?? null,
+        // body.priority is already resolved: schema default('medium') fills
+        // undefined → 'medium'; explicit null passes through as null (no-priority).
+        // The old `body.priority ?? 'medium'` would coerce null→'medium', so use
+        // direct assignment — the schema guarantee covers the default.
+        priority: isTasks ? body.priority : null,
+        dueDate: isTasks && body.dueDate != null ? new Date(body.dueDate) : null,
+        customFields: persistedFields,
+        position: body.position,
+        ref,
+        createdBy: userId,
+      })
+    } catch (err) {
+      // Race: two parallel posts with the same ref both got past the
+      // pre-flight; the second hit the partial-unique index. Same
+      // fall-back: fetch and return the winner.
+      if (err instanceof UniqueConstraintError && ref !== null) {
+        const existing = await c.var.repos.listItems.findByListAndRef(list.id, ref)
+        if (existing) {
+          if (existing.deletedAt !== null) {
+            throw errors.itemRefTakenByDeleted({
+              ref,
+              item_id: existing.id,
+              deleted_at: existing.deletedAt.toISOString(),
+            })
+          }
+          const raceLabels = await c.var.repos.listLabels.labelsForItems([existing.id])
+          return c.json(
+            { ...serializeItem(existing, raceLabels.get(existing.id) ?? []), idempotent: true },
+            200,
+          )
+        }
+      }
+      throw err
+    }
 
     // Apply the label set AFTER item creation (labels are many-to-many via
     // the join table; the item row must exist first).
@@ -602,7 +653,7 @@ export const listItemsRoutes = new Hono<HonoApp>()
     if (!item.deletedAt) {
       throw errors.conflict('item_not_deleted', 'Item is not deleted.')
     }
-    if (Date.now() - item.deletedAt.getTime() > RESTORE_GRACE_MS) {
+    if (!isItemRestorable(item.deletedAt)) {
       throw errors.conflict('item_purge_window_elapsed', 'Restore window has elapsed.')
     }
     await c.var.repos.listItems.restore(item.id)

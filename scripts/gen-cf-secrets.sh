@@ -8,9 +8,10 @@
 # `wrangler secret bulk`. See docs/deploy/cloudflare.md for the full key list.
 #
 # This script fills in every key that is a pure random value (HMAC/session/
-# pepper keys, admin token, and the cross-app *_API_KEY peer keys) with
-# `openssl rand -base64 32`. The shared *_API_KEY values are generated ONCE
-# per env and copied into every app that needs them (id-api is the authority).
+# pepper keys, admin token) with `openssl rand -base64 32`. The cross-app
+# *_API_KEY peer keys are GONE — every cross-Worker call now goes through
+# typed WorkerEntrypoint RPC bindings (feat/rpc-bindings + the fitness
+# catch-up), so no app authenticates a peer with a shared bearer any more.
 #
 # Keys that must come from a third party are emitted as the literal
 # placeholder REPLACE_ME (override with $CF_SECRETS_PLACEHOLDER) — you fill
@@ -19,6 +20,10 @@
 #   TURNSTILE_SECRET          (Cloudflare Turnstile dashboard)
 # OPEN_METEO_COMMERCIAL_API_KEY is optional (commercial weather tier only) and
 # is intentionally omitted — add it to events-api by hand if you use that tier.
+# planner-api's VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT are also
+# intentionally omitted: generate a DISTINCT keypair per env with
+# `npx tsx scripts/gen-vapid-keys.ts` and paste them in by hand — emitting an
+# identical placeholder into both envs would trip check-vapid-isolation.sh.
 # Note: R2 object-store access keys are no longer needed — the apps bind their
 # R2 buckets natively via [[r2_buckets]] in wrangler.toml (OBJECT_STORE binding).
 #
@@ -52,23 +57,16 @@ rnd() { openssl rand -base64 32; }
 # `$(rnd)` in the heredoc) purely for readability — note that `set -e` does NOT
 # reliably abort on a failed command substitution nested inside `$(...)`, so a
 # blank-secret regression is caught instead by the empty-value guard in main
-# (a `": ""` in the output means a generation failure). Cross-app peer keys are
-# generated once here and copied into each app that authenticates against them
-# (id-api is the authority); REALTIME_TOKEN_HMAC_KEY is per-app independent.
+# (a `": ""` in the output means a generation failure). Every key is per-app
+# independent — there are no shared peer keys since the RPC-bindings migration.
+# lists-mcp is absent by design: it has no runtime secrets (only NODE_ENV).
 emit_env_block() {
   local argon2_pepper session_hmac signin_hmac admin_token
-  local events_api_key lists_api_key money_api_key planner_api_key
-  local lists_session events_session money_session planner_session
+  local lists_session events_session money_session planner_session fitness_session admin_session
   local lists_rt events_rt money_rt
   argon2_pepper=$(rnd); session_hmac=$(rnd); signin_hmac=$(rnd); admin_token=$(rnd)
-  local mcp_api_key
-  events_api_key=$(rnd); lists_api_key=$(rnd)
-  money_api_key=$(rnd); planner_api_key=$(rnd)
-  # The Lists MCP Worker's key — the same value lives under lists-api
-  # (MCP_API_KEY, accepted by its /sdk gate) and lists-mcp (LISTS_MCP_API_KEY,
-  # what the Worker presents). RPL v1.0.0 slice 11.
-  mcp_api_key=$(rnd)
-  lists_session=$(rnd); events_session=$(rnd); money_session=$(rnd); planner_session=$(rnd)
+  lists_session=$(rnd); events_session=$(rnd); money_session=$(rnd)
+  planner_session=$(rnd); fitness_session=$(rnd); admin_session=$(rnd)
   lists_rt=$(rnd); events_rt=$(rnd); money_rt=$(rnd)
 
   cat <<JSON
@@ -77,40 +75,32 @@ emit_env_block() {
       "ARGON2_PEPPER": "${argon2_pepper}",
       "SESSION_HMAC_KEY": "${session_hmac}",
       "SIGNIN_CODE_HMAC_KEY": "${signin_hmac}",
-      "EVENTS_API_KEY": "${events_api_key}",
-      "LISTS_API_KEY": "${lists_api_key}",
-      "MONEY_API_KEY": "${money_api_key}",
-      "PLANNER_API_KEY": "${planner_api_key}",
       "ADMIN_TOKEN": "${admin_token}",
       "RESEND_API_KEY": "${PLACEHOLDER}",
       "TURNSTILE_SECRET": "${PLACEHOLDER}"
     },
     "lists-api": {
-      "LISTS_API_KEY": "${lists_api_key}",
       "LISTS_SESSION_KEY_V1": "${lists_session}",
-      "REALTIME_TOKEN_HMAC_KEY": "${lists_rt}",
-      "EVENTS_API_KEY": "${events_api_key}",
-      "PLANNER_API_KEY": "${planner_api_key}",
-      "MCP_API_KEY": "${mcp_api_key}"
-    },
-    "lists-mcp": {
-      "LISTS_MCP_API_KEY": "${mcp_api_key}"
+      "REALTIME_TOKEN_HMAC_KEY": "${lists_rt}"
     },
     "events-api": {
-      "EVENTS_API_KEY": "${events_api_key}",
-      "PLANNER_API_KEY": "${planner_api_key}",
       "EVENTS_SESSION_KEY_V1": "${events_session}",
-      "REALTIME_TOKEN_HMAC_KEY": "${events_rt}"
+      "REALTIME_TOKEN_HMAC_KEY": "${events_rt}",
+      "ADMIN_USER_IDS": "${PLACEHOLDER}"
     },
     "money-api": {
-      "MONEY_API_KEY": "${money_api_key}",
-      "EVENTS_API_KEY": "${events_api_key}",
       "MONEY_SESSION_KEY_V1": "${money_session}",
       "REALTIME_TOKEN_HMAC_KEY": "${money_rt}"
     },
     "planner-api": {
-      "PLANNER_API_KEY": "${planner_api_key}",
       "PLANNER_SESSION_KEY_V1": "${planner_session}"
+    },
+    "fitness-api": {
+      "FITNESS_SESSION_KEY_V1": "${fitness_session}"
+    },
+    "admin-api": {
+      "ADMIN_SESSION_KEY_V1": "${admin_session}",
+      "ADMIN_USER_IDS": "${PLACEHOLDER}"
     }
   }
 JSON
@@ -143,13 +133,24 @@ printf '%s\n' "$output"
 # Guidance to stderr so stdout stays pure JSON (safe to redirect / pipe).
 cat >&2 <<'MSG'
 
-gen-cf-secrets: random + peer keys filled in. Before pushing, replace every
-REPLACE_ME with the real third-party credential:
-  id-api: RESEND_API_KEY, TURNSTILE_SECRET
+gen-cf-secrets: random keys filled in. Before pushing:
+  1. Replace every REPLACE_ME with the real third-party credential:
+       id-api: RESEND_API_KEY, TURNSTILE_SECRET
+       admin-api: ADMIN_USER_IDS (comma-separated RPID user ids; the
+         allowlist that gates admin.rallypt.*; empty = nobody)
+       events-api: ADMIN_USER_IDS — MUST be the SAME value as
+         admin-api's (it grants owner rights on system-owned events;
+         drift makes system events manageable in admin-web but 404
+         in events-web)
+  2. Add planner-api's VAPID keys — a DISTINCT keypair per env
+     (npx tsx scripts/gen-vapid-keys.ts): VAPID_PUBLIC_KEY,
+     VAPID_PRIVATE_KEY, VAPID_SUBJECT. check-vapid-isolation.sh fails
+     the deploy if qa and prod share a keypair.
 Optional (commercial Open-Meteo tier only): add OPEN_METEO_COMMERCIAL_API_KEY
 to events-api by hand.
-Note: R2 object-store access keys are no longer in this template — the apps
-use native R2 bindings (OBJECT_STORE via [[r2_buckets]] in wrangler.toml).
+Note: the cross-app *_API_KEY peer keys are gone (RPC bindings replaced the
+HTTP+bearer paths), and lists-mcp needs no secrets at all. R2 object-store
+access keys are also not needed — the apps use native R2 bindings.
 
 Then set the repo secret (do NOT commit the JSON file):
   gh secret set CF_WORKER_SECRETS < cf-worker-secrets.json

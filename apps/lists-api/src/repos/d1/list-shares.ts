@@ -3,7 +3,7 @@ import { listShares } from '@rallypoint/lists-db'
 import type { ListShareRecord, ListShareRepo } from '../types.js'
 import type { Db } from './db.js'
 import { mapUniqueViolation } from './_errors.js'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 
 function rowToShare(row: typeof listShares.$inferSelect): ListShareRecord {
   return {

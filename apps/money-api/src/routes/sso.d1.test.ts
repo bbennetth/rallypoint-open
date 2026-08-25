@@ -120,6 +120,10 @@ describe('D1 integration — money SSO + session surface', () => {
     return {
       cookie: `${envVars.MONEY_SESSION_COOKIE_NAME}=${bearer}; ${csrfCookiePair()}`,
       'x-rp-csrf': CSRF,
+      // E1 #19 — origin middleware now requires Origin on state-changing
+      // methods. sessionHeaders is used for writes (signout, settings PATCH);
+      // supplying it here is safe for reads too (present Origin just needs to match).
+      origin: envVars.MONEY_UI_ORIGIN,
     }
   }
 
@@ -351,6 +355,7 @@ describe('D1 integration — money SSO + session surface', () => {
         cookie: `${envVars.MONEY_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
         'x-forwarded-for': knownIp,
+        origin: envVars.MONEY_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'test-code-iphash', state: stateNonce }),
     })
@@ -386,6 +391,7 @@ describe('D1 integration — money SSO + session surface', () => {
         'content-type': 'application/json',
         cookie: `${envVars.MONEY_SSO_STATE_COOKIE_NAME}=${stateNonce}; ${csrfCookiePair()}`,
         'x-rp-csrf': CSRF,
+        origin: envVars.MONEY_UI_ORIGIN,
       },
       body: JSON.stringify({ code: 'consumed-code', state: stateNonce }),
     })
@@ -439,7 +445,7 @@ describe('D1 integration — money SSO + session surface', () => {
     signoutRpidBearer.mockClear()
     const res = await app.request('http://localhost/api/v1/ui/signout', {
       method: 'POST',
-      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF },
+      headers: { cookie: csrfCookiePair(), 'x-rp-csrf': CSRF, origin: envVars.MONEY_UI_ORIGIN },
     })
     expect(res.status).toBe(204)
     expect(signoutRpidBearer).not.toHaveBeenCalled()

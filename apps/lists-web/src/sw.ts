@@ -7,6 +7,7 @@ import {
 import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
+import { swSkipWaitingListener } from '@rallypoint/web-kit/sw'
 import { isCacheableImage } from './lib/swRoutes.js'
 
 // `__WB_MANIFEST` is injected by vite-plugin-pwa at build time and
@@ -15,10 +16,13 @@ declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: { url: string; revision: string | null }[]
 }
 
-// `registerType: 'autoUpdate'` (vite.config.ts): take over open clients
-// on activation and drop stale precaches so a new deploy reaches
-// installed users on their next launch without a manual prompt.
-self.skipWaiting()
+// Reload-to-update (#675 R5): a blind `self.skipWaiting()` used to swap
+// the new bundle in under a running session — a lazy-loaded chunk
+// fetched after the swap could belong to a different build than the
+// shell that requested it. The new worker now waits in `waiting` until
+// the app shell's `useSwUpdatePrompt()` posts SKIP_WAITING via
+// `applyUpdate()` (see @rallypoint/web-kit's sw-update.ts).
+swSkipWaitingListener(self)
 clientsClaim()
 cleanupOutdatedCaches()
 

@@ -1,9 +1,11 @@
 import type { ConnectionView } from '../lib/connection-status.js'
 import { BRAND } from '../brand.js'
+import { Compass } from './icons.js'
 
-// Minimalist wordmark lockup. Renders the "rallypoint" name in Inter 600
-// with an optional status dot. The compass glyph (ported from
-// festival-planner) has been removed — see issue #192 Slice 4.
+// Brand lockup: the compass mark followed by the "rallypoint" wordmark
+// in Inter 600, with an optional status dot. The compass was dropped in
+// issue #192 Slice 4, leaving a text-only wordmark; it is back by user
+// directive — the app chrome reads as unbranded without it.
 //
 // The dot is static (no blink animation). Callers that own a realtime
 // stream opt in to live status by passing
@@ -23,14 +25,13 @@ export interface BrandLockupProps {
    */
   connectionView?: ConnectionView | null
   /**
-   * @deprecated No-op. Retained for call-site compatibility only —
-   * the compass icon has been removed. Will be deleted in a follow-up.
+   * @deprecated No-op. The compass takes its accent from `var(--acid)`
+   * like every other surface. Retained for call-site compatibility.
    */
   accentColor?: string
   /**
-   * @deprecated No-op. Retained for call-site compatibility only —
-   * there is no longer a "compass only" mode without the wordmark.
-   * Will be deleted in a follow-up.
+   * Renders the compass mark on its own, without the wordmark or the
+   * status dot. For tight surfaces (narrow mobile chrome, icon slots).
    */
   compassOnly?: boolean
 }
@@ -38,15 +39,25 @@ export interface BrandLockupProps {
 export function BrandLockup({
   size = 16,
   connectionView,
-  // accentColor and compassOnly retained in signature for call-site compat
+  // accentColor retained in the signature for call-site compat
   accentColor: _accentColor,
-  compassOnly: _compassOnly,
+  compassOnly = false,
 }: BrandLockupProps) {
   // Dot color: offline phase uses --hot; everything else is quiet ink-dim.
   const dotColor =
     connectionView?.phase === 'offline' ? 'var(--hot)' : 'var(--ink-dim)'
 
   const dotSize = 6
+  // The mark reads a touch larger than the cap height it sits beside.
+  const markSize = Math.round(size * 1.25)
+
+  const mark = (
+    <span style={{ color: 'var(--ink)', display: 'flex', flexShrink: 0 }}>
+      <Compass size={markSize} />
+    </span>
+  )
+
+  if (compassOnly) return mark
 
   return (
     <span
@@ -57,6 +68,7 @@ export function BrandLockup({
         lineHeight: 1,
       }}
     >
+      {mark}
       <span
         style={{
           fontFamily: 'var(--font-body, Inter, system-ui, sans-serif)',

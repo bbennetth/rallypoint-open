@@ -1,4 +1,4 @@
-import { and, desc, eq, gte } from 'drizzle-orm'
+import { and, desc, eq, gte, lt, or } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { UserId } from '@rallypoint/shared'
 import { auditLog as table } from '@rallypoint/db'
@@ -46,18 +46,30 @@ export class D1AuditRepo implements AuditRepo {
     eventType?: string
     sinceMs?: number
     limit?: number
+    cursor?: { createdAt: Date; id: string }
   }): Promise<AuditEvent[]> {
     const limit = Math.min(opts.limit ?? 100, 1000)
     const conditions = [eq(table.tenantId, opts.tenantId)]
     if (opts.userId) conditions.push(eq(table.userId, opts.userId))
     if (opts.eventType) conditions.push(eq(table.eventType, opts.eventType))
     if (opts.sinceMs) conditions.push(gte(table.createdAt, new Date(Date.now() - opts.sinceMs)))
+    if (opts.cursor) {
+      // Keyset in (createdAt, id) DESC: older createdAt, or same createdAt with
+      // a smaller id. The id tiebreak keeps same-ms rows from dropping across
+      // page boundaries. gte/lt bind the Date via drizzle's typed operators.
+      conditions.push(
+        or(
+          lt(table.createdAt, opts.cursor.createdAt),
+          and(eq(table.createdAt, opts.cursor.createdAt), lt(table.id, opts.cursor.id)),
+        )!,
+      )
+    }
 
     const rows = await this.db
       .select()
       .from(table)
       .where(and(...conditions))
-      .orderBy(desc(table.createdAt))
+      .orderBy(desc(table.createdAt), desc(table.id))
       .limit(limit)
     return rows.map(rowToAuditEvent)
   }

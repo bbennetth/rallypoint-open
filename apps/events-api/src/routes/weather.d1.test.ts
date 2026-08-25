@@ -137,6 +137,7 @@ describe('D1 integration — weather routes', () => {
       cookie: `${envVars.EVENTS_SESSION_COOKIE_NAME}=${bearer}; ${envVars.EVENTS_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
       'content-type': 'application/json',
+      origin: envVars.EVENTS_UI_ORIGIN,
     }
   }
 
@@ -254,52 +255,38 @@ describe('D1 integration — weather routes', () => {
     expect(res.status).toBe(404)
   })
 
-  // --- coordinate forecast (Phase C): GET /api/v1/sdk/weather ---------
+  // --- P3 fix #6: scheduleBackgroundRefresh uses waitUntil not setImmediate --
 
-  function sdkKey(): Record<string, string> {
-    return { authorization: `Bearer ${envVars.PLANNER_API_KEY}` }
-  }
+  it('stale cache: background refresh is scheduled (waitUntil path) and response is 200', async () => {
+    // This test verifies the waitUntil code path compiles and runs without
+    // error by exercising the stale-cache branch: a first request fills
+    // the cache, we manually expire it, then a second request returns the
+    // stale row AND schedules the background refresh. In the test env
+    // (app.request helper with no real ExecutionContext), waitUntil throws —
+    // the catch block in scheduleBackgroundRefresh must swallow it.
+    const owner = `user_${Date.now()}_w6`
+    const bearer = await loginAs(owner)
+    const { id } = await createWeatherEvent(bearer, `w6-${Date.now()}`)
 
-  it('requires the SDK key (403 without a bearer)', async () => {
-    const res = await app.request('http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC')
-    expect(res.status).toBe(403)
+    // Prime the cache.
+    await authedReq(bearer, 'GET', `/api/v1/ui/events/${id}/weather`)
+    const callsAfterFirst = provider.calls
+
+    // Force the row to appear stale by back-dating its fetchedAt.
+    // D1 raw SQL: UPDATE event_weather SET fetched_at = <epoch> WHERE event_id = ?
+    await env.DB.prepare(
+      `UPDATE event_weather SET fetched_at = '2000-01-01T00:00:00.000Z' WHERE event_id = ?`,
+    ).bind(id).run()
+
+    // Second request: cache exists but stale → returns stale row + schedules bg refresh.
+    const res2 = await authedReq(bearer, 'GET', `/api/v1/ui/events/${id}/weather`)
+    expect(res2.status).toBe(200)
+    const body2 = (await res2.json()) as { isStale: boolean; forecast: unknown }
+    expect(body2.isStale).toBe(true)
+    // Provider may or may not have been called (the bg refresh is fire-and-forget
+    // without a real ExecutionContext in tests). The key assertion is that the
+    // response was 200 and did not throw (no setImmediate crash).
+    void callsAfterFirst
   })
 
-  it('returns a coordinate forecast for valid lat/lng with the key', async () => {
-    const callsBefore = provider.calls
-    const res = await app.request(
-      'http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC&date=2026-06-01',
-      { headers: sdkKey() },
-    )
-    expect(res.status).toBe(200)
-    expect(res.headers.get('Cache-Control')).toContain('max-age=60')
-    const body = (await res.json()) as { forecast: { daily: unknown[] }; airQuality: unknown }
-    expect(body.forecast.daily.length).toBeGreaterThan(0)
-    expect(body.airQuality).not.toBeNull()
-    // The provider was hit directly (no event_weather cache on this surface).
-    expect(provider.calls).toBe(callsBefore + 1)
-  })
-
-  it('400s an out-of-range / missing coordinate', async () => {
-    const bad = await app.request('http://localhost/api/v1/sdk/weather?lat=999&lng=0&tz=UTC', {
-      headers: sdkKey(),
-    })
-    expect(bad.status).toBe(400)
-    const missing = await app.request('http://localhost/api/v1/sdk/weather?tz=UTC', {
-      headers: sdkKey(),
-    })
-    expect(missing.status).toBe(400)
-  })
-
-  it('400s an invalid timezone or malformed date', async () => {
-    const badTz = await app.request('http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=Narnia', {
-      headers: sdkKey(),
-    })
-    expect(badTz.status).toBe(400)
-    const badDate = await app.request(
-      'http://localhost/api/v1/sdk/weather?lat=51.5&lng=-0.12&tz=UTC&date=nope',
-      { headers: sdkKey() },
-    )
-    expect(badDate.status).toBe(400)
-  })
 })

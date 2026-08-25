@@ -1,6 +1,25 @@
 // Pure helpers for the Events surface. Extracted from EventsPage.tsx so they
 // can be unit-tested without a DOM.
 
+import { eventSpanYmds } from './events-calendar-helpers.js'
+
+/**
+ * Whether an event is over: the last local calendar day it covers is before
+ * `todayYmd`. Day-based (not instant-based) so a timed event earlier today
+ * stays visible until midnight, matching how the calendar and My Day place
+ * events. Undated events (no startAt) are never past. Reuses eventSpanYmds,
+ * which already handles all-day inclusive ends, timed midnight half-open
+ * ends, multi-day spans and bad ranges.
+ */
+export function isPastEvent(
+  ev: { startAt: string | null; endAt: string | null; allDay: boolean },
+  todayYmd: string,
+): boolean {
+  const days = eventSpanYmds(ev)
+  if (days.length === 0) return false
+  return days[days.length - 1]! < todayYmd
+}
+
 /** Short status chip from an event's start instant. Returns null when undated. */
 export function deriveStatus(startAt: string | null): 'PAST' | 'TODAY' | 'SOON' | 'UPCOMING' | null {
   if (!startAt) return null
@@ -33,6 +52,19 @@ export function formatWhen(startAt: string | null, endAt: string | null, allDay?
   const end = new Date(endAt)
   const endStr = end.toLocaleString([], { timeStyle: 'short' })
   return `${startStr} – ${endStr}`
+}
+
+/**
+ * How the in-app ticket viewer should render an attachment. Browsers can
+ * inline any raster image and (via <iframe>) PDFs; anything else gets a
+ * download-only fallback. The accepted-upload list (useEventTickets
+ * ACCEPTED_MIME) is a subset of image/* + PDF, so 'other' only shows up for
+ * legacy/foreign rows.
+ */
+export function ticketViewKind(contentType: string): 'image' | 'pdf' | 'other' {
+  if (/^image\//.test(contentType)) return 'image'
+  if (contentType === 'application/pdf') return 'pdf'
+  return 'other'
 }
 
 /**

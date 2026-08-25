@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { AuthCard } from '../ui/AuthCard.js'
 import { Banner, Button, Field } from '@rallypoint/ui'
 import { api } from '../api/client.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 export function PasswordResetConfirmPage() {
   const [params] = useSearchParams()
@@ -39,6 +40,7 @@ export function PasswordResetConfirmPage() {
       }
       return
     }
+    captureEvent('password_reset_completed')
     setSubmitted(true)
   }
 

@@ -5,7 +5,7 @@
 // /api/v1/ui/*, always with credentials:'include' so the session +
 // CSRF cookies ride along.
 
-import { ApiError, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
+import { ApiError, captureEvent, createCsrfClient, resetAnalytics } from '@rallypoint/web-kit'
 import type { SessionProfile } from '@rallypoint/web-kit'
 import { hydrateThemeFromServer } from '@rallypoint/ui'
 import type { CreateLedgerInput } from '@rallypoint/money-shared'
@@ -88,7 +88,9 @@ export async function signout(): Promise<void> {
 // --- ledgers --------------------------------------------------------
 
 export async function createLedger(input: CreateLedgerInput): Promise<LedgerDto> {
-  return request<LedgerDto>('POST', '/api/v1/ui/ledgers', input)
+  const ledger = await request<LedgerDto>('POST', '/api/v1/ui/ledgers', input)
+  captureEvent('ledger_created', { currency: input.currency, scope_type: input.scopeType })
+  return ledger
 }
 
 export async function listLedgers(): Promise<LedgerPage> {

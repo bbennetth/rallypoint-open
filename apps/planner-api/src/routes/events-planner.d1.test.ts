@@ -109,6 +109,7 @@ describe('D1 integration — Planner group-event planner-pref write-back', () =>
     return {
       cookie: `${env.PLANNER_SESSION_COOKIE_NAME}=${bearer}; ${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
       'x-rp-csrf': CSRF,
+      origin: env.PLANNER_UI_ORIGIN,
       ...extra,
     }
   }
@@ -129,8 +130,12 @@ describe('D1 integration — Planner group-event planner-pref write-back', () =>
       'http://localhost/api/v1/ui/events/evt_abc/planner-pref',
       {
         method: 'PUT',
-        headers: { 'content-type': 'application/json', 'x-rp-csrf': CSRF,
-          cookie: `${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}` },
+        headers: {
+          'content-type': 'application/json',
+          'x-rp-csrf': CSRF,
+          cookie: `${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
+          origin: env.PLANNER_UI_ORIGIN,
+        },
         body: JSON.stringify({ show: false }),
       },
     )

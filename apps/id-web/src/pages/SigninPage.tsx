@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AuthCard } from '../ui/AuthCard.js'
+import { AuthAlternatives } from '../ui/AuthAlternatives.js'
 import { Banner, Button, Field } from '@rallypoint/ui'
 import { api } from '../api/client.js'
 import { safeReturnTo } from '../lib/return-to.js'
+import { captureEvent } from '@rallypoint/web-kit'
 
 // Two-step signin:
 //   1. email + password  →  POST /signin/start  →  { challengeId }
@@ -40,6 +42,7 @@ export function SigninPage() {
     )
     setSubmitting(false)
     if (!res.ok) {
+      captureEvent('sign_in_failed', { step: 'credentials' })
       setFormError(res.error.message)
       return
     }
@@ -63,9 +66,11 @@ export function SigninPage() {
     })
     setSubmitting(false)
     if (!res.ok) {
+      captureEvent('sign_in_failed', { step: 'code' })
       setFormError(res.error.message)
       return
     }
+    captureEvent('sign_in_completed')
     // Cookie is set by the API; jump to returnTo.
     if (returnTo.startsWith('http')) {
       window.location.href = returnTo
@@ -105,6 +110,7 @@ export function SigninPage() {
             <Banner tone="error">{formError}</Banner>
           </div>
         ) : null}
+        <AuthAlternatives returnTo={returnTo} onError={setFormError} showPasskey />
         <form onSubmit={onCredentialsSubmit} noValidate className="space-y-4">
           <Field
             label="Email"

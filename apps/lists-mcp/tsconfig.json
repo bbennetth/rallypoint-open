@@ -16,7 +16,13 @@
   ],
   "references": [
     {
+      "path": "../../apps/lists-api"
+    },
+    {
       "path": "../../packages/lists-client"
+    },
+    {
+      "path": "../../packages/lists-rpc-client"
     },
     {
       "path": "../../packages/lists-shared"

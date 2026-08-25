@@ -1,12 +1,23 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { ulid } from 'ulid'
 import { z } from 'zod'
+import { escapeCsvField } from '@rallypoint/events-shared'
+import { paginationQuery } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { ApiError, errors } from '../errors.js'
 import { generateRawToken, hashToken } from '@rallypoint/crypto'
+import type { AttendeeCursor } from '../repos/types.js'
 import { readJsonBody } from './_body.js'
-import { loadForAction, recordActivity, requireIdPrefix } from './_access.js'
+import {
+  isEventsAdmin,
+  isSystemEvent,
+  loadForAction,
+  recordActivity,
+  requireIdPrefix,
+} from './_access.js'
 import { assertFeatureEnabled } from './_features.js'
+import { attendeeCursorCodec } from '../lib/attendee-cursor.js'
 
 // Phase 0 of platform/v-1.1 — the owner-side attendees-first surface.
 //
@@ -35,10 +46,45 @@ const BulkInviteSchema = z.object({
   role: RoleField.default('viewer'),
 })
 
-const AttendeesQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(ATTENDEES_PAGE_MAX).default(ATTENDEES_PAGE_DEFAULT),
-  cursor: z.string().datetime().nullable().optional(),
+const attendeesPageQuery = paginationQuery({
+  defaultLimit: ATTENDEES_PAGE_DEFAULT,
+  maxLimit: ATTENDEES_PAGE_MAX,
 })
+
+// Parse `{limit, cursor}` and decode the opaque cursor into the repo's
+// `AttendeeCursor` (or null). A present-but-undecodable cursor is a 400
+// rather than a silent restart at page 1. Legacy `<iso>|<id>` (and bare-ISO)
+// cursors still decode via the codec's legacy fallback.
+function parseAttendeesPage(c: Context<HonoApp>): { limit: number; cursor: AttendeeCursor | null } {
+  const parsed = attendeesPageQuery.safeParse({
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor'),
+  })
+  if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+  const { limit, cursor: raw } = parsed.data
+  if (raw === undefined) return { limit, cursor: null }
+  const cursor = attendeeCursorCodec.decode(raw)
+  if (cursor === null) {
+    throw errors.validation({
+      issues: [{ code: 'custom', path: ['cursor'], message: 'Invalid cursor.' }],
+    })
+  }
+  return { limit, cursor }
+}
+
+// Fan a user lookup out into bounded chunks so a large id-set never ships
+// one oversized cross-Worker RPC to id-api. Chunks run concurrently.
+const USER_LOOKUP_CHUNK = 200
+async function lookupUsersChunked<T>(
+  lookup: (ids: string[]) => Promise<T[]>,
+  userIds: string[],
+): Promise<T[]> {
+  const chunks: Array<Promise<T[]>> = []
+  for (let i = 0; i < userIds.length; i += USER_LOOKUP_CHUNK) {
+    chunks.push(lookup(userIds.slice(i, i + USER_LOOKUP_CHUNK)))
+  }
+  return (await Promise.all(chunks)).flat()
+}
 
 export const attendeesRoutes = new Hono<HonoApp>()
   // ── who's going (any member, #216) ────────────────────────────────
@@ -49,19 +95,13 @@ export const attendeesRoutes = new Hono<HonoApp>()
   .get('/api/v1/ui/events/:id/attendees/community', async (c) => {
     const { event, role } = await loadForAction(c, c.req.param('id'), 'viewer')
     assertFeatureEnabled(event, role, 'attendees')
-    const parsed = AttendeesQuerySchema.safeParse({
-      limit: c.req.query('limit'),
-      cursor: c.req.query('cursor') ?? null,
-    })
-    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-
-    const cursor = parsed.data.cursor ? new Date(parsed.data.cursor) : null
-    const page = await c.var.repos.attendees.listForEvent(event.id, {
-      limit: parsed.data.limit,
-      cursor,
-    })
+    const { limit, cursor } = parseAttendeesPage(c)
+    const page = await c.var.repos.attendees.listForEvent(event.id, { limit, cursor })
     const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
-    const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
+    const lookup = await lookupUsersChunked(
+      (ids) => c.var.services.idClient.batchLookupUsers(ids),
+      userIds,
+    )
     const nameById = new Map(lookup.map((u) => [u.userId, u.displayName ?? null]))
 
     return c.json({
@@ -70,24 +110,15 @@ export const attendeesRoutes = new Hono<HonoApp>()
         display_name: nameById.get(a.userId) ?? null,
         joined_at: a.joinedAt.toISOString(),
       })),
-      next_cursor: page.nextCursor ? page.nextCursor.toISOString() : null,
+      next_cursor: page.nextCursor ? attendeeCursorCodec.encode(page.nextCursor) : null,
     })
   })
 
   // ── list attendees (editor+) ──────────────────────────────────────
   .get('/api/v1/ui/events/:id/attendees', async (c) => {
     const { event } = await loadForAction(c, c.req.param('id'), 'editor')
-    const parsed = AttendeesQuerySchema.safeParse({
-      limit: c.req.query('limit'),
-      cursor: c.req.query('cursor') ?? null,
-    })
-    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-
-    const cursor = parsed.data.cursor ? new Date(parsed.data.cursor) : null
-    const page = await c.var.repos.attendees.listForEvent(event.id, {
-      limit: parsed.data.limit,
-      cursor,
-    })
+    const { limit, cursor } = parseAttendeesPage(c)
+    const page = await c.var.repos.attendees.listForEvent(event.id, { limit, cursor })
 
     // Pull collaborator roles (owner + editors + viewers) for everyone
     // on the page in one shot so the response includes role alongside
@@ -96,12 +127,23 @@ export const attendeesRoutes = new Hono<HonoApp>()
     const collaborators = await c.var.repos.members.listForEvent(event.id)
     const roleByUser = new Map(collaborators.map((m) => [m.userId, m.role]))
     roleByUser.set(event.ownerUserId, 'owner')
+    // On system events the sentinel owner never attends; allowlisted
+    // admins act as owner (actorRole), so a joined admin reports
+    // role 'owner' here too instead of null.
+    if (isSystemEvent(event)) {
+      for (const a of page.items) {
+        if (isEventsAdmin(c, a.userId)) roleByUser.set(a.userId, 'owner')
+      }
+    }
 
     // Resolve emails + display names via RPID. Dedup the lookup set
     // because the same user_id may appear multiple times across pages
     // (it won't here — listForEvent paginates — but the dedup is cheap).
     const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
-    const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
+    const lookup = await lookupUsersChunked(
+      (ids) => c.var.services.idClient.batchLookupUsers(ids),
+      userIds,
+    )
     const userById = new Map(lookup.map((u) => [u.userId, u]))
 
     return c.json({
@@ -115,7 +157,7 @@ export const attendeesRoutes = new Hono<HonoApp>()
           role: roleByUser.get(a.userId) ?? null,
         }
       }),
-      next_cursor: page.nextCursor ? page.nextCursor.toISOString() : null,
+      next_cursor: page.nextCursor ? attendeeCursorCodec.encode(page.nextCursor) : null,
     })
   })
 
@@ -132,11 +174,22 @@ export const attendeesRoutes = new Hono<HonoApp>()
       cursor: null,
     })
     const userIds = Array.from(new Set(page.items.map((a) => a.userId)))
-    const lookup = await c.var.services.idClient.batchLookupUsers(userIds)
+    const lookup = await lookupUsersChunked(
+      (ids) => c.var.services.idClient.batchLookupUsers(ids),
+      userIds,
+    )
     const userById = new Map(lookup.map((u) => [u.userId, u]))
     const collaborators = await c.var.repos.members.listForEvent(event.id)
     const roleByUser = new Map(collaborators.map((m) => [m.userId, m.role]))
     roleByUser.set(event.ownerUserId, 'owner')
+    // On system events the sentinel owner never attends; allowlisted
+    // admins act as owner (actorRole), so a joined admin reports
+    // role 'owner' here too instead of null.
+    if (isSystemEvent(event)) {
+      for (const a of page.items) {
+        if (isEventsAdmin(c, a.userId)) roleByUser.set(a.userId, 'owner')
+      }
+    }
 
     const rows: string[] = ['user_id,email,display_name,role,joined_at']
     for (const a of page.items) {
@@ -150,7 +203,7 @@ export const attendeesRoutes = new Hono<HonoApp>()
           role,
           a.joinedAt.toISOString(),
         ]
-          .map(csvEscape)
+          .map(escapeCsvField)
           .join(','),
       )
     }
@@ -280,11 +333,3 @@ export const attendeesRoutes = new Hono<HonoApp>()
     return c.body(null, 204)
   })
 
-// CSV field escape per RFC 4180: wrap in double quotes if the value
-// contains comma, quote, CR, or LF; escape embedded quotes by doubling.
-function csvEscape(v: string): string {
-  if (/[",\r\n]/.test(v)) {
-    return `"${v.replace(/"/g, '""')}"`
-  }
-  return v
-}

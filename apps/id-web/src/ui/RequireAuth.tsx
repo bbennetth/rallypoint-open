@@ -11,7 +11,10 @@ import { Banner } from '@rallypoint/ui'
 // reachable but 5xx), surface the error with a retry.
 
 export interface RequireAuthProps {
-  children: (user: UserInfo) => ReactNode
+  // `refetch` re-runs the session probe and re-renders with the fresh
+  // UserInfo once it resolves — pages use it after a mutation (avatar/
+  // profile update) instead of a full `window.location.reload()`.
+  children: (user: UserInfo, refetch: () => void) => ReactNode
 }
 
 export function RequireAuth({ children }: RequireAuthProps) {
@@ -43,5 +46,5 @@ export function RequireAuth({ children }: RequireAuthProps) {
       </AuthCard>
     )
   }
-  return <>{children(user!)}</>
+  return <>{children(user!, refetch)}</>
 }

@@ -3,7 +3,14 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/worker.js",
+  "types": "dist/worker.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
   "scripts": {
     "build": "tsc --build",
     "dev": "wrangler dev",
@@ -11,8 +18,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@rallypoint/api-kit": "*",
     "@rallypoint/crypto": "*",
     "@rallypoint/rate-limit": "*",
+    "@rallypoint/id-api": "*",
     "@rallypoint/id-client": "*",
     "@rallypoint/logger": "*",
     "@rallypoint/money-db": "*",
@@ -21,7 +30,7 @@
     "@rallypoint/realtime": "*",
     "@rallypoint/shared": "*",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.6.0",
+    "hono": "^4.13.3",
     "ulid": "^2.3.0",
     "zod": "^3.23.0"
   },

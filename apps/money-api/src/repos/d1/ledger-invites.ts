@@ -1,6 +1,6 @@
-import { and, desc, eq, gt, isNull } from 'drizzle-orm'
+import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm'
 import { ledgerInvites } from '@rallypoint/money-db'
-import { UniqueConstraintError } from '../errors.js'
+import { UniqueConstraintError } from '@rallypoint/api-kit'
 import { mapUniqueViolation } from './_errors.js'
 import type {
   CreateLedgerInviteInput,
@@ -82,9 +82,15 @@ export class D1LedgerInviteRepo implements LedgerInviteRepo {
     consumedByUserId: string,
     when: Date,
   ): Promise<void> {
+    // Guard: only update rows that haven't been consumed yet. Without
+    // this, a concurrent double-join (two requests racing through the
+    // findByLedgerAndUser → add → markConsumed path) can call
+    // markConsumed twice and the second call silently overwrites the
+    // first consumer's stamp — a double-consume. The `consumed_at IS NULL`
+    // predicate makes the UPDATE a no-op on the second race leg.
     await this.db
       .update(ledgerInvites)
       .set({ consumedAt: when, consumedByUserId })
-      .where(eq(ledgerInvites.id, id))
+      .where(and(eq(ledgerInvites.id, id), sql`${ledgerInvites.consumedAt} IS NULL`))
   }
 }
