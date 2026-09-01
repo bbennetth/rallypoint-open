@@ -1,26 +1,23 @@
-// /log — the home tab, a DASHBOARD for the two things this app is opened
-// to do: log some food, or start a workout. A split hero puts both one
-// tap away (TodayActions), today's training detail sits under it
-// (TrainingTodayCard), and the stats / plan / week sections follow.
+// /log — the home tab, a LAUNCH PAD for everything this app can log.
+// A split hero puts the two flagship actions one tap away (TodayActions:
+// log food / start workout) and a 2×2 pad (LogLaunchPad) covers the rest
+// — body weight, progress pic, cardio, drink — so no logging feature is
+// more than a tap from home. The START WORKOUT tile is the single entry
+// point into today's training: it starts the one open session, opens a
+// picker when several are scheduled, and reads "Workout complete" once
+// everything scheduled is logged. Weekly training stats live on /stats
+// (Training); the full schedule lives on /plan.
 //
-// Food capture runs INLINE here via useFoodCapture — the same sheets
-// /food uses — so logging a meal never leaves the tab. Training reads are
-// the local-first cached queries; the food day summary is one too, so
-// both halves paint from cache together instead of the food half flashing
-// a spinner on every visit.
+// Capture runs INLINE here: food via useFoodCapture and the drink /
+// metric / progress-photo / cardio sheets mounted directly on this page
+// — the same components /food and /stats/body use — so logging never
+// leaves the tab. Training reads are the local-first cached queries; the food
+// day summary and metrics list are too, so everything paints from cache
+// together instead of half the page flashing a spinner on every visit.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import {
-  Banner,
-  ConfirmDialog,
-  Icon,
-  SubBar,
-  SubBarSeg,
-  SwipeActions,
-  useFilePicker,
-  type IconName,
-} from '@rallypoint/ui'
+import { Banner, SubBar, SubBarSeg, useFilePicker, type IconName } from '@rallypoint/ui'
 import { DAY_KEYS } from '@rallypoint/fitness-shared'
 import type { TrainingPlanItemDto } from '@rallypoint/fitness-shared'
 import {
@@ -29,17 +26,15 @@ import {
   trainingPlanItemsQuery,
   trainingPlansQuery,
   foodDaySummaryQuery,
-  deleteTrainingPlanItem,
+  metricsQuery,
   ApiError,
 } from '../lib/api.js'
-import { DAY_LABELS } from '../lib/plan-build.js'
 import type { WodTemplateDto } from '../lib/api.js'
 import { useCachedQuery } from '../lib/offline/use-cached-query.js'
-import { useExerciseNames } from '../lib/use-exercise-names.js'
 
 import {
-  computeStreak,
   computeWeekHits,
+  doneTemplateCountsOn,
   formatTodayEyebrow,
   nextMidnightMs,
   resolveTodayFallback,
@@ -47,18 +42,16 @@ import {
   resolveTodayTraining,
   startableFromRow,
   trainingTileVm,
-  trainingsThisWeek,
-  upcomingPlanSessions,
   weekRange,
-  weekVolumeKg,
+  type StartableToday,
   type TrainingCta,
 } from '../lib/today-view.js'
-import { dayWindowIso, foodTileVm, macroLine } from '../lib/food-view.js'
+import { dayWindowIso, foodTileVm, loggedAtFor, macroLine } from '../lib/food-view.js'
+import { bodyweightTileVm } from '../lib/metric-view.js'
 import { foodDayTotalsFromSummary } from '@rallypoint/fitness-shared'
 import { useCalorieGoal } from '../lib/calorie-goal.js'
 import { useDefaultRestS } from '../lib/rest-settings.js'
 import { seedFreeStrengthSession } from '../lib/start-free-strength.js'
-import { formatTonnage, splitTonnage } from '../lib/stats-view.js'
 import { useWeightUnit } from '../lib/units.js'
 import { useDayTypes } from '../lib/day-type-settings.js'
 
@@ -74,11 +67,13 @@ function activePlanIdFromStorage(): string | null {
 
 import { WeekStrip } from '../ui/WeekStrip.js'
 import { HistoryView } from '../ui/HistoryView.js'
-import { FitFab } from '../ui/FitFab.js'
+import { CardioLogSheet, type CardioPlanRef } from '../ui/CardioLogSheet.js'
+import { LogLaunchPad, type LaunchTile } from '../ui/LogLaunchPad.js'
+import { MetricLogSheet } from '../ui/MetricLogSheet.js'
+import { ProgressPhotoSheet } from '../ui/ProgressPhotoSheet.js'
+import { DrinkSheet } from '../ui/DrinkSheet.js'
 import { TodayActions } from '../ui/TodayActions.js'
 import { TodayPickerSheet, type TodayPickerItem } from '../ui/TodayPickerSheet.js'
-import { TrainingTodayCard } from '../ui/TrainingTodayCard.js'
-import type { WodOnlyTemplateDto } from '../ui/WodHeroCard.js'
 import { useFoodCapture } from '../ui/use-food-capture.js'
 
 function errMessage(err: unknown): string {
@@ -89,20 +84,13 @@ function errMessage(err: unknown): string {
       : 'Failed to load today.'
 }
 
-// `onMeal` is only supplied by the Today view, which hosts the inline
-// capture stack — with it the FAB's "Snap a meal" stays on /log instead
-// of round-tripping through /food, which would undercut the whole point
-// of logging from the dashboard.
-function LogSubBar({
-  active,
-  onMeal,
-}: {
-  active: 'today' | 'history'
-  onMeal?: (file: File) => void
-}) {
+// No FAB here: the launch pad already puts every log action one tap from
+// home, so the quick-add `+` would duplicate it row for row. The FAB
+// stays on the tabs without a pad (Stats / Plan / Library).
+function LogSubBar({ active }: { active: 'today' | 'history' }) {
   const nav = useNavigate()
   return (
-    <SubBar label="Log sub-section" fab={<FitFab {...(onMeal ? { onMeal } : {})} />}>
+    <SubBar label="Log sub-section">
       <div className="fit-subseg" role="tablist">
         <SubBarSeg
           active={active === 'today'}
@@ -198,11 +186,6 @@ function TodayView() {
   const itemsQ = useCachedQuery(
     useMemo(() => (planId ? trainingPlanItemsQuery(planId) : null), [planId]),
   )
-  // Movement names for the hero card. Deliberately NOT folded into the
-  // `loading` union below — the card must paint as soon as the plan
-  // resolves, falling back per-movement while the catalog lands.
-  const exerciseNames = useExerciseNames()
-
   // Today's food, on the same cached-read footing as the training half so
   // both paint together. Keyed off the same `today` the training window
   // uses, so the midnight rollover already in place carries it — no
@@ -254,43 +237,22 @@ function TodayView() {
     foodQ.error,
   ])
 
-  async function handleRemovePlanItem(itemId: string) {
-    if (!planId) return
-    try {
-      await deleteTrainingPlanItem(planId, itemId)
-    } catch {
-      // Best-effort: reconcile the cache from the server so the row's
-      // true state (still there or gone) shows on screen.
-      void itemsQ.refetch()
-    }
-  }
-
-  // Resolve plan items to their WOD templates so the hero card can
-  // render the first scheduled WOD for today (falling back to the
-  // rotated benchmark when nothing's scheduled).
+  // Template lookup for resolving today's plan items to something
+  // startable (and to their done-detection template ids).
   const templateIndex = useMemo(() => {
     const m = new Map<string, WodTemplateDto>()
     for (const t of allTemplates) m.set(t.id, t)
     return m
   }, [allTemplates])
 
-  // The full active-plan item set — feeds the rolling upcoming list,
-  // which spans the whole week (wrapping past Sunday), not just today.
-  const allItems = useMemo(() => itemsQ.data ?? [], [itemsQ.data])
-
   // Resolve one plan item to its template (of either kind), or `null` for
-  // kinds with nothing to render. The hero card still only takes WOD-kind
-  // rows (the legacy timer is WOD-shaped), but the Upcoming list surfaces
-  // both — strength rows route to /live/strength/new?templateId= (F3).
-  // The "missing" variant is load-bearing for the Upcoming render:
-  // previously these were silently dropped, so the user had no way to
-  // clean up a stale pointer to a deleted template (F13).
+  // kinds with nothing to start.
   type ResolvedRow = {
     item: TrainingPlanItemDto
     tpl: WodTemplateDto | null
     missingTemplate: boolean
     // A standalone run row — no template to resolve; its Start action
-    // opens the quick-log form (/run/log).
+    // opens the cardio log sheet in place.
     run: boolean
   }
   const resolveRow = useCallback(
@@ -342,46 +304,48 @@ function TodayView() {
   const dayTypes = useDayTypes()
   const todayFallback = planItemsToday.length === 0 ? resolveTodayFallback(dk, dayTypes) : null
 
-  // ONE resolution feeding both the START WORKOUT tile and the card under
-  // it. Unlike the pre-dashboard hero this is not WOD-only — it starts
-  // today's first startable row of any kind, so a strength-only day can't
-  // show "Nothing scheduled" beneath a tile offering to start it.
+  // ONE resolution feeding the START WORKOUT tile — the single entry
+  // point into today's training. Done-detection: workouts logged today
+  // (matched by payload.sourceTemplateId, falling back to the custom-only
+  // payload.templateId for older rows) mark their scheduled row complete,
+  // so the tile can read "Workout complete" or offer a choice of the
+  // rows still open.
+  const doneToday = useMemo(() => doneTemplateCountsOn(workouts, today), [workouts, today])
   const todayTraining = useMemo(
-    () => resolveTodayTraining(scheduledTodayItems.map(toStartable), todayFallback),
-    [scheduledTodayItems, toStartable, todayFallback],
-  )
-  const heroItemId = todayTraining.kind === 'session' ? todayTraining.session.itemId : null
-  // The WOD template behind the resolved session, when there is one — the
-  // detail card renders the full movement list for those.
-  const heroWod =
-    todayTraining.kind === 'session' && todayTraining.session.wodTemplateId
-      ? ((templateIndex.get(todayTraining.session.wodTemplateId) ??
-          null) as WodOnlyTemplateDto | null)
-      : null
-
-  // Upcoming list: the next sessions in the weekly rotation from today,
-  // wrapping across the week boundary, minus whatever the hero claimed —
-  // widening the hero pick means a started strength row no longer also
-  // lists here.
-  const upcomingPlanRows = useMemo(
-    () =>
-      upcomingPlanSessions(allItems, dk, { skipItemId: heroItemId })
-        .map(resolveRow)
-        .filter((r): r is ResolvedRow => r !== null),
-    [allItems, dk, heroItemId, resolveRow],
+    () => resolveTodayTraining(scheduledTodayItems.map(toStartable), todayFallback, doneToday),
+    [scheduledTodayItems, toStartable, todayFallback, doneToday],
   )
 
   const eyebrow = formatTodayEyebrow(todayDate)
-  const streak = computeStreak(workouts, today)
   const weekHits = computeWeekHits(workouts, today)
-  const trained = trainingsThisWeek(workouts, today)
   const unit = useWeightUnit()
-  // Value and unit go in separate tile slots so a long total ("49.6k
-  // lb") can't wrap the narrow third column onto two lines.
-  const weekVolume = splitTonnage(formatTonnage(weekVolumeKg(workouts, today), unit))
-  // Swipe-to-remove on a stale plan row stages the item here; the
-  // ConfirmDialog commits the removal.
-  const [confirmRemove, setConfirmRemove] = useState<TrainingPlanItemDto | null>(null)
+
+  // The launch pad's bodyweight tile reads the same cached metrics list
+  // /stats/body renders. Deliberately NOT folded into the `loading` union
+  // — the pad must paint while metrics land (same rationale as
+  // exerciseNames); MetricLogSheet's local-first save re-renders it for
+  // free via the cache write.
+  const metricsQ = useCachedQuery(useMemo(() => metricsQuery(), []))
+  const padBodyweight = bodyweightTileVm(metricsQ.data, unit)
+
+  // Which launch-pad sheet is open. One discriminant — the pad's inline
+  // actions are mutually exclusive, same idea as `picker` below.
+  const [sheet, setSheet] = useState<'metric' | 'photo' | 'drink' | 'cardio' | null>(null)
+  // When the cardio sheet was opened from a scheduled run row, the plan
+  // ref it should clear on save; null for ad-hoc logs from the pad.
+  const [cardioRef, setCardioRef] = useState<CardioPlanRef | null>(null)
+  const openCardio = useCallback((ref: CardioPlanRef | null = null) => {
+    setCardioRef(ref)
+    setSheet('cardio')
+  }, [])
+  // Transient post-save notice for the pad's sheets, mirroring the food
+  // capture stack's notice (which covers only food saves).
+  const [padNotice, setPadNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (!padNotice) return
+    const id = setTimeout(() => setPadNotice(null), 6000)
+    return () => clearTimeout(id)
+  }, [padNotice])
 
   // Inline food capture — the same sheets /food uses, hosted here so a
   // meal is logged without leaving the dashboard. `capture.node` and the
@@ -396,18 +360,32 @@ function TodayView() {
     onPick: capture.onPhoto,
     ariaLabel: 'Take or choose a meal photo',
   })
-  const [picker, setPicker] = useState<'food' | 'workout' | null>(null)
+  const [picker, setPicker] = useState<'food' | 'workout' | 'today' | null>(null)
   const defaultRestS = useDefaultRestS()
 
   function runCta(cta: TrainingCta) {
     if (cta.action.kind === 'start-strength') nav(seedFreeStrengthSession(defaultRestS))
+    // Cardio logs in place on this page — the /run/log route is for hosts
+    // without the inline sheet.
+    else if (cta.action.to.startsWith('/run/log')) openCardio()
     else nav(cta.action.to)
   }
+
+  // Start a resolved scheduled row: run rows open the cardio sheet in
+  // place (carrying the plan ref so the save clears the schedule);
+  // template rows navigate into their live engine.
+  const startSession = useCallback(
+    (s: StartableToday) => {
+      if (s.run) openCardio(s.run)
+      else nav(s.to)
+    },
+    [nav, openCardio],
+  )
 
   const CTA_ICONS: Record<string, IconName> = {
     'Free strength': 'barbell',
     'Browse WODs': 'stopwatch',
-    'Log a run': 'run',
+    'Log cardio': 'run',
   }
 
   const FOOD_PICKER: TodayPickerItem[] = [
@@ -459,16 +437,68 @@ function TodayView() {
     },
   ]
 
-  // The tile starts today's session outright when there is one; otherwise
-  // it opens the picker.
+  // The picker behind the START WORKOUT tile when several scheduled rows
+  // are still open: pick which one to start. Same routing as the single-
+  // session tap, so a given kind behaves identically either way.
+  const CHOICE_ICONS: Record<string, IconName> = { RUN: 'run', STRENGTH: 'barbell' }
+  const TODAY_CHOICE_PICKER: TodayPickerItem[] =
+    todayTraining.kind === 'choice'
+      ? todayTraining.sessions.map((s) => ({
+          key: s.itemId,
+          label: s.name,
+          icon: CHOICE_ICONS[s.meta] ?? ('stopwatch' as IconName),
+          hint: s.meta,
+          onSelect: () => startSession(s),
+        }))
+      : []
+
+  // The tile starts today's one open session outright; with several open
+  // it asks which; done / nothing scheduled falls through to the generic
+  // start-something picker.
   function onStartWorkout() {
-    if (todayTraining.kind === 'session') nav(todayTraining.session.to)
+    if (todayTraining.kind === 'session') startSession(todayTraining.session)
+    else if (todayTraining.kind === 'choice') setPicker('today')
     else setPicker('workout')
   }
 
+  // The launch pad's tiles. Only bodyweight carries a live value — food
+  // and training live numbers are already on the hero, and "last run" /
+  // "drinks today" aren't cheaply available from the day summary.
+  const PAD_TILES: LaunchTile[] = [
+    {
+      key: 'bodyweight',
+      label: 'Body weight',
+      icon: 'heart',
+      value: padBodyweight.value,
+      sub: padBodyweight.sub,
+      onSelect: () => setSheet('metric'),
+    },
+    {
+      key: 'photo',
+      label: 'Progress pic',
+      icon: 'camera',
+      sub: 'Front · back · side',
+      onSelect: () => setSheet('photo'),
+    },
+    {
+      key: 'cardio',
+      label: 'Log cardio',
+      icon: 'run',
+      sub: 'Run · row · bike',
+      onSelect: () => openCardio(),
+    },
+    {
+      key: 'drink',
+      label: 'Log a drink',
+      icon: 'cup',
+      sub: 'Spirit + mixer',
+      onSelect: () => setSheet('drink'),
+    },
+  ]
+
   return (
     <>
-      <LogSubBar active="today" onMeal={capture.onPhoto} />
+      <LogSubBar active="today" />
       <div className="page-pad">
         <header className="fit-head">
           <div className="top">
@@ -481,6 +511,7 @@ function TodayView() {
 
         {error && <Banner tone="error">{error}</Banner>}
         {capture.notice && <Banner tone="info">{capture.notice}</Banner>}
+        {padNotice && <Banner tone="info">{padNotice}</Banner>}
 
         {/* The dashboard proper: log food | start workout, one tap each. */}
         <TodayActions
@@ -494,163 +525,22 @@ function TodayView() {
           onOpenDiary={() => nav('/food')}
         />
 
-        {/* Today's training in detail, resolved from the same value the
-          tile above reads. */}
-        {loading ? (
-          <div style={{ color: 'var(--ink-dim)' }}>Loading…</div>
-        ) : (
-          <TrainingTodayCard
-            today={todayTraining}
-            wod={heroWod}
-            names={exerciseNames}
-            onStart={(to) => nav(to)}
-            onCta={runCta}
-          />
+        {/* No detail card under the hero anymore: the START WORKOUT tile
+          is the single entry point into today's training (start / pick /
+          complete), so a second start affordance below it was redundant.
+          A quiet status line covers the cold-cache window where the tile
+          would otherwise claim "nothing scheduled" prematurely. */}
+        {loading && (
+          <div role="status" style={{ color: 'var(--ink-dim)' }}>
+            Loading today’s training…
+          </div>
         )}
 
-        {/* Streak / week-count / week-volume tiles per the B·F frame. */}
-        <div className="fit-stats">
-          <div className="fit-stat">
-            <div className="k">Streak</div>
-            <div className="v">{streak}</div>
-            <div className="u">{streak === 1 ? 'day' : 'days'}</div>
-          </div>
-          <div className="fit-stat">
-            <div className="k">This week</div>
-            <div className="v">{trained}</div>
-            <div className="u">of 5</div>
-          </div>
-          <div className="fit-stat">
-            <div className="k">Volume</div>
-            <div className="v">{weekVolume.value}</div>
-            <div className="u">{weekVolume.unit} this week</div>
-          </div>
-        </div>
-
-        {/* Upcoming Plan section: the next sessions in the weekly rotation
-          from today (past the hero), wrapping across the week boundary.
-          "No plan yet" only when the plan is genuinely empty. */}
-        <section style={{ display: 'grid', gap: 8 }}>
-          <div className="sec-rule">
-            <div className="eyebrow">UPCOMING · YOUR PLAN</div>
-            <div className="line" />
-          </div>
-          {upcomingPlanRows.length > 0 ? (
-            <div style={{ display: 'grid', gap: 0 }}>
-              {upcomingPlanRows.map(({ item, tpl, missingTemplate, run }) => {
-                // Day chip: TODAY for the current weekday, else the item's
-                // day (MON…SUN) — the list now spans the whole rotation.
-                const dayLabel = item.dayKey === dk ? 'TODAY' : DAY_LABELS[item.dayKey]
-                // Standalone run: opens the quick-log form, passing the plan
-                // item so a successful save clears it off the schedule.
-                if (run) {
-                  const params = new URLSearchParams({ planId: item.planId, planItemId: item.id })
-                  if (item.note) params.set('note', item.note)
-                  const runHref = `/run/log?${params.toString()}`
-                  return (
-                    <div key={item.id} className="plan-row">
-                      <div className="plan-day">{dayLabel}</div>
-                      <button type="button" className="plan-main" onClick={() => nav(runHref)}>
-                        <div className="plan-top">
-                          <span className="nm">{item.note ?? 'Run'}</span>
-                        </div>
-                        <div className="plan-meta">RUN</div>
-                      </button>
-                      <button
-                        type="button"
-                        className="plan-go"
-                        aria-label="Log run"
-                        onClick={() => nav(runHref)}
-                      >
-                        <Icon name="run" size={16} />
-                      </button>
-                    </div>
-                  )
-                }
-                // Deleted-template row: a sentinel label whose only action
-                // is Remove, now in the swipe/hover tray (Soft Ink rows
-                // lose always-visible delete buttons) with a confirm step.
-                // No Start button — the template's gone, nothing to run.
-                if (missingTemplate || !tpl) {
-                  return (
-                    <SwipeActions
-                      key={item.id}
-                      actions={[
-                        {
-                          key: 'delete',
-                          label: 'Remove from plan',
-                          icon: <Icon name="trash" size={14} />,
-                          onAction: () => setConfirmRemove(item),
-                        },
-                      ]}
-                      contentClassName="plan-row"
-                    >
-                      <div className="plan-day">{dayLabel}</div>
-                      <div className="plan-main" style={{ opacity: 0.7 }}>
-                        <div className="plan-top">
-                          <span className="nm">Workout no longer in your library</span>
-                        </div>
-                        <div className="plan-meta">REMOVED</div>
-                      </div>
-                    </SwipeActions>
-                  )
-                }
-                // Route by kind: WOD templates fire the live WOD timer;
-                // strength templates hydrate the strength engine via the
-                // ?templateId= query param. Same component for both kinds.
-                const href =
-                  tpl.kind === 'strength'
-                    ? `/live/strength/new?templateId=${encodeURIComponent(tpl.id)}`
-                    : `/live/wod/${encodeURIComponent(tpl.id)}/run`
-                const meta =
-                  tpl.kind === 'strength'
-                    ? 'STRENGTH'
-                    : tpl.body.wodType.replace(/_/g, ' ').toUpperCase()
-                return (
-                  <div key={item.id} className="plan-row">
-                    <div className="plan-day">{dayLabel}</div>
-                    <button type="button" className="plan-main" onClick={() => nav(href)}>
-                      <div className="plan-top">
-                        <span className="nm">{tpl.name}</span>
-                      </div>
-                      <div className="plan-meta">{meta}</div>
-                    </button>
-                    <button
-                      type="button"
-                      className="plan-go"
-                      aria-label="Start workout"
-                      onClick={() => nav(href)}
-                    >
-                      <Icon name="stopwatch" size={16} />
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          ) : allItems.length === 0 ? (
-            // Genuinely empty (or no) plan — the only case that warrants
-            // "No plan yet".
-            <div className="fit-empty">
-              <div className="t">No plan yet</div>
-              <div className="b">
-                Build a weekly plan from the <strong>Plan</strong> tab to see what's on deck for the
-                rest of the week.
-              </div>
-            </div>
-          ) : (
-            // The plan is populated but has nothing else to surface here —
-            // either today's only session is already in the hero, or its
-            // items are kinds this view can't render (single exercises /
-            // free-form strength). Stay neutral and point at the Plan tab
-            // rather than claiming "No plan yet" or "all caught up".
-            <div className="fit-empty">
-              <div className="t">You're all set</div>
-              <div className="b">
-                Your full weekly plan is on the <strong>Plan</strong> tab.
-              </div>
-            </div>
-          )}
-        </section>
+        {/* The launch pad: every other way of logging something, one tap
+          each — no section header, the tiles speak for themselves. Every
+          tile opens its sheet inline on this page; nothing navigates
+          away. */}
+        <LogLaunchPad tiles={PAD_TILES} />
 
         <section style={{ display: 'grid', gap: 8 }}>
           <div className="sec-rule">
@@ -659,19 +549,6 @@ function TodayView() {
           </div>
           <WeekStrip hits={weekHits} todayIdx={todayIdx} />
         </section>
-        <ConfirmDialog
-          open={confirmRemove !== null}
-          title="Remove from plan?"
-          body="This workout is no longer in your library, so the schedule entry can only be removed."
-          confirmLabel="Remove"
-          confirmVariant="hot"
-          onConfirm={async () => {
-            const item = confirmRemove
-            setConfirmRemove(null)
-            if (item) await handleRemovePlanItem(item.id)
-          }}
-          onCancel={() => setConfirmRemove(null)}
-        />
 
         <TodayPickerSheet
           open={picker === 'food'}
@@ -685,6 +562,54 @@ function TodayView() {
           items={WORKOUT_PICKER}
           onClose={() => setPicker(null)}
         />
+        <TodayPickerSheet
+          open={picker === 'today'}
+          title="Today's workouts"
+          items={TODAY_CHOICE_PICKER}
+          onClose={() => setPicker(null)}
+        />
+
+        {/* The launch pad's inline sheets — the same components
+          /stats/body and /food mount, gated the same way (each renders
+          its Drawer unconditionally, so the host conditions the mount).
+          The metric and photo sheets close themselves after a clean save
+          (calling onClose), so onSaved only sets the notice; the metric
+          and drink saves land in caches this page already reads. */}
+        {sheet === 'metric' && (
+          <MetricLogSheet
+            onClose={() => setSheet(null)}
+            onSaved={() => setPadNotice('Weigh-in saved.')}
+          />
+        )}
+        {sheet === 'photo' && (
+          <ProgressPhotoSheet
+            onClose={() => setSheet(null)}
+            onSaved={(photos) =>
+              setPadNotice(
+                photos.length > 1
+                  ? `${photos.length} progress photos saved.`
+                  : 'Progress photo saved.',
+              )
+            }
+          />
+        )}
+        {sheet === 'cardio' && (
+          <CardioLogSheet
+            onClose={() => {
+              setSheet(null)
+              setCardioRef(null)
+            }}
+            onSaved={(label) => setPadNotice(`${label} logged.`)}
+            {...(cardioRef ? { planRef: cardioRef } : {})}
+          />
+        )}
+        {sheet === 'drink' && (
+          <DrinkSheet
+            loggedAt={loggedAtFor(today, today)}
+            onClose={() => setSheet(null)}
+            onLogged={() => void foodQ.refetch()}
+          />
+        )}
 
         {/* Both unconditional by contract: a file input rendered inside a
           conditional branch never fires `change`, and the scan session
@@ -698,8 +623,8 @@ function TodayView() {
 
 export function LogPage() {
   const { pathname } = useLocation()
-  // The Today view renders its own sub-bar, because the FAB there hands
-  // meal photos to the inline capture stack that view owns.
+  // The Today view renders its own sub-bar alongside the sheets and
+  // capture stack it owns.
   if (!pathname.endsWith('/history')) return <TodayView />
   return (
     <>

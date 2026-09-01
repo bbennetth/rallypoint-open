@@ -133,7 +133,7 @@ export const assistRoutes = new Hono<HonoApp>()
     const rawModel = parseAssistOutput(run.object)
     if (rawModel === null) throw unparsable()
 
-    const suggestion = coerceSuggestion(rawModel, tz)
+    const suggestion = coerceSuggestion(rawModel, tz, clientNow)
     const body: AssistResponse = {
       ...suggestion,
       // A trace context is always passed to runAssist, so both ids are minted.

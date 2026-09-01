@@ -8,6 +8,7 @@ import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
 import { swSkipWaitingListener } from '@rallypoint/web-kit/sw'
+import { swPushSubscriptionChangeListener } from '@rallypoint/web-kit/sw-push'
 import { isApiCacheableRead, isCacheableImage, NAVIGATION_DENYLIST } from './lib/swRoutes.js'
 import { SW_DATA_REFRESH_MESSAGE } from './lib/sw-messages.js'
 import {
@@ -176,6 +177,12 @@ self.addEventListener('push', (event) => {
     ]),
   )
 })
+
+// The push service rotated or invalidated our subscription: re-subscribe
+// and hand the new endpoint to planner-api. Chrome/FCM fires this
+// reliably; WebKit rarely does, which is why the page-side heal
+// (usePushSync in AppChrome) exists too.
+swPushSubscriptionChangeListener(self)
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()

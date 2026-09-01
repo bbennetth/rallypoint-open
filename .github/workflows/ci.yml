@@ -88,6 +88,7 @@ jobs:
       d1_ai: ${{ steps.f.outputs.d1_ai }}
       workers_tests: ${{ steps.f.outputs.workers_tests }}
       objstore_tests: ${{ steps.f.outputs.objstore_tests }}
+      rate_limit_workers_tests: ${{ steps.f.outputs.rate_limit_workers_tests }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -217,6 +218,7 @@ jobs:
       # per-suite Miniflare bootstrap is where selective running pays.
       #   test:d1      — id-api D1 repo contract tests (#313 Phase 2)
       #   test:workers — RealtimeHub Durable Object tests (#313 Phase 3)
+      #   test:rate-limit-workers — RateLimitCounter DO tests (#881)
       - if: needs.changes.outputs.d1_id == 'true'
         run: npm run test:d1
 
@@ -251,6 +253,10 @@ jobs:
 
       - if: needs.changes.outputs.workers_tests == 'true'
         run: npm run test:workers
+
+      # rate-limit RateLimitCounter Durable Object tests (#881)
+      - if: needs.changes.outputs.rate_limit_workers_tests == 'true'
+        run: npm run test:rate-limit-workers
 
       # object-store R2 binding tests (real Miniflare R2 bucket, #409)
       - if: needs.changes.outputs.objstore_tests == 'true'

@@ -1,8 +1,14 @@
-// Pure view-layer helpers for the Workout Log page. No React deps.
-// All inputs/outputs are plain data — testable without a DOM or network.
+// Pure view-layer helpers for the Workout Log page. Every export is a
+// pure function of its arguments — no hooks, no component state, no
+// network; all inputs/outputs are plain data, testable without a DOM.
+// (The `units.js` import is for the pure `formatTonnage` formatter only:
+// the display unit is passed IN as an argument, never read from its
+// store, so these helpers stay callable outside React.)
 
 import type { WorkoutDto, WorkoutSetDto, Modality, MetricShape, CreateWorkoutInput } from '@rallypoint/fitness-shared'
 import { exerciseLabel } from './exercise-label.js'
+import { formatTonnage } from './units.js'
+import type { WeightUnit } from './units.js'
 
 // ---------------------------------------------------------------------------
 // Grouping workouts by calendar date
@@ -235,20 +241,41 @@ export function buildWorkoutPayload(form: WorkoutFormState): CreateWorkoutInput 
 // Summary line for workout rows
 // ---------------------------------------------------------------------------
 
+export interface WorkoutSummaryLineOptions {
+  /** Display unit for the tonnage segment. Required — a call site that
+   *  forgot it is how the line came to read "7,295 kg" beside a "16.1k lb"
+   *  score. Still required when `omitTonnage` is set, so flipping the flag
+   *  back can't silently reintroduce a kg default. */
+  unit: WeightUnit
+  /** Drop the tonnage segment. Pass true when the surrounding component
+   *  already renders the same `formatTonnage` value in its own slot —
+   *  HistoryRow's right-aligned score, WorkoutDetailSheet's chip row —
+   *  so the tonnage prints once per view instead of twice. */
+  omitTonnage?: boolean
+}
+
 /**
  * Format a workout summary line from WorkoutSummary for the list view.
- * e.g. "6 sets · 2 400 kg" or "3 sets · 5.2 km"
+ * e.g. "6 sets · 2.4 t" (kg) / "6 sets · 5.3k lb" (lb), or "3 sets · 5.2 km";
+ * with `omitTonnage` just "6 sets" / "3 sets · 5.2 km".
+ *
+ * Tonnage is stored in kg but rendered in the viewer's display unit via the
+ * same `formatTonnage` the score chip uses, so the two can never disagree.
+ * Distance is always metric — the weight unit does not govern it.
  */
-export function formatWorkoutSummaryLine(summary: {
-  setCount: number
-  tonnageKg: number
-  totalDistanceM: number
-}): string {
+export function formatWorkoutSummaryLine(
+  summary: {
+    setCount: number
+    tonnageKg: number
+    totalDistanceM: number
+  },
+  { unit, omitTonnage = false }: WorkoutSummaryLineOptions,
+): string {
   const parts: string[] = []
   const sc = summary.setCount
   parts.push(`${sc} set${sc !== 1 ? 's' : ''}`)
-  if (summary.tonnageKg > 0) {
-    parts.push(`${Math.round(summary.tonnageKg).toLocaleString()} kg`)
+  if (!omitTonnage && summary.tonnageKg > 0) {
+    parts.push(formatTonnage(summary.tonnageKg, unit))
   }
   if (summary.totalDistanceM > 0) {
     const km = summary.totalDistanceM / 1000

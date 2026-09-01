@@ -84,7 +84,10 @@ export function WorkoutDetailSheet({
     )
   }
 
-  const sumLine = formatWorkoutSummaryLine(summary)
+  // Tonnage is already a chip above (same formatTonnage, same unit) and the
+  // two sit ~14px apart in one grid, so the line drops it rather than
+  // printing "16.1k lb" twice in adjacent rows.
+  const sumLine = formatWorkoutSummaryLine(summary, { unit, omitTonnage: true })
   const setGroups = groupSetsByExercise(workout.sets, exerciseNames)
 
   // Source-template link for the update-template flow. Strength

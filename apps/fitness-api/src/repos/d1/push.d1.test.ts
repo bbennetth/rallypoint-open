@@ -5,6 +5,7 @@ import type { Repos } from '../types.js'
 import {
   deliverNotification,
   deliverNotificationById,
+  REST_PUSH_GRACE_MS,
   notificationTopic,
   runNotificationTick,
 } from '../../lib/notifications.js'
@@ -21,20 +22,24 @@ function stubPush(
 ): {
   service: WebPushService
   sent: string[]
+  payloads: string[]
   sendOpts: ({ topic?: string } | undefined)[]
   /** When set, every send awaits this before returning (park mid-flight). */
   gate: { promise: Promise<void> | null }
 } {
   const sent: string[] = []
+  const payloads: string[] = []
   const sendOpts: ({ topic?: string } | undefined)[] = []
   const gate: { promise: Promise<void> | null } = { promise: null }
   return {
     sent,
+    payloads,
     sendOpts,
     gate,
     service: {
-      async send(sub, _payload, opts) {
+      async send(sub, payload, opts) {
         sent.push(sub.endpoint)
+        payloads.push(payload)
         sendOpts.push(opts)
         if (gate.promise) await gate.promise
         return behavior(sub.endpoint)
@@ -129,6 +134,12 @@ describe('D1 rest-timer push queue', () => {
     const topic = notificationTopic('rest:ses_1')
     expect(topic).toMatch(/^[A-Za-z0-9_-]{1,32}$/)
     expect(push.sendOpts.map((o) => o?.topic)).toEqual([topic, topic])
+    // The payload carries the OS tag plus the raw client deadline
+    // (fire_at minus the backstop grace) — the SW's same-rest-period
+    // dedupe keys off deadlineMs.
+    const payload = JSON.parse(push.payloads[0]) as { tag?: string; deadlineMs?: number }
+    expect(payload.tag).toBe('rest:ses_1')
+    expect(payload.deadlineMs).toBe(record!.fireAt.getTime() - REST_PUSH_GRACE_MS)
     // The alarm racing the cron: second call sees sentAt and no-ops.
     const second = await deliverNotificationById(repos, push.service, id, now)
     expect(second).toBeNull()

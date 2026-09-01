@@ -46,6 +46,17 @@ new_sqlite_classes = ["RestTimerAlarm"]
 name = "REST_ALARMS"
 class_name = "RestTimerAlarm"
 
+# RateLimitCounter Durable Object (#881) — one SQLite-backed DO per token
+# bucket, replacing the per-request D1 write in the rate limiter. DO
+# migrations are append-only: this is a NEW tag, never edit v1.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitCounter"]
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 [triggers]
 crons = ["* * * * *"]
 
@@ -148,6 +159,10 @@ bucket_name = "rallypoint-fitness-qa"
 name = "REST_ALARMS"
 class_name = "RestTimerAlarm"
 
+[[env.qa.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 [env.qa.triggers]
 crons = ["* * * * *"]
 
@@ -190,6 +205,10 @@ bucket_name = "rallypoint-fitness-prod"
 [[env.prod.durable_objects.bindings]]
 name = "REST_ALARMS"
 class_name = "RestTimerAlarm"
+
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 [env.prod.triggers]
 crons = ["* * * * *"]

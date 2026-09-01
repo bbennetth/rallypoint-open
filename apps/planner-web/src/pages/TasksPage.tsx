@@ -190,7 +190,11 @@ function TasksList() {
     }
   }
 
-  const { open, completed } = partitionTasks(items)
+  // System-skipped occurrences (superseded by a newer instance of their
+  // recurring series) stay in the DB as history but show nowhere — not
+  // even in the Completed disclosure.
+  const visibleItems = items.filter((i) => i.status !== 'skipped')
+  const { open, completed } = partitionTasks(visibleItems)
   // Date sections per the Soft Ink frame (Overdue → Today → This week →
   // Later → No date). Completed stays out — it keeps its own disclosure.
   const buckets = bucketTasks(open, new Date())

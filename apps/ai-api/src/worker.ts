@@ -7,6 +7,7 @@ import type {
 } from '@cloudflare/workers-types'
 import { Hono } from 'hono'
 import type { IdRPC } from '@rallypoint/id-api'
+import { warmD1AndLog, isWarmTick } from '@rallypoint/api-kit'
 import { parseEnv, type Env } from './env.js'
 import { buildLoggerWithFlush, scheduleFlush, type Logger } from './logger.js'
 import { createDb, createTracesRepo, type TracesRepo } from './repos/traces.js'
@@ -77,10 +78,17 @@ export default {
   // Daily cron: (1) deletion sweep — purge data for soft-deleted
   // accounts; (2) retention drain — archive old rows to JSONL in R2.
   // Both are idempotent, so an overlapping or retried tick is harmless.
-  async scheduled(_event: unknown, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+  // The */5 cron is the D1 keep-warm ping only (isWarmTick dispatch).
+  async scheduled(event: { cron?: string }, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
     const d = ensureDeps(env)
     ctx.waitUntil(
       (async () => {
+        // Every tick pings D1 so the storage object never idle-evicts; the
+        // sweep/drain only run on their own daily cron (a missing cron —
+        // `wrangler dev --test-scheduled` with no ?cron= — still runs them
+        // so local smoke keeps working).
+        await warmD1AndLog(env.DB, d.logger)
+        if (isWarmTick(event.cron)) return
         if (env.RPID) {
           const sweep = await runDeletionSweep(env.RPID, d.repos.traces, env.AI_STORE, d.logger)
           if (sweep.users > 0) d.logger.info(sweep, 'deletion sweep')

@@ -2373,13 +2373,25 @@ export async function getExerciseHistory(
 // covers the rest period, and a late-drained push is worse than none) —
 // so none of these ride the outbox.
 
-export interface PushSubscriptionPayload {
-  endpoint: string
-  keys: { p256dh: string; auth: string }
-}
+// The canonical shape lives with the shared push self-heal, which builds
+// these payloads; re-exported so callers keep importing it from here.
+export type { PushSubscriptionPayload } from '@rallypoint/web-kit'
+import type { PushSubscriptionPayload } from '@rallypoint/web-kit'
 
 export async function registerPushSubscription(sub: PushSubscriptionPayload): Promise<void> {
   await request<void>('POST', '/api/v1/ui/push/subscription', sub)
+}
+
+// Does fitness-api still hold a row for this endpoint? See the route
+// comment in fitness-api/src/routes/push.ts — a `false` here is the
+// client's evidence that the subscription was reaped and must be cycled.
+export async function verifyPushSubscription(endpoint: string): Promise<boolean> {
+  const res = await request<{ registered: boolean }>(
+    'POST',
+    '/api/v1/ui/push/subscription/verify',
+    { endpoint },
+  )
+  return res.registered
 }
 
 export async function removePushSubscription(endpoint: string): Promise<void> {

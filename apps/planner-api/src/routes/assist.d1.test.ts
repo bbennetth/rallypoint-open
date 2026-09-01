@@ -292,6 +292,34 @@ describe('D1 integration — AI Assist BFF', () => {
     expect(body.category).toBe('event')
     expect(body.allDay).toBe(false)
     expect(body.startAt).toBe('2027-03-05T15:00:00.000Z') // CST, UTC-6
+    expect(body.confidence).toBe('high')
+    expect(body.dateUncertain).toBe(false)
+  })
+
+  it('returns low confidence when the model drops an event date', async () => {
+    // The reported bug: "Madeon at 7pm Oct 23rd" came back as an untimed event
+    // titled with the whole capture, and the client auto-saved it. Low
+    // confidence is what routes it to the edit card for confirmation instead.
+    const bearer = await loginAs('user_e_nodate')
+    ai.next = JSON.stringify({
+      category: 'event',
+      title: 'Madeon at 7pm Oct 23rd',
+      date: null,
+      time: null,
+      confidence: 'high',
+    })
+    const res = await parseReq(bearer, {
+      text: 'Madeon at 7pm Oct 23rd',
+      clientNow: '2026-07-20T14:03:00Z',
+      tz: 'America/Chicago',
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.category).toBe('event')
+    expect(body.startAt).toBeNull()
+    expect(body.confidence).toBe('low')
+    // The client reads this to ask about the date rather than the category.
+    expect(body.dateUncertain).toBe(true)
   })
 
   it('parses a diary capture with mood', async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   restNotificationTag,
+  restPushHealthMessage,
   restPushStatusMessage,
   restPushTag,
   serverKeyMatches,
@@ -8,6 +9,23 @@ import {
   testPushStatusMessage,
   urlBase64ToUint8Array,
 } from './rest-push.js'
+
+describe('restPushHealthMessage', () => {
+  it('says nothing when +Notify can actually deliver', () => {
+    expect(restPushHealthMessage(null)).toBeNull()
+  })
+
+  it('explains an OS-level block and how to recover', () => {
+    expect(restPushHealthMessage('denied')).toContain('blocked')
+    expect(restPushHealthMessage('default')).toContain('permission')
+  })
+
+  it('explains a heal the browser refused without alarming the user', () => {
+    // The gesture retry usually fixes this on the next tap, so the copy
+    // leads with "reconnecting", not "broken".
+    expect(restPushHealthMessage('blocked')).toContain('Reconnecting')
+  })
+})
 
 describe('shouldScheduleRestPush', () => {
   it('schedules only for notify-mode + granted permission + online + supported', () => {
@@ -31,7 +49,8 @@ describe('rest push tags', () => {
   it('OS notification tag matches the server dedupe key shape', () => {
     // The server stamps `rest:<tag>` (its queue dedupe key) on the push
     // payload's tag; the page's local notification must use the same
-    // value so the two collapse into one banner.
+    // value so the SW's duplicate check can find this rest's banner
+    // (and so the two share one banner slot as defense-in-depth).
     expect(restNotificationTag('ses_abc')).toBe('rest:ses_abc')
   })
 })

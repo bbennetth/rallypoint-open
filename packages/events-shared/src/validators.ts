@@ -78,9 +78,7 @@ export const eventDateField = z
 // list (Node 22 / modern browsers expose Intl.supportedValuesOf).
 // Falls back to a shape check on older runtimes that lack it.
 const IANA_TIMEZONES: ReadonlySet<string> | null = (() => {
-  const sv = (
-    Intl as unknown as { supportedValuesOf?: (k: string) => string[] }
-  ).supportedValuesOf
+  const sv = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf
   if (typeof sv !== 'function') return null
   try {
     return new Set(sv('timeZone'))
@@ -99,9 +97,7 @@ export const eventTimezoneField = z
     // so accept it explicitly.
     (s) =>
       s === 'UTC' ||
-      (IANA_TIMEZONES
-        ? IANA_TIMEZONES.has(s)
-        : /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/.test(s)),
+      (IANA_TIMEZONES ? IANA_TIMEZONES.has(s) : /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/.test(s)),
     'That is not a recognised IANA timezone.',
   )
 
@@ -129,7 +125,7 @@ export const eventLocationLabelField = z
 // Privacy mode. Matches events.privacy_mode (default 'unlisted').
 export const PRIVACY_MODES = ['public', 'unlisted', 'private'] as const
 export const privacyModeField = z.enum(PRIVACY_MODES, {
-  errorMap: () => ({ message: 'Privacy mode must be public, unlisted, or private.' }),
+  error: 'Privacy mode must be public, unlisted, or private.',
 })
 
 // Scope type. Discriminates personal (planner-owned) events from
@@ -137,7 +133,7 @@ export const privacyModeField = z.enum(PRIVACY_MODES, {
 export const EVENT_SCOPE_TYPES = ['personal', 'group'] as const
 export type EventScopeType = (typeof EVENT_SCOPE_TYPES)[number]
 export const scopeTypeField = z.enum(EVENT_SCOPE_TYPES, {
-  errorMap: () => ({ message: 'Scope type must be personal or group.' }),
+  error: 'Scope type must be personal or group.',
 })
 
 // UTC datetime instant. ISO-8601 with a Z or explicit offset
@@ -294,8 +290,7 @@ const safeNavigableUrlField = z
       return (ALLOWED_NAVIGABLE_SCHEMES as readonly string[]).includes(proto)
     },
     {
-      message:
-        'URL scheme must be http, https, mailto, or tel.',
+      message: 'URL scheme must be http, https, mailto, or tel.',
     },
   )
 
@@ -341,7 +336,7 @@ export type PublicPageConfig = z.infer<typeof PublicPageConfigSchema>
 export const MEMBER_ROLES = ['owner', 'editor', 'viewer'] as const
 export const ASSIGNABLE_ROLES = ['editor', 'viewer'] as const
 export const assignableRoleField = z.enum(ASSIGNABLE_ROLES, {
-  errorMap: () => ({ message: 'Role must be editor or viewer.' }),
+  error: 'Role must be editor or viewer.',
 })
 
 // Raw invite code as handed to the accepter: 'rpe_' + base64url.
@@ -520,7 +515,7 @@ export const displayNameField = z
 // at the edge so the editor's filters stay meaningful.
 export const LINEUP_TIERS = ['headliner', 'support', 'opener'] as const
 export const tierField = z
-  .enum(LINEUP_TIERS, { errorMap: () => ({ message: 'Tier must be headliner, support, or opener.' }) })
+  .enum(LINEUP_TIERS, { error: 'Tier must be headliner, support, or opener.' })
   .nullable()
   .optional()
 
@@ -547,20 +542,13 @@ export const setTimeField = z
 // Prefix-tagged ids handed back to the client. Bound length/charset
 // rather than re-deriving the ULID grammar.
 const idRefField = (label: string) =>
-  z
-    .string()
-    .trim()
-    .min(1, `${label} is required.`)
-    .max(64, `${label} is too long.`)
+  z.string().trim().min(1, `${label} is required.`).max(64, `${label} is too long.`)
 
 // Group id prefix-aware refinement (added Phase R). Rejects old
 // `crew_<ulid>` IDs at the validation boundary so callers can't pass
 // stale identifiers; new rows mint `grp_<ulid>`.
 const groupIdRefField = (label: string) =>
-  idRefField(label).refine(
-    (v) => v.startsWith('grp_'),
-    `${label} must be a group id (grp_…).`,
-  )
+  idRefField(label).refine((v) => v.startsWith('grp_'), `${label} must be a group id (grp_…).`)
 
 // --- lineup request schemas ----------------------------------------
 
@@ -574,7 +562,11 @@ export const PatchStageSchema = z
   .object({ name: stageNameField.optional(), sortOrder: sortOrderField.optional() })
   .superRefine((v, ctx) => {
     if (v.name === undefined && v.sortOrder === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: 'At least one field must be supplied.' })
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
     }
   })
 export type PatchStageBody = z.infer<typeof PatchStageSchema>
@@ -630,7 +622,11 @@ export const PatchDaySchema = z
       v.endTime === undefined &&
       v.sortOrder === undefined
     ) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: 'At least one field must be supplied.' })
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
     }
     // Only enforce the pair rule when this patch touches the window.
     if (v.startTime !== undefined || v.endTime !== undefined) {
@@ -750,7 +746,7 @@ function shortTextField(label: string, max: number) {
 // 'group'). 'admin' = event-owner-only (festival-planner parity).
 export const SESSION_VISIBILITIES = ['admin', 'private', 'group', 'custom'] as const
 export const sessionVisibilityField = z.enum(SESSION_VISIBILITIES, {
-  errorMap: () => ({ message: 'Visibility must be admin, private, group, or custom.' }),
+  error: 'Visibility must be admin, private, group, or custom.',
 })
 
 // user_ids shared with when visibility='custom'. Empty array clears.
@@ -801,7 +797,11 @@ export const PatchSessionSchema = z
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: 'At least one field must be supplied.' })
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
     }
   })
 export type PatchSessionBody = z.infer<typeof PatchSessionSchema>
@@ -857,7 +857,7 @@ export const poiNameField = z
   .max(120, 'POI name must be at most 120 characters.')
 
 export const poiCategoryField = z.enum(POI_CATEGORY_IDS, {
-  errorMap: () => ({ message: 'Unknown POI category.' }),
+  error: 'Unknown POI category.',
 })
 
 // Percentage coordinate (0..100) of the map image.
@@ -905,7 +905,11 @@ export const PatchPoiSchema = z
   })
   .superRefine((v, ctx) => {
     if (Object.values(v).every((x) => x === undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: 'At least one field must be supplied.' })
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'At least one field must be supplied.',
+      })
     }
   })
 export type PatchPoiBody = z.infer<typeof PatchPoiSchema>

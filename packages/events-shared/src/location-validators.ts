@@ -8,7 +8,7 @@ import { MAP_LAYERS } from './validators.js'
 // request bodies with these and events-web reuses them client-side.
 
 export const memberPinLayerField = z.enum(MAP_LAYERS, {
-  errorMap: () => ({ message: 'Layer must be site, camp, or full.' }),
+  error: 'Layer must be site, camp, or full.',
 })
 
 const pinPctField = (label: string) =>

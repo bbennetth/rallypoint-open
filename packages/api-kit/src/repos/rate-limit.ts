@@ -7,6 +7,7 @@ import {
   type RateLimitRepo,
   type TakeTokenInput,
 } from '@rallypoint/rate-limit'
+import { withD1Retry } from '../d1-retry.js'
 import type { ApiKitD1Database } from './sessions.js'
 
 // Shared D1 rate-limit repository (R2 dedup). The token-bucket ALGORITHM already
@@ -55,26 +56,40 @@ export function createD1RateLimitRepo(config: CreateD1RateLimitRepoConfig): Rate
       const previousWindow = currentWindow - windowMs
 
       // Atomic upsert + increment of the current window.
-      const upserted = await db
-        .insert(table)
-        .values({
-          tenantId: input.tenantId,
-          bucketKey: input.bucketKey,
-          windowStartMs: currentWindow,
-          count: 1,
-        } as never)
-        .onConflictDoUpdate({
-          target: [table.tenantId, table.bucketKey, table.windowStartMs],
-          set: {
-            count: sql`${table.count} + 1`,
-            updatedAt: sql`(unixepoch() * 1000)`,
-          },
-        })
-        .returning({ count: table.count })
+      //
+      // This is the one INSERT the d1-retry header's "never retry an INSERT"
+      // rule doesn't apply to. That rule exists because an ambiguous retry can
+      // double-apply a write; here the worst case is a token counted twice, so
+      // the bucket runs slightly strict for one window and self-heals at the
+      // rollover. A transient D1 failure with no retry, by contrast, is a
+      // user-facing 500 on every rate-limited route.
+      const upserted = await withD1Retry(() =>
+        db
+          .insert(table)
+          .values({
+            tenantId: input.tenantId,
+            bucketKey: input.bucketKey,
+            windowStartMs: currentWindow,
+            count: 1,
+          } as never)
+          .onConflictDoUpdate({
+            target: [table.tenantId, table.bucketKey, table.windowStartMs],
+            set: {
+              count: sql`${table.count} + 1`,
+              updatedAt: sql`(unixepoch() * 1000)`,
+            },
+          })
+          .returning({ count: table.count }),
+      )
 
       const currentCount = (upserted[0]?.count as number | undefined) ?? 1
 
-      // Read the previous window's count.
+      // Read the previous window's count. Deliberately NOT wrapped in
+      // withD1Retry: every app hands createDb a binding already wrapped in
+      // withD1ReadRetry, which retries SELECTs transparently. Wrapping again
+      // would nest 3 attempts inside 3 for ~9 round-trips and ~800ms of
+      // backoff on one statement — piling load onto D1 during exactly the
+      // overload the retry exists to survive.
       const prev = await db
         .select({ count: table.count })
         .from(table)
@@ -92,15 +107,17 @@ export function createD1RateLimitRepo(config: CreateD1RateLimitRepoConfig): Rate
       // hit of a new window for this bucket, drop windows older than the
       // previous one. Fires at most once per window per bucket, PK-indexed.
       if (opportunisticPrune && currentCount === 1) {
-        await db
-          .delete(table)
-          .where(
-            and(
-              eq(table.tenantId, input.tenantId),
-              eq(table.bucketKey, input.bucketKey),
-              lt(table.windowStartMs, previousWindow),
+        await withD1Retry(() =>
+          db
+            .delete(table)
+            .where(
+              and(
+                eq(table.tenantId, input.tenantId),
+                eq(table.bucketKey, input.bucketKey),
+                lt(table.windowStartMs, previousWindow),
+              ),
             ),
-          )
+        )
       }
 
       const blended = computeBlend({

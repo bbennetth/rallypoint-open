@@ -48,6 +48,10 @@ test-results/
 playwright-report/
 # saved E2E auth sessions contain real session cookies — never commit
 e2e/.auth/
+# marketing-screenshot driver scratch (scripts/www-shots/capture.ts): the
+# throwaway full-res PNGs + the substituted seed SQL. The keepers ship as
+# apps/www/static/screens/*.webp, which IS tracked.
+.www-shots/
 
 # Worker [assets] dirs (apps/<api>/public) get wiped + repopulated from
 # the per-app <web>/dist at deploy time (cf-deploy.yml's matrix job:

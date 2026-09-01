@@ -214,4 +214,91 @@ describe('D1 integration — Planner push /push/test route', () => {
     const body = await res.json()
     expect(body).toEqual({ ok: true, registered: true, delivered: false })
   })
+
+  // The client heal (packages/web-kit push-sync) asks this before
+  // touching a local subscription that looks healthy: iOS can keep a
+  // subscription whose row the send loop already reaped on 404/410, and
+  // re-registering that endpoint would just be reaped again.
+  describe('POST /api/v1/ui/push/subscription/verify', () => {
+    const ENDPOINT = 'https://web.push.apple.com/verify-a'
+
+    function verify(bearer: string, endpoint: string): Promise<Response> {
+      app = buildApp({
+        env,
+        logger: undefined,
+        repos,
+        services: baseServices(makeFakeWebPush({ ok: true, statusCode: 201, expired: false })),
+      })
+      return app.request('http://localhost/api/v1/ui/push/subscription/verify', {
+        method: 'POST',
+        headers: { ...headers(bearer), 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint }),
+      })
+    }
+
+    it('requires a session', async () => {
+      app = buildApp({
+        env,
+        logger: undefined,
+        repos,
+        services: baseServices(makeFakeWebPush({ ok: true, statusCode: 201, expired: false })),
+      })
+      const res = await app.request('http://localhost/api/v1/ui/push/subscription/verify', {
+        method: 'POST',
+        headers: {
+          cookie: `${env.PLANNER_CSRF_COOKIE_NAME}=${CSRF}`,
+          'x-rp-csrf': CSRF,
+          origin: env.PLANNER_UI_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ endpoint: ENDPOINT }),
+      })
+      expect(res.status).toBe(401)
+    })
+
+    it('reports a registered endpoint the session user owns', async () => {
+      const userId = 'user_verify_1'
+      await repos.pushSubscriptions.upsert({
+        idHash: hashToken(ENDPOINT),
+        userId,
+        endpoint: ENDPOINT,
+        p256dh: 'p',
+        auth: 'a',
+      })
+      const res = await verify(await loginAs(userId), ENDPOINT)
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ registered: true })
+    })
+
+    it('reports an endpoint with no row as unregistered — the cue to cycle the subscription', async () => {
+      const res = await verify(
+        await loginAs('user_verify_2'),
+        'https://web.push.apple.com/never-registered',
+      )
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ registered: false })
+    })
+
+    it("reports another user's endpoint as unregistered rather than disclosing it", async () => {
+      const otherEndpoint = 'https://web.push.apple.com/verify-other'
+      await repos.pushSubscriptions.upsert({
+        idHash: hashToken(otherEndpoint),
+        userId: 'user_verify_owner',
+        endpoint: otherEndpoint,
+        p256dh: 'p',
+        auth: 'a',
+      })
+      const res = await verify(await loginAs('user_verify_snooper'), otherEndpoint)
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ registered: false })
+    })
+
+    it('rejects an endpoint outside the push-service allowlist (SSRF guard)', async () => {
+      const res = await verify(
+        await loginAs('user_verify_3'),
+        'http://169.254.169.254/latest/meta-data',
+      )
+      expect(res.status).toBe(400)
+    })
+  })
 })

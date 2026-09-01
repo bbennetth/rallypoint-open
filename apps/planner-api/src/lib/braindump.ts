@@ -17,8 +17,16 @@ import { ASSIST_MODEL } from './assist.js'
 // outbox stays intact and no domain rule moves into this thin BFF.
 
 export const BRAINDUMP_MODEL = ASSIST_MODEL
-export const BRAINDUMP_ENRICH_MAX_TOKENS = 1024
-export const BRAINDUMP_SUMMARY_MAX_TOKENS = 768
+// Output caps. `max_tokens` is a ceiling, not a prefill — a generous cap
+// costs nothing when the model stays terse, but a tight one cuts the JSON
+// mid-array and the whole call 422s (QA logs: `AI JSON payload
+// unrecoverable` / `failure: truncated` at the old 1024 / 768 caps, the
+// model padding highlights into full sentences). Both caps sit well above
+// the largest response coercion can keep even at a conservative 3 chars/
+// token (see the headroom tests in braindump.test.ts); the prompts state the
+// item/sentence bounds so the model has no reason to approach them.
+export const BRAINDUMP_ENRICH_MAX_TOKENS = 2048
+export const BRAINDUMP_SUMMARY_MAX_TOKENS = 2048
 
 // The fixed category vocabulary, seeded as single_select choices on the
 // brain-dump list's Category field. The AI picks one; the user can
@@ -41,12 +49,17 @@ export const ENTITY_KINDS = ['person', 'place', 'topic'] as const
 export type EntityKind = (typeof ENTITY_KINDS)[number]
 
 // Coercion bounds — clamped, never 422s, so one odd model value can't sink
-// the whole enrichment.
+// the whole enrichment. The prompts quote the same numbers so the model
+// aims for what coercion keeps instead of over-producing into the token cap.
 export const MAX_THEMES = 10
 export const MAX_ENTITIES = 15
 export const MAX_ANALYSIS_SUMMARY = 500
 export const MAX_SUGGESTED_TASKS = 5
 export const MAX_SUGGESTED_EVENTS = 5
+export const MAX_SUMMARY_HIGHLIGHTS = 8
+export const MAX_SUMMARY_TEXT = 2000
+export const MAX_SUMMARY_HIGHLIGHT_LEN = 200
+export const MAX_SUMMARY_MOOD_LEN = 300
 
 // --- request contracts -----------------------------------------------
 
@@ -62,6 +75,11 @@ export const EnrichRequestSchema = z.object({
     .max(4000, 'Keep a single dump under 4000 characters.'),
   clientNow: z.string().datetime({ offset: true }),
   tz: z.string().trim().min(1).max(64),
+  // Optional vocabulary of themes/entity labels already in use across the
+  // user's dumps, so the model reuses "skin" instead of inventing "skin
+  // issues" as a near-duplicate. Client-curated (recent/frequent labels);
+  // capped so it can't balloon the prompt.
+  knownConcepts: z.array(z.string().trim().min(1).max(40)).max(40).optional(),
 })
 export type EnrichRequest = z.infer<typeof EnrichRequestSchema>
 
@@ -168,9 +186,9 @@ export interface EnrichResponse extends Enrichment {
 }
 
 export const RangeSummarySchema = z.object({
-  summary: z.string().min(1).max(2000),
-  highlights: z.array(z.string().min(1).max(200)).max(8),
-  moodTrend: z.string().max(300).nullable(),
+  summary: z.string().min(1).max(MAX_SUMMARY_TEXT),
+  highlights: z.array(z.string().min(1).max(MAX_SUMMARY_HIGHLIGHT_LEN)).max(MAX_SUMMARY_HIGHLIGHTS),
+  moodTrend: z.string().max(MAX_SUMMARY_MOOD_LEN).nullable(),
 })
 export type RangeSummary = z.infer<typeof RangeSummarySchema>
 
@@ -231,16 +249,33 @@ const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 const HM_RE = /^\d{2}:\d{2}$/
 
 // Deliberately terse (prefill tokens are latency on Workers AI).
-export function enrichSystemPrompt(clientNow: string, tz: string): string {
+export function enrichSystemPrompt(
+  clientNow: string,
+  tz: string,
+  knownConcepts?: string[],
+): string {
   const { date, time, weekday } = localAnchor(clientNow, tz)
+  // knownConcepts is a self-injection-only surface: every label in it is the
+  // caller's own (schema-bounded, sanitized) prior theme/entity label, never
+  // another user's data, so any prompt-injection risk here is the user
+  // steering their own future output — accepted residual risk.
+  // Defense in depth: knownConcepts is already schema-bounded
+  // (EnrichRequestSchema), but a stored label with an embedded newline must
+  // not be able to restructure the prompt below it.
+  const cleanConcepts = knownConcepts?.map((c) => c.replace(/\s+/g, ' '))
+  const vocab =
+    cleanConcepts && cleanConcepts.length > 0
+      ? `\nReuse these existing labels verbatim when a theme or entity means the same thing: ${cleanConcepts.join(', ')}. Otherwise invent a new short label.`
+      : ''
   return `\
 Analyze one free-form "brain dump" the user wrote. Local now:
 ${weekday} ${date} ${time} (${tz}); resolve relative dates against it.
 Pick ONE category: ${BRAINDUMP_CATEGORIES.join(', ')}.
-Extract recurring themes (1-3 word topics), named entities
-(kind: person, place or topic), a 1-2 sentence summary, and any concrete
-actionable to-dos (tasks) or appointments at a date/time (events) the text
-commits to — only real commitments, not musings.
+Extract up to ${MAX_THEMES} recurring themes (1-3 word topics), up to
+${MAX_ENTITIES} named entities (kind: person, place or topic), a 1-2 sentence
+summary, and any concrete actionable to-dos (tasks) or appointments at a
+date/time (events) the text commits to — only real commitments, not musings,
+at most ${MAX_SUGGESTED_TASKS} of each.${vocab}
 Respond with ONLY this JSON:
 {"category":"...","title":"short heading for the dump",
 "themes":["..."],"entities":[{"name":"...","kind":"person|place|topic"}],
@@ -256,10 +291,11 @@ export function buildEnrichInput(
   text: string,
   clientNow: string,
   tz: string,
+  knownConcepts?: string[],
 ): Record<string, unknown> {
   return {
     messages: [
-      { role: 'system', content: enrichSystemPrompt(clientNow, tz) },
+      { role: 'system', content: enrichSystemPrompt(clientNow, tz, knownConcepts) },
       { role: 'user', content: text },
     ],
     max_tokens: BRAINDUMP_ENRICH_MAX_TOKENS,
@@ -318,8 +354,10 @@ export function buildEnrichInput(
 export function summarySystemPrompt(): string {
   return `\
 Summarize a set of dated "brain dump" journal entries the user wrote.
-Write for the user ("you..."), warm but concrete. Respond with ONLY this
-JSON:
+Write for the user ("you..."), warm but concrete. Be brief: the summary is
+3-5 sentences, each highlight is one short phrase (under 20 words), and
+there are at most 5 highlights however many entries there are. Respond with
+ONLY this JSON:
 {"summary":"3-5 sentence overview of the period",
 "highlights":["up to 5 short notable points"],
 "moodTrend":"one sentence on how the tone/mood moved across the period, or
@@ -408,6 +446,9 @@ function normalizeThemes(raw: string[] | null | undefined): string[] {
   return out
 }
 
+// Dedupe by name alone (not name+kind) — a single response CAN emit the
+// same name under two kinds (e.g. person:Trump and topic:Trump); we collapse
+// to the first occurrence's kind.
 function normalizeEntities(
   raw: Array<{ name: string; kind?: string | null | undefined }> | null | undefined,
 ): BraindumpEntity[] {
@@ -420,7 +461,7 @@ function normalizeEntities(
     const kind = (ENTITY_KINDS as readonly string[]).includes(kindRaw)
       ? (kindRaw as EntityKind)
       : 'topic'
-    const key = `${kind}:${name.toLowerCase()}`
+    const key = name.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
     out.push({ name, kind })
@@ -519,15 +560,15 @@ export function coerceSummary(raw: RawSummary): RangeSummary | null {
   if (summary === '') return null
   const highlights: string[] = []
   for (const h of raw.highlights ?? []) {
-    const v = h.trim().replace(/\s+/g, ' ').slice(0, 200)
+    const v = h.trim().replace(/\s+/g, ' ').slice(0, MAX_SUMMARY_HIGHLIGHT_LEN)
     if (v === '') continue
     highlights.push(v)
-    if (highlights.length >= 8) break
+    if (highlights.length >= MAX_SUMMARY_HIGHLIGHTS) break
   }
   const moodRaw = (raw.moodTrend ?? '').trim()
   return RangeSummarySchema.parse({
-    summary: summary.length > 2000 ? summary.slice(0, 2000) : summary,
+    summary: summary.length > MAX_SUMMARY_TEXT ? summary.slice(0, MAX_SUMMARY_TEXT) : summary,
     highlights,
-    moodTrend: moodRaw === '' ? null : moodRaw.slice(0, 300),
+    moodTrend: moodRaw === '' ? null : moodRaw.slice(0, MAX_SUMMARY_MOOD_LEN),
   })
 }

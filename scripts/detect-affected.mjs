@@ -87,6 +87,7 @@ export const D1_SUITES = {
 export const WORKERS_SUITES = {
   workers_tests: 'packages/realtime',
   objstore_tests: 'packages/object-store',
+  rate_limit_workers_tests: 'packages/rate-limit',
 }
 
 // Graph edges that exist in the build but NOT in any package.json.

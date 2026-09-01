@@ -165,7 +165,7 @@ export interface PaginationQueryOptions {
  *  `{ limit: c.req.query('limit'), cursor: c.req.query('cursor') }`. */
 export function paginationQuery(
   opts: PaginationQueryOptions,
-): z.ZodType<PaginationParams, z.ZodTypeDef, PaginationQueryInput> {
+): z.ZodType<PaginationParams, PaginationQueryInput> {
   const { defaultLimit, maxLimit, mode = 'reject', maxCursorLength = 256 } = opts
   const base = z.object({
     limit: z.union([z.string(), z.number()]).optional(),

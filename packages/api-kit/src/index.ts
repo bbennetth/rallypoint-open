@@ -43,6 +43,7 @@ export {
 } from './d1-retry.js'
 export type { D1RetryOptions } from './d1-retry.js'
 export { withD1ReadRetry } from './d1-read-retry.js'
+export { warmD1, warmD1AndLog, isWarmTick, D1_WARM_CRON } from './d1-warm.js'
 export { createZipStream, streamUnzip, crc32 } from './zip.js'
 export type { ZipStreamWriter, ZipEntry, StreamUnzipOptions } from './zip.js'
 export { ImportTally } from './data-transfer.js'
@@ -60,11 +61,14 @@ export {
   createRateLimit,
   createApplyPerUserRateLimit,
   createRateLimitBucket,
+  STORE_ERROR_RETRY_AFTER_SECONDS,
 } from './rate-limit.js'
 export type {
   RateLimitPolicy,
+  IpRateLimitPolicy,
   RateLimitMiddlewareConfig,
   RateLimitErrorsConfig,
+  RateLimitStoreErrorMode,
 } from './rate-limit.js'
 export { createRequireAllowedOrigin } from './origin.js'
 export type { RequireAllowedOriginConfig } from './origin.js'

@@ -60,6 +60,17 @@ function unparsable(): ApiError {
   })
 }
 
+// Same code as enrich's 422 (the client branches on code, not text) but the
+// enrich wording — "the dump is saved, try Analyze" — is wrong for a range
+// summary, which saves nothing and has no per-entry Analyze.
+function unparsableSummary(): ApiError {
+  return new ApiError({
+    code: 'braindump_ai_unparsable',
+    message: 'Could not summarize those entries. Try again, or narrow the date range.',
+    status: 422,
+  })
+}
+
 // Seed the default fields once. Idempotent by label (guards the first-access
 // create race, mirroring diary's seedMoodField): Category as a single_select
 // over the fixed vocabulary (server-minted stable choice ids, rename-safe),
@@ -97,8 +108,12 @@ export const braindumpRoutes = new Hono<HonoApp>()
     const actor = c.var.session!.userId
     const lists = c.var.services.listsClient
     const list = await proxyLists(async () => {
-      const { list, created } = await resolveBraindumpList(lists, actor)
-      if (created) await seedBraindumpFields(lists, list.id, actor)
+      const { list } = await resolveBraindumpList(lists, actor)
+      // Seed on every GET, not just on create: idempotent by label, and it
+      // heals a list whose first-access seeding half-completed (e.g. the
+      // AI Analysis create failed after Category succeeded) — otherwise
+      // analyze stays disabled behind a "still loading" that never clears.
+      await seedBraindumpFields(lists, list.id, actor)
       return list
     })
     return c.json(list)
@@ -112,11 +127,11 @@ export const braindumpRoutes = new Hono<HonoApp>()
 
     const parsed = EnrichRequestSchema.safeParse(await readJsonBody(c))
     if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
-    const { text, clientNow, tz } = parsed.data
+    const { text, clientNow, tz, knownConcepts } = parsed.data
 
     const aiRpc = (c.env.AI_TRACES as AiTracesRpc | undefined) ?? null
     const trace = await buildAssistTrace(c, aiRpc)
-    const input = buildEnrichInput(text, clientNow, tz)
+    const input = buildEnrichInput(text, clientNow, tz, knownConcepts)
 
     let run
     try {
@@ -167,11 +182,11 @@ export const braindumpRoutes = new Hono<HonoApp>()
       throw unavailable()
     }
 
-    if (!run.ok) throw unparsable()
+    if (!run.ok) throw unparsableSummary()
     const raw = parseSummaryOutput(run.object)
-    if (raw === null) throw unparsable()
+    if (raw === null) throw unparsableSummary()
     const summary = coerceSummary(raw)
-    if (summary === null) throw unparsable()
+    if (summary === null) throw unparsableSummary()
 
     const body: SummaryResponse = {
       ...summary,

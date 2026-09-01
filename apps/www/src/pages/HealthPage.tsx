@@ -58,9 +58,21 @@ export function HealthPage() {
       </section>
 
       <section className="shots">
-        <Shot placeholder="Health — Today (390×844)" caption="Today" />
-        <Shot placeholder="Health — Live workout (390×844)" caption="Live workout" />
-        <Shot placeholder="Health — Stats (390×844)" caption="Stats" />
+        <Shot
+          placeholder="Health — Today"
+          src="/screens/health-today.webp"
+          caption="Today"
+        />
+        <Shot
+          placeholder="Health — Live workout"
+          src="/screens/health-live-workout.webp"
+          caption="Live workout"
+        />
+        <Shot
+          placeholder="Health — Stats"
+          src="/screens/health-stats.webp"
+          caption="Stats"
+        />
       </section>
 
       <section className="feat">

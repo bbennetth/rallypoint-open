@@ -2,31 +2,36 @@
 // notification is parked on fitness-api (delivered by a DO alarm at the
 // deadline) so the alert still lands when the OS suspends or kills the
 // tab. The existing local sound / SW notification remains the primary
-// alert while the page is alive — the server push is the backstop, and
-// the shared notification tag collapses the two at the OS level.
+// alert while the page is alive — the server push is a backstop parked
+// REST_PUSH_GRACE_MS after the deadline, and the SW shows it silently
+// in place when this rest period's local banner is already up
+// (deadline match in sw.ts; the shared tag is defense-in-depth).
 //
 // Pure decision helpers live up top (unit-tested); the side-effecting
 // subscribe/schedule wrappers below stay thin.
 
 import {
+  createPushResync,
+  pushHealthReason,
+  pushSupported,
+  serverKeyMatches,
+  urlBase64ToUint8Array,
+} from '@rallypoint/web-kit'
+import type { PushHealthReason } from '@rallypoint/web-kit'
+import {
   cancelRestPush,
   registerPushSubscription,
   removePushSubscription,
   scheduleRestPush,
+  verifyPushSubscription,
 } from './api.js'
 import type { TestPushResult } from './api.js'
+import { getRestAlertsMode } from './alert-settings.js'
 import type { NotificationPermissionState, RestAlertsMode } from './rest-alerts.js'
 
-/** Whether this browser can do Web Push at all. */
-export function pushSupported(): boolean {
-  return (
-    typeof navigator !== 'undefined' &&
-    'serviceWorker' in navigator &&
-    typeof window !== 'undefined' &&
-    'PushManager' in window &&
-    'Notification' in window
-  )
-}
+// Re-exported from web-kit so existing importers (and their tests) keep
+// one import site; the implementations are shared with planner-web.
+export { pushSupported, serverKeyMatches, urlBase64ToUint8Array }
 
 /** Whether a rest period should park a server-side push: the user opted
  *  into notifications, the browser permission is still granted, and
@@ -42,17 +47,6 @@ export function shouldScheduleRestPush(
   return supported && online && mode === 'notify' && permission === 'granted'
 }
 
-/** Convert a base64url VAPID public key into the Uint8Array the
- *  PushManager expects as applicationServerKey. Pure. */
-export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
-  const padding = '='.repeat((4 - (base64Url.length % 4)) % 4)
-  const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/')
-  const raw = atob(base64)
-  const out = new Uint8Array(raw.length)
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
-  return out
-}
-
 /** The url-safe scheduling tag for a live session (also the OS
  *  notification tag suffix — one pending rest push per session). */
 export function restPushTag(sessionId: string): string {
@@ -60,9 +54,11 @@ export function restPushTag(sessionId: string): string {
 }
 
 /** The OS-level notification tag for a session's rest alerts — the SAME
- *  value the server stamps on its push payload (the queue dedupe key),
- *  so a local notification and a server push for one rest period
- *  collapse into a single banner. */
+ *  value the server stamps on its push payload (the queue dedupe key).
+ *  It's the lookup key for the SW's duplicate check
+ *  (getNotifications({tag}) + deadline match in sw.ts) and, as
+ *  defense-in-depth, makes a local notification and a server push for
+ *  one rest period share a single banner slot. */
 export function restNotificationTag(sessionId: string): string {
   return `rest:${restPushTag(sessionId)}`
 }
@@ -86,95 +82,68 @@ export function testPushStatusMessage(result: TestPushResult): string {
   return 'Couldn’t reach any device. Try turning +Notify off and on again.'
 }
 
-// Fetch the VAPID public key from fitness-api at runtime. Served by the
-// worker (not baked into the build) so the browser always subscribes with
-// the keypair this deploy's worker actually signs with — a build-time key
-// can drift from the server's and every push then 403s at send time.
-async function fetchVapidPublicKey(): Promise<string | null> {
-  try {
-    const res = await fetch('/api/v1/push/public-key')
-    if (!res.ok) return null
-    const body = (await res.json()) as { publicKey?: string }
-    return body.publicKey || null
-  } catch {
-    return null
+/** Settings-page copy for +Notify that can no longer deliver. `null`
+ *  when healthy. Pure + unit-tested. */
+export function restPushHealthMessage(reason: PushHealthReason): string | null {
+  switch (reason) {
+    case 'denied':
+      return 'Notifications are blocked — enable them in your device settings, then pick +Notify again.'
+    case 'default':
+      return 'Notifications need permission again — tap +Notify to re-enable them.'
+    case 'blocked':
+      return 'Reconnecting background alerts — if they stay missing, tap Sound then +Notify again.'
+    default:
+      return null
   }
 }
 
-// Compare an existing subscription's applicationServerKey against the
-// server's current VAPID public key. `existing` is
-// subscription.options.applicationServerKey — an ArrayBuffer on Chrome/
-// Firefox, but null on some browsers (Safari). On null we can't prove a
-// mismatch, so treat it as a match: force-cycling a subscription we can't
-// inspect risks breaking a working one, and the server reaps dead
-// subscriptions on send anyway. Pure + unit-tested; mirrors planner-web.
-export function serverKeyMatches(
-  existing: ArrayBuffer | null | undefined,
-  expected: Uint8Array,
-): boolean {
-  if (existing == null) return true
-  const bytes = new Uint8Array(existing)
-  if (bytes.length !== expected.length) return false
-  for (let i = 0; i < bytes.length; i++) {
-    if (bytes[i] !== expected[i]) return false
-  }
-  return true
+// Fitness's push self-heal. Apple rotates the push endpoint of an
+// installed iOS PWA after a day or so; the server reaps the row on the
+// resulting 404/410 and — before this — nothing re-subscribed, so rest
+// pushes silently stopped until the user re-picked +Notify. Registered
+// against the rest-alerts preference: only a 'notify' user gets healed.
+export const pushResync = createPushResync({
+  isEnabled: () => Promise.resolve(getRestAlertsMode() === 'notify'),
+  register: registerPushSubscription,
+  verify: verifyPushSubscription,
+  unregister: removePushSubscription,
+  storagePrefix: 'fitness',
+})
+
+/** Whether the last heal needed a subscribe the browser refused (WebKit
+ *  requires a user gesture). Surfaced on the settings page. */
+export function restPushBlocked(): boolean {
+  return pushResync.isBlocked()
 }
 
-// Make sure this browser's push subscription is registered with
-// fitness-api. Never prompts: callers only invoke this when permission is
-// already granted (the rest-alerts settings flow owns the prompt).
-// Memoized per page load — the subscription is endpoint-stable. A
-// subscription made under a stale server key is unsubscribed and replaced
-// so it self-heals without the user toggling anything.
-let ensured: Promise<boolean> | null = null
-export function ensureRestPushSubscription(): Promise<boolean> {
-  ensured ??= (async () => {
-    try {
-      if (!pushSupported()) return false
-      if (Notification.permission !== 'granted') return false
-      const publicKey = await fetchVapidPublicKey()
-      if (!publicKey) return false
-      const registration = await navigator.serviceWorker.ready
-      const expectedKey = urlBase64ToUint8Array(publicKey)
-      let existing = await registration.pushManager.getSubscription()
-      let staleEndpoint: string | null = null
-      if (existing && !serverKeyMatches(existing.options.applicationServerKey, expectedKey)) {
-        // Remember the replaced endpoint so its server row can be deleted
-        // below — a stale-key row 403s at send time (never 404/410), so
-        // the server-side reap never removes it, and every delivery would
-        // otherwise fan out to both the dead and the live subscription.
-        staleEndpoint = existing.endpoint
-        await existing.unsubscribe().catch(() => undefined)
-        existing = null
-      }
-      const subscription =
-        existing ??
-        (await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: expectedKey,
-        }))
-      const json = subscription.toJSON()
-      if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) return false
-      await registerPushSubscription({
-        endpoint: json.endpoint,
-        keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
-      })
-      if (staleEndpoint && staleEndpoint !== json.endpoint) {
-        // Fire-and-forget: a failed cleanup just leaves the old row to
-        // rot until this runs again.
-        void removePushSubscription(staleEndpoint).catch(() => undefined)
-      }
-      return true
-    } catch {
-      return false
-    }
-  })()
-  // A failed attempt shouldn't poison the rest of the session.
-  void ensured.then((ok) => {
-    if (!ok) ensured = null
-  })
-  return ensured
+/** The settings status line for a +Notify selection that can't deliver.
+ *  Returns null when healthy, or when push isn't supported at all (the
+ *  option is already disabled there). */
+export function restPushHealthStatus(): string | null {
+  if (!pushSupported()) return null
+  return restPushHealthMessage(
+    pushHealthReason({
+      enabled: getRestAlertsMode() === 'notify',
+      permission: Notification.permission,
+      resyncBlocked: restPushBlocked(),
+    }),
+  )
+}
+
+/**
+ * Make sure this browser's push subscription is registered with
+ * fitness-api. Never prompts for permission: callers only invoke this
+ * when permission is already granted (the rest-alerts settings flow owns
+ * the prompt).
+ *
+ * Call this from inside a user gesture — WebKit rejects
+ * pushManager.subscribe() without one, which is why the +Notify tap owns
+ * the first subscribe. Background callers should use the throttled heal
+ * (`pushResync.maybeSync()`, mounted app-wide by usePushSync) instead.
+ */
+export async function ensureRestPushSubscription(): Promise<boolean> {
+  const result = await pushResync.sync()
+  return result === 'healthy' || result === 'registered' || result === 'resubscribed'
 }
 
 /** Park (or move — the server upserts on the tag) the rest push for a
@@ -185,7 +154,13 @@ export async function armRestPush(
   nextUp: string,
 ): Promise<void> {
   try {
-    if (!(await ensureRestPushSubscription())) return
+    // Throttled heal first, so a rotated endpoint is re-registered
+    // before we park work against it. Awaited for that ordering, but
+    // deliberately NOT gated on its result: in the steady state it
+    // returns 'throttled', which says nothing about health, and a
+    // blocked or briefly-offline heal shouldn't stop us parking a push
+    // against a subscription that is very likely still good.
+    await pushResync.maybeSync()
     await scheduleRestPush(restPushTag(sessionId), deadlineMs, nextUp || undefined)
   } catch {
     // Local alert still covers it.
@@ -198,6 +173,7 @@ export async function disarmRestPush(sessionId: string): Promise<void> {
   try {
     await cancelRestPush(restPushTag(sessionId))
   } catch {
-    // Worst case the push fires anyway; the OS tag collapses duplicates.
+    // Worst case the push fires anyway; the SW's deadline check (or,
+    // failing that, the OS tag) keeps it from doubling the banner.
   }
 }

@@ -422,6 +422,21 @@ describe('D1 integration — Planner Brain Dump BFF', () => {
       expect(body.responseId).toBeTruthy()
     })
 
+    it('accepts a request carrying knownConcepts', async () => {
+      const bearer = await loginAs('user_e_known')
+      ai.next = JSON.stringify({
+        category: 'Ideas',
+        title: 'App idea',
+        themes: ['product'],
+        entities: [],
+        summary: null,
+        tasks: [],
+        events: [],
+      })
+      const res = await enrichReq(bearer, { ...goodEnrichBody, knownConcepts: ['skin', 'Sam'] })
+      expect(res.status).toBe(200)
+    })
+
     it('400s on a malformed request body', async () => {
       const bearer = await loginAs('user_e_400')
       const res = await enrichReq(bearer, { text: '', clientNow: 'nope', tz: '' })
@@ -473,11 +488,25 @@ describe('D1 integration — Planner Brain Dump BFF', () => {
       expect(res.status).toBe(503)
     })
 
-    it('422s on unparsable model output', async () => {
+    it('422s on unparsable model output with summary-specific wording', async () => {
       const bearer = await loginAs('user_s_bad')
       ai.next = 'nonsense'
       const res = await summaryReq(bearer, goodSummaryBody)
       expect(res.status).toBe(422)
+      const body = (await res.json()) as { error: { code: string; message: string } }
+      expect(body.error.code).toBe('braindump_ai_unparsable')
+      // Not enrich's "the dump is saved — try Analyze" — nothing was saved.
+      expect(body.error.message).toContain('summarize')
+      expect(body.error.message).not.toContain('Analyze')
+    })
+
+    it('422s when the model output is cut off mid-JSON (token-cap truncation)', async () => {
+      const bearer = await loginAs('user_s_trunc')
+      ai.next = '{"highlights":["You started the period tired",\n"Mid-period you'
+      const res = await summaryReq(bearer, goodSummaryBody)
+      expect(res.status).toBe(422)
+      const body = (await res.json()) as { error: { code: string } }
+      expect(body.error.code).toBe('braindump_ai_unparsable')
     })
 
     it('returns the coerced summary shape on success', async () => {

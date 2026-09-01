@@ -20,6 +20,9 @@ export const registerRestAlertsPersister = store.registerPersister
 export const hydrateRestAlertsFromServer = store.hydrateFromServer
 export const useRestAlertsMode = store.useValue
 export const setRestAlertsMode = store.set
+/** Imperative read, for non-React callers (the push self-heal asks
+ *  whether the user is still opted into background alerts). */
+export const getRestAlertsMode = store.get
 
 /** Current browser permission, folding "no Notification API at all"
  *  (non-installed iOS Safari, some webviews) into one state. */

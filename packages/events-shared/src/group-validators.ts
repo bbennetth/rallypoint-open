@@ -34,7 +34,7 @@ export const groupDescriptionField = z
 export const GROUP_ROLES = ['owner', 'sidekick', 'member'] as const
 export const ASSIGNABLE_GROUP_ROLES = ['sidekick', 'member'] as const
 export const assignableGroupRoleField = z.enum(ASSIGNABLE_GROUP_ROLES, {
-  errorMap: () => ({ message: 'Role must be sidekick or member.' }),
+  error: 'Role must be sidekick or member.',
 })
 
 // Raw join/invite code as handed to the joiner: 'rpj_' + base64url.

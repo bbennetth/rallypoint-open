@@ -548,6 +548,50 @@ describe('D1 integration — food logger surface', () => {
     expect(offSearch).not.toHaveBeenCalled()
   })
 
+  // The off:search bucket writes to D1 on every miss, so a storage blip must
+  // degrade like a spent budget rather than 500 the search box — we can't
+  // account for the spend, so we don't spend it against a third party.
+  it('search degrades to local-only when the rate-limit store blips transiently', async () => {
+    const bearer = await loginAs('user_food_search_store_blip')
+    offSearch.mockReset()
+    offSearch.mockResolvedValue(SEARCH_HITS)
+    const realTakeToken = repos.rateLimit.takeToken.bind(repos.rateLimit)
+    // The production shape: drizzle's wrapper around a D1 storage reset.
+    repos.rateLimit.takeToken = async () => {
+      throw new Error('Failed query: insert into "rate_limits" …', {
+        cause: new Error(
+          'D1 DB storage operation exceeded timeout which caused object to be reset.',
+        ),
+      })
+    }
+    try {
+      const res = await req(bearer, 'GET', '/api/v1/ui/food/search?q=zzblipquery')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { items: FoodItemDto[]; external: boolean }
+      expect(body.external).toBe(false)
+      expect(offSearch).not.toHaveBeenCalled()
+    } finally {
+      repos.rateLimit.takeToken = realTakeToken
+    }
+  })
+
+  it('search still fails loudly when the rate-limit store raises a real bug', async () => {
+    const bearer = await loginAs('user_food_search_store_bug')
+    offSearch.mockReset()
+    const realTakeToken = repos.rateLimit.takeToken.bind(repos.rateLimit)
+    // Deterministic (a SQL bug) — must NOT be silently swallowed as "budget
+    // spent", or a broken limiter reads as normal degradation forever.
+    repos.rateLimit.takeToken = async () => {
+      throw new Error('Failed query: too many SQL variables')
+    }
+    try {
+      const res = await req(bearer, 'GET', '/api/v1/ui/food/search?q=zzbugquery')
+      expect(res.status).toBe(500)
+    } finally {
+      repos.rateLimit.takeToken = realTakeToken
+    }
+  })
+
   it('search ignores a too-short query without touching OFF', async () => {
     const bearer = await loginAs('user_food_search_short')
     offSearch.mockReset()

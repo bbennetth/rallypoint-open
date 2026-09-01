@@ -4,7 +4,7 @@ import {
   createApplyPerUserRateLimit,
   createRateLimitBucket,
 } from '@rallypoint/api-kit'
-import type { RateLimitPolicy } from '@rallypoint/api-kit'
+import type { IpRateLimitPolicy } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { hashIp } from '../crypto/ip-hash.js'
 import { normalizeEmail } from '../lib/normalize-email.js'
@@ -20,11 +20,21 @@ import { errors } from '../errors.js'
 //     handlers (signin/start, password-reset/request, signup) that carry an
 //     email but no session.
 
-export type { RateLimitPolicy }
+// This middleware is the per-IP path (per-user/per-email buckets go through
+// the apply* helpers below), so the shared IP-narrowed policy applies:
+// omitting perIp would silently no-op the bucket instead of failing to build.
+export type RateLimitPolicy = IpRateLimitPolicy
 
+// onStoreError: 'deny' — id-api's surface is almost entirely abuse-facing
+// (signin, signup, password reset, 2FA resend), so a transient rate-limit
+// store failure must NOT quietly drop brute-force protection. Set once at the
+// app level rather than per route, so routes added later inherit the safe
+// behaviour instead of defaulting to fail-open. Callers still get a 429 with
+// a short Retry-After, never a 500.
 const config = {
   saltEnvKey: 'ARGON2_PEPPER',
   errors: { rateLimited: errors.rateLimited },
+  onStoreError: 'deny' as const,
 }
 
 export function rateLimit(policy: RateLimitPolicy): MiddlewareHandler<HonoApp> {

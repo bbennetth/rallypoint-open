@@ -14,6 +14,7 @@ import { setRestAlertsMode, useRestAlertsMode } from '../lib/alert-settings.js'
 import {
   ensureRestPushSubscription,
   pushSupported,
+  restPushHealthStatus,
   restPushStatusMessage,
   testPushStatusMessage,
 } from '../lib/rest-push.js'
@@ -69,6 +70,14 @@ export function SettingsPage() {
   const setPushStatus = (msg: string | null) => {
     if (mounted.current) setPushStatusState(msg)
   }
+  // A +Notify selection that can no longer deliver (permission revoked
+  // out-of-band, or a heal the browser refused) would otherwise look
+  // healthy here. Mount-only: later status lines belong to whatever the
+  // user just tapped.
+  useEffect(() => {
+    const msg = restPushHealthStatus()
+    if (msg) setPushStatusState(msg)
+  }, [])
 
   async function pickAlerts(next: 'off' | 'sound' | 'notify') {
     setPushStatus(null)

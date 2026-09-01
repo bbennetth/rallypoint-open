@@ -18,6 +18,7 @@ import type {
   DayCode,
   FieldDefOptions,
   FieldType,
+  ItemStatus,
   ListBundle,
   ListImportResult,
   ListType,
@@ -42,6 +43,7 @@ export type {
   DayCode,
   FieldDefOptions,
   FieldType,
+  ItemStatus,
   ListType,
   RecurrenceFreq,
   ScopeType,
@@ -83,7 +85,9 @@ export interface ListItemDto {
   assignedTo: string | null
   completed: boolean
   completedAt: string | null
-  status: TaskStatus | null
+  // 'skipped' is system-set only (recurrence sweep) — never accepted on
+  // writes; see SKIPPED_STATUS in @rallypoint/lists-shared.
+  status: ItemStatus | null
   // Custom-status linkage (`lst_…`); pair with listStatuses to resolve
   // name/category/color. RPL v1.0.0.
   statusId: string | null

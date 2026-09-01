@@ -10,7 +10,12 @@ import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 import { requireSession } from '../middleware/session.js'
 import { readJsonBody } from './_body.js'
-import { deliverNotification, REST_MAX_LEAD_MS, restDedupeKey } from '../lib/notifications.js'
+import {
+  deliverNotification,
+  REST_MAX_LEAD_MS,
+  REST_PUSH_GRACE_MS,
+  restDedupeKey,
+} from '../lib/notifications.js'
 
 // Web Push subscription registry + rest-timer notification scheduling
 // (fitness-owned notifications, mirroring planner-api's push routes).
@@ -83,6 +88,26 @@ export const pushRoutes = new Hono<HonoApp>()
     return c.body(null, 204)
   })
 
+  // Does this browser's subscription still exist server-side? The client
+  // heal (packages/web-kit push-sync) asks before touching a local
+  // subscription that looks healthy: iOS can keep a subscription the push
+  // service already killed, whose row the send loop then reaps on 404/410.
+  // Re-registering that endpoint would just be reaped again, so a missing
+  // row is the client's cue to cycle the subscription instead.
+  //
+  // POST (not GET) because the endpoint is a capability URL and must stay
+  // out of access logs / referrers. Another user's row reads as
+  // unregistered — same ownership scoping as the DELETE below, so this
+  // never discloses whether an endpoint belongs to someone else.
+  .post('/api/v1/ui/push/subscription/verify', requireSession(), async (c) => {
+    const userId = c.var.session!.userId
+    const parsed = UnsubscribeSchema.safeParse(await readJsonBody(c))
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const idHash = hashToken(parsed.data.endpoint)
+    const existing = await c.var.repos.pushSubscriptions.listByUser(userId)
+    return c.json({ registered: existing.some((s) => s.idHash === idHash) })
+  })
+
   // Remove a push subscription (browser unsubscribed / notifications off).
   // Only deletes a row owned by the session user.
   .delete('/api/v1/ui/push/subscription', requireSession(), async (c) => {
@@ -98,9 +123,9 @@ export const pushRoutes = new Hono<HonoApp>()
   })
 
   // Schedule (or reschedule — the queue upserts on the tag) the push for
-  // the current rest period. The DO alarm delivers at fireAtMs; a
-  // slightly-past deadline still enqueues so the next cron tick delivers
-  // rather than silently dropping a request that raced the clock.
+  // the current rest period. The DO alarm delivers at fireAtMs +
+  // REST_PUSH_GRACE_MS (see below), so even a slightly-past deadline
+  // lands ~grace in the future rather than being silently dropped.
   .put('/api/v1/ui/push/rest-timer', requireSession(), async (c) => {
     const userId = c.var.session!.userId
     const parsed = RestTimerSchema.safeParse(await readJsonBody(c))
@@ -118,6 +143,12 @@ export const pushRoutes = new Hono<HonoApp>()
         ],
       })
     }
+    // Backstop grace: park the push AFTER the client's deadline, not at
+    // it. A live tab alerts locally at fireAtMs and disarms this row;
+    // firing the DO alarm at the exact same instant made that disarm a
+    // coin flip (double notification). Lead validation stays on the raw
+    // client deadline.
+    const backstopAtMs = fireAtMs + REST_PUSH_GRACE_MS
     const dedupeKey = restDedupeKey(tag)
     const notificationId = await c.var.repos.scheduledNotifications.upsert(
       {
@@ -128,11 +159,11 @@ export const pushRoutes = new Hono<HonoApp>()
         title: 'Rest done',
         body: nextUp ? `Next up: ${nextUp}` : 'Back to work.',
         url: `${c.var.env.FITNESS_UI_ORIGIN}/live/strength/new`,
-        fireAt: new Date(fireAtMs),
+        fireAt: new Date(backstopAtMs),
       },
       now,
     )
-    await c.var.services.restAlarms?.schedule(userId, dedupeKey, notificationId, fireAtMs)
+    await c.var.services.restAlarms?.schedule(userId, dedupeKey, notificationId, backstopAtMs)
     return c.json({ id: notificationId })
   })
 

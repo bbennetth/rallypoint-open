@@ -8,7 +8,8 @@ import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
 import { swSkipWaitingListener } from '@rallypoint/web-kit/sw'
-import { isCacheableImage } from './lib/swRoutes.js'
+import { swPushSubscriptionChangeListener } from '@rallypoint/web-kit/sw-push'
+import { isCacheableImage, restPushShowOptions } from './lib/swRoutes.js'
 
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: { url: string; revision: string | null }[]
@@ -18,6 +19,12 @@ declare const self: ServiceWorkerGlobalScope & {
 // the app shell's useSwUpdatePrompt() → applyUpdate() posts SKIP_WAITING,
 // instead of blindly swapping the bundle under a running session.
 swSkipWaitingListener(self)
+
+// The push service rotated or invalidated our subscription: re-subscribe
+// and hand the new endpoint to fitness-api. Chrome/FCM fires this
+// reliably; WebKit rarely does, which is why the page-side heal
+// (usePushSync in AppChrome) exists too.
+swPushSubscriptionChangeListener(self)
 clientsClaim()
 cleanupOutdatedCaches()
 
@@ -48,23 +55,57 @@ registerRoute(
   new CacheFirst({ cacheName: 'wasm-cache' }),
 )
 
-// Server-sent rest-timer push (fitness-api DO alarm / cron sweep): show
-// the notification with the payload's tag so it COLLAPSES with any local
-// notification the page fired for the same rest period — one banner, not
-// two, whichever alert lands first.
+// Server-sent rest-timer push (fitness-api DO alarm / cron sweep). If
+// THIS rest period's local banner is already visible — matched on the
+// deadline the payload carries, since the page stamps the same value on
+// its local notification — the page delivered the alert and its disarm
+// lost the race: show a SILENT same-tag replacement (one banner, no
+// second alert) rather than trusting near-simultaneous OS tag
+// collapsing, and rather than skipping — a push that shows nothing
+// burns the origin's silent-push budget (Chrome) and risks subscription
+// revocation on WebKit. Any pre-check failure fails open to a normal
+// show.
 self.addEventListener('push', (event) => {
-  let payload: { title?: string; body?: string; url?: string; tag?: string } = {}
+  let payload: {
+    title?: string
+    body?: string
+    url?: string
+    tag?: string
+    deadlineMs?: number
+  } = {}
   try {
     payload = (event.data?.json() ?? {}) as typeof payload
   } catch {
     /* malformed payload — fall through to the generic banner */
   }
+  const tag = payload.tag ?? 'rp-rest-timer'
   event.waitUntil(
-    self.registration.showNotification(payload.title ?? 'Rest done', {
-      body: payload.body ?? 'Back to work.',
-      tag: payload.tag ?? 'rp-rest-timer',
-      icon: '/icons/icon-192.png',
-    }),
+    (async () => {
+      let existingDeadlines: unknown[] = []
+      try {
+        const existing = await self.registration.getNotifications({ tag })
+        existingDeadlines = existing.map(
+          (n) => (n.data as { deadlineMs?: unknown } | null)?.deadlineMs,
+        )
+      } catch {
+        /* pre-check failure must not eat the alert — show it normally */
+      }
+      const opts = restPushShowOptions(payload.deadlineMs, existingDeadlines)
+      // A duplicate re-paints this rest's own banner in place: silent,
+      // and a same-tag replace doesn't re-alert (renotify defaults
+      // false) — per spec and on Chrome. WebKit's tag → notification
+      // identifier mapping is less documented; if iOS still re-alerts
+      // here it needs an on-device check, not another silent knob. The
+      // re-paint may also swap in the server's (schedule-time) body
+      // text for the page's fire-time label — acceptably close.
+      await self.registration.showNotification(payload.title ?? 'Rest done', {
+        body: payload.body ?? 'Back to work.',
+        tag,
+        icon: '/icons/icon-192.png',
+        silent: opts.silent,
+        data: opts.data,
+      })
+    })(),
   )
 })
 

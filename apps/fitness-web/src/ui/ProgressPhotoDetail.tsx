@@ -11,10 +11,17 @@ import type { ProgressPhotoDto } from '../lib/api.js'
 import {
   ApiError,
   deleteProgressPhoto,
+  metricsQuery,
   patchProgressPhoto,
   progressPhotoImageUrl,
 } from '../lib/api.js'
-import { datetimeLocalToIso, isoToDatetimeLocal } from '../lib/metric-view.js'
+import { datetimeLocalToIso, formatValue, isoToDatetimeLocal, nearestMetricTo } from '../lib/metric-view.js'
+import { kgToDisplay, useWeightUnit } from '../lib/units.js'
+import {
+  progressExportFileName,
+  renderProgressExport,
+  shareOrDownload,
+} from '../lib/progress-export.js'
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : err instanceof Error ? err.message : fallback
@@ -66,6 +73,8 @@ export function ProgressPhotoDetail({
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [sharing, setSharing] = useState(false)
+  const weightUnit = useWeightUnit()
 
   function switchTo(id: string) {
     const next = photos.find((p) => p.id === id)
@@ -139,6 +148,33 @@ export function ProgressPhotoDetail({
     }
   }
 
+  async function handleShare() {
+    setError(null)
+    setSharing(true)
+    try {
+      // Reuse the app's standard bodyweight metrics query/key (same one
+      // BodyView/LogPage warm) rather than a bespoke {kind,limit} filter,
+      // so this doesn't create a second, out-of-sync cache entry.
+      const allMetrics = await metricsQuery().fetch()
+      const metrics = allMetrics.filter((m) => m.kind === 'bodyweight')
+      const nearestKg = nearestMetricTo(photo.takenAt, metrics)?.value ?? null
+      const weightText = nearestKg == null ? null : formatValue(kgToDisplay(nearestKg, weightUnit, 1), weightUnit)
+      const blob = await renderProgressExport([
+        {
+          url: progressPhotoImageUrl(photo.id),
+          dateText: takenAtDisplay(photo.takenAt),
+          weightText,
+        },
+      ])
+      const result = await shareOrDownload(blob, progressExportFileName([photo]))
+      if (result === 'cancelled') return
+    } catch (err) {
+      setError(errMessage(err, 'Could not share that photo.'))
+    } finally {
+      setSharing(false)
+    }
+  }
+
   const labelStyle = {
     fontFamily: 'var(--font-mono)',
     fontSize: 10,
@@ -194,6 +230,14 @@ export function ProgressPhotoDetail({
                 disabled={busy}
               >
                 Delete
+              </button>
+              <button
+                type="button"
+                className="fit-startbtn ghost"
+                onClick={() => void handleShare()}
+                disabled={busy || sharing}
+              >
+                {sharing ? 'Preparing…' : 'Share'}
               </button>
               <button
                 type="button"

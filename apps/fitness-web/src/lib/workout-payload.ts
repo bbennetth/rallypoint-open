@@ -56,6 +56,11 @@ export function buildStrengthWorkoutPayload(
       // offer "update the template" later. Absent for free sessions
       // and pre-link legacy sessions.
       ...(state.templateId ? { templateId: state.templateId } : {}),
+      // Which template started this session, custom OR benchmark —
+      // unlike templateId above there's no ownership gate, because this
+      // one only marks the scheduled plan row done on the /log
+      // dashboard. Absent for free sessions.
+      ...(state.sourceTemplateId ? { sourceTemplateId: state.sourceTemplateId } : {}),
       tonnageKg: strengthTonnage(state),
       // Point-in-time weather snapshot (running/outdoor sessions) — the
       // same Open-Meteo pipeline Planner's My Day uses. Best-effort:

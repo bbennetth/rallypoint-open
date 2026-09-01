@@ -11,6 +11,7 @@ import {
   buildWorkoutPayload,
   formatWorkoutSummaryLine,
 } from './workout-view.js'
+import { formatTonnage } from './units.js'
 import type { WorkoutDto, WorkoutSetDto } from '@rallypoint/fitness-shared'
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -338,26 +339,107 @@ describe('buildWorkoutPayload', () => {
 
 describe('formatWorkoutSummaryLine', () => {
   it('shows set count alone when no tonnage or distance', () => {
-    expect(formatWorkoutSummaryLine({ setCount: 3, tonnageKg: 0, totalDistanceM: 0 })).toBe('3 sets')
+    expect(
+      formatWorkoutSummaryLine({ setCount: 3, tonnageKg: 0, totalDistanceM: 0 }, { unit: 'kg' }),
+    ).toBe('3 sets')
   })
 
   it('uses singular for one set', () => {
-    expect(formatWorkoutSummaryLine({ setCount: 1, tonnageKg: 0, totalDistanceM: 0 })).toBe('1 set')
+    expect(
+      formatWorkoutSummaryLine({ setCount: 1, tonnageKg: 0, totalDistanceM: 0 }, { unit: 'kg' }),
+    ).toBe('1 set')
   })
 
-  it('includes tonnage when non-zero', () => {
-    const line = formatWorkoutSummaryLine({ setCount: 4, tonnageKg: 1200, totalDistanceM: 0 })
-    expect(line).toContain('200')
+  it('renders tonnage in kg when the display unit is kg', () => {
+    expect(
+      formatWorkoutSummaryLine({ setCount: 4, tonnageKg: 800, totalDistanceM: 0 }, { unit: 'kg' }),
+    ).toBe('4 sets · 800 kg')
+  })
+
+  it('renders tonnage in pounds when the display unit is lb', () => {
+    expect(
+      formatWorkoutSummaryLine({ setCount: 4, tonnageKg: 800, totalDistanceM: 0 }, { unit: 'lb' }),
+    ).toBe('4 sets · 1,764 lb')
+  })
+
+  it('matches the score chip formatting on a big kg total (tonnes)', () => {
+    const summary = { setCount: 12, tonnageKg: 3310, totalDistanceM: 0 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'kg' })).toBe('12 sets · 3.3 t')
+    expect(formatWorkoutSummaryLine(summary, { unit: 'kg' })).toContain(
+      formatTonnage(summary.tonnageKg, 'kg'),
+    )
+  })
+
+  it('matches the score chip formatting on a big lb total (compacted)', () => {
+    // Regression: the line used to hardcode kg, so a row read
+    // "12 sets · 7,295 kg" beside a "16.1k lb" score.
+    const summary = { setCount: 12, tonnageKg: 7295, totalDistanceM: 0 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb' })).toBe('12 sets · 16.1k lb')
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb' })).toContain(
+      formatTonnage(summary.tonnageKg, 'lb'),
+    )
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb' })).not.toContain('kg')
   })
 
   it('includes distance when non-zero', () => {
-    const line = formatWorkoutSummaryLine({ setCount: 2, tonnageKg: 0, totalDistanceM: 5200 })
+    const line = formatWorkoutSummaryLine(
+      { setCount: 2, tonnageKg: 0, totalDistanceM: 5200 },
+      { unit: 'kg' },
+    )
     expect(line).toContain('5.2 km')
   })
 
   it('includes both tonnage and distance', () => {
-    const line = formatWorkoutSummaryLine({ setCount: 5, tonnageKg: 800, totalDistanceM: 1000 })
-    expect(line).toContain('kg')
-    expect(line).toContain('km')
+    expect(
+      formatWorkoutSummaryLine(
+        { setCount: 5, tonnageKg: 800, totalDistanceM: 1000 },
+        { unit: 'kg' },
+      ),
+    ).toBe('5 sets · 800 kg · 1.0 km')
+    expect(
+      formatWorkoutSummaryLine(
+        { setCount: 5, tonnageKg: 800, totalDistanceM: 1000 },
+        { unit: 'lb' },
+      ),
+    ).toBe('5 sets · 1,764 lb · 1.0 km')
+  })
+
+  it('leaves distance metric regardless of the weight unit', () => {
+    for (const unit of ['kg', 'lb'] as const) {
+      expect(
+        formatWorkoutSummaryLine({ setCount: 1, tonnageKg: 0, totalDistanceM: 12_000 }, { unit }),
+      ).toBe('1 set · 12 km')
+    }
+  })
+
+  // ── omitTonnage: the caller already renders the tonnage itself ──────────
+
+  it('omitTonnage drops the tonnage segment entirely', () => {
+    // HistoryRow / WorkoutDetailSheet both show the same formatTonnage
+    // value in their own slot, so the line must not repeat it.
+    const summary = { setCount: 12, tonnageKg: 7295, totalDistanceM: 0 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb', omitTonnage: true })).toBe('12 sets')
+    expect(formatWorkoutSummaryLine(summary, { unit: 'kg', omitTonnage: true })).toBe('12 sets')
+  })
+
+  it('omitTonnage keeps distance — only the weight segment goes', () => {
+    const summary = { setCount: 5, tonnageKg: 800, totalDistanceM: 5200 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb', omitTonnage: true })).toBe(
+      '5 sets · 5.2 km',
+    )
+  })
+
+  it('omitTonnage: false is the same as omitting the flag', () => {
+    const summary = { setCount: 4, tonnageKg: 800, totalDistanceM: 0 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'lb', omitTonnage: false })).toBe(
+      formatWorkoutSummaryLine(summary, { unit: 'lb' }),
+    )
+  })
+
+  it('omitTonnage is a no-op on a workout with no tonnage', () => {
+    const summary = { setCount: 3, tonnageKg: 0, totalDistanceM: 5200 }
+    expect(formatWorkoutSummaryLine(summary, { unit: 'kg', omitTonnage: true })).toBe(
+      formatWorkoutSummaryLine(summary, { unit: 'kg' }),
+    )
   })
 })

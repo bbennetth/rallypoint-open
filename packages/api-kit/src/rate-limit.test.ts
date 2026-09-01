@@ -1,6 +1,16 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { RateLimitRepo, TakeTokenInput, RateLimitDecision } from '@rallypoint/rate-limit'
-import { createRateLimit, createApplyPerUserRateLimit, createRateLimitBucket } from './rate-limit.js'
+import {
+  RateLimitStoreUnavailableError,
+  type RateLimitRepo,
+  type TakeTokenInput,
+  type RateLimitDecision,
+} from '@rallypoint/rate-limit'
+import {
+  createRateLimit,
+  createApplyPerUserRateLimit,
+  createRateLimitBucket,
+  STORE_ERROR_RETRY_AFTER_SECONDS,
+} from './rate-limit.js'
 
 function makeRepo(decision: { allowed: boolean; retryAfterSeconds?: number }) {
   const calls: TakeTokenInput[] = []
@@ -19,21 +29,35 @@ function makeRepo(decision: { allowed: boolean; retryAfterSeconds?: number }) {
   return { repo, calls }
 }
 
+// A repo whose takeToken always rejects — models the store being unreachable.
+function makeThrowingRepo(err: unknown) {
+  const repo: RateLimitRepo = {
+    takeToken: async (): Promise<RateLimitDecision> => {
+      throw err
+    },
+    reset: async () => {},
+    pruneOldBuckets: async () => 0,
+  }
+  return repo
+}
+
 function makeCtx(params: { repo: RateLimitRepo; ip?: string; env?: Record<string, unknown> }) {
   const headers = new Headers()
   if (params.ip) headers.set('cf-connecting-ip', params.ip)
   let retryAfter: string | undefined
+  const logger = { warn: vi.fn() }
   const ctx = {
     var: {
       env: { TRUSTED_PROXY_HEADER: 'cf-connecting-ip', SALT: 'secret-salt', ...params.env },
       repos: { rateLimit: params.repo },
+      logger,
     },
     req: { raw: { headers } },
     header: (name: string, value: string) => {
       if (name === 'Retry-After') retryAfter = value
     },
   }
-  return { ctx, getRetryAfter: () => retryAfter }
+  return { ctx, getRetryAfter: () => retryAfter, logger }
 }
 
 // rateLimited factory that encodes its args into the error message so tests
@@ -159,5 +183,117 @@ describe('createRateLimitBucket', () => {
       }),
     ).rejects.toThrow('rl:email:signup:30')
     expect(calls[0].bucketKey).toBe('email:deadbeef:signup')
+  })
+})
+
+// The limiter writes to D1 on every guarded request, so a storage blip must
+// degrade to "unlimited for a few seconds", never to a 500 per request.
+describe('createRateLimitBucket — store failures', () => {
+  const args = { bucketKey: 'user:user_7:upcoming', tag: 'user:upcoming', limit: 3, windowSeconds: 60 }
+
+  it('fails open (and warns) when the store raises a transient D1 error', async () => {
+    // The production signature: drizzle's "Failed query" wrapper with the D1
+    // storage-reset text on the cause chain.
+    const err = new Error('Failed query: insert into "rate_limits" …', {
+      cause: new Error('D1 DB storage operation exceeded timeout which caused object to be reset.'),
+    })
+    const { ctx, logger } = makeCtx({ repo: makeThrowingRepo(err) })
+
+    await expect(createRateLimitBucket(config)(ctx as never, args)).resolves.toBeUndefined()
+    expect(logger.warn).toHaveBeenCalledOnce()
+    expect(logger.warn.mock.calls[0][1]).toMatch(/allowing request unlimited/)
+  })
+
+  it('fails open without a logger bound on the context', async () => {
+    const err = new Error('Network connection lost.')
+    const { ctx } = makeCtx({ repo: makeThrowingRepo(err) })
+    delete (ctx.var as { logger?: unknown }).logger
+
+    await expect(createRateLimitBucket(config)(ctx as never, args)).resolves.toBeUndefined()
+  })
+
+  it('fails closed with a 429 (not a 500) when the bucket opts into deny', async () => {
+    const err = new Error('Failed query: insert into "rate_limits" …', {
+      cause: new Error('D1 DB storage operation exceeded timeout which caused object to be reset.'),
+    })
+    const { ctx, getRetryAfter, logger } = makeCtx({ repo: makeThrowingRepo(err) })
+
+    await expect(
+      createRateLimitBucket(config)(ctx as never, { ...args, onStoreError: 'deny' }),
+    ).rejects.toThrow(`rl:user:upcoming:${STORE_ERROR_RETRY_AFTER_SECONDS}`)
+    expect(getRetryAfter()).toBe(String(STORE_ERROR_RETRY_AFTER_SECONDS))
+    expect(logger.warn.mock.calls[0][1]).toMatch(/denying request/)
+  })
+
+  it('honours an app-level deny default, and lets a policy override it back to allow', async () => {
+    const err = new Error('network connection lost')
+    const denyConfig = { ...config, onStoreError: 'deny' as const }
+
+    const denied = makeCtx({ repo: makeThrowingRepo(err) })
+    await expect(
+      createRateLimitBucket(denyConfig)(denied.ctx as never, args),
+    ).rejects.toThrow(/^rl:user:upcoming:/)
+
+    // Per-call override wins over the app-level default.
+    const allowed = makeCtx({ repo: makeThrowingRepo(err) })
+    await expect(
+      createRateLimitBucket(denyConfig)(allowed.ctx as never, { ...args, onStoreError: 'allow' }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('surfaces the cause chain in the warn log, not just the drizzle wrapper', async () => {
+    const cause = new Error('D1 DB storage operation exceeded timeout which caused object to be reset.')
+    const err = new Error('Failed query: insert into "rate_limits" …', { cause })
+    const { ctx, logger } = makeCtx({ repo: makeThrowingRepo(err) })
+
+    await createRateLimitBucket(config)(ctx as never, args)
+
+    // `.cause` is non-enumerable, so the shared logger's Error clone drops it
+    // unless it is lifted to its own field — this is the only production
+    // signal for which transient condition fired.
+    const logged = logger.warn.mock.calls[0][0] as { causes: string[]; bucket: string }
+    expect(logged.bucket).toBe('user:upcoming')
+    expect(logged.causes[0]).toMatch(/caused object to be reset/)
+  })
+
+  it('applies the same allow/deny policy to a DO-backend RateLimitStoreUnavailableError', async () => {
+    // The DO-backed repo (createDoRateLimitRepo) wraps a retry-exhausted
+    // stub failure in this class — no D1 signature on it anywhere, so the
+    // instanceof arm of the gate is what keeps onStoreError working when the
+    // store is a Durable Object instead of D1 (#881).
+    const err = new RateLimitStoreUnavailableError('rate-limit DO /take failed', {
+      cause: new Error('Durable Object reset because its code was updated'),
+    })
+
+    const allowed = makeCtx({ repo: makeThrowingRepo(err) })
+    await expect(
+      createRateLimitBucket(config)(allowed.ctx as never, args),
+    ).resolves.toBeUndefined()
+    expect(allowed.logger.warn.mock.calls[0][1]).toMatch(/allowing request unlimited/)
+
+    const denied = makeCtx({ repo: makeThrowingRepo(err) })
+    await expect(
+      createRateLimitBucket(config)(denied.ctx as never, { ...args, onStoreError: 'deny' }),
+    ).rejects.toThrow(`rl:user:upcoming:${STORE_ERROR_RETRY_AFTER_SECONDS}`)
+  })
+
+  it('rethrows a deterministic store error rather than silently unlimiting', async () => {
+    const err = new Error('Failed query: too many SQL variables')
+    const { ctx, logger } = makeCtx({ repo: makeThrowingRepo(err) })
+
+    await expect(createRateLimitBucket(config)(ctx as never, args)).rejects.toThrow(
+      'too many SQL variables',
+    )
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('still throws 429 on a genuine denial (the catch does not swallow it)', async () => {
+    const { repo } = makeRepo({ allowed: false, retryAfterSeconds: 12 })
+    const { ctx, getRetryAfter } = makeCtx({ repo })
+
+    await expect(createRateLimitBucket(config)(ctx as never, args)).rejects.toThrow(
+      'rl:user:upcoming:12',
+    )
+    expect(getRetryAfter()).toBe('12')
   })
 })

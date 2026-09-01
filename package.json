@@ -70,6 +70,7 @@
     "fitness:db:migrate": "npm run fitness:db:migrate -w @rallypoint/fitness-db",
     "test:workers": "vitest run --config packages/realtime/vitest.workers.config.ts",
     "test:objstore": "vitest run --config packages/object-store/vitest.workers.config.ts",
+    "test:rate-limit-workers": "vitest run --config packages/rate-limit/vitest.workers.config.ts",
     "e2e": "playwright test -c e2e/playwright.config.ts",
     "e2e:headed": "playwright test -c e2e/playwright.config.ts --headed",
     "e2e:ui": "playwright test -c e2e/playwright.config.ts --ui"

@@ -65,10 +65,18 @@ export function HomePage() {
           </div>
           <div className="hero-phones">
             <div className="phone-col">
-              <Shot width={216} placeholder="Planner — My Day (390×844)" />
+              <Shot
+                placeholder="Planner — My Day"
+                src="/screens/planner-my-day.webp"
+                eager
+              />
             </div>
             <div className="phone-col">
-              <Shot width={216} placeholder="Health — Today (390×844)" />
+              <Shot
+                placeholder="Health — Today"
+                src="/screens/health-today.webp"
+                eager
+              />
             </div>
           </div>
         </div>
@@ -97,7 +105,12 @@ export function HomePage() {
             </Link>
           </div>
           <div className="prod-shots" style={{ order: -1 }}>
-            <Shot width={230} placeholder="Planner — My Day" caption="My Day" />
+            <Shot
+              width={230}
+              placeholder="Planner — My Day"
+              src="/screens/planner-my-day.webp"
+              caption="My Day"
+            />
           </div>
         </div>
       </section>
@@ -105,7 +118,12 @@ export function HomePage() {
       <section className="prod">
         <div className="wrap g2">
           <div className="prod-shots" style={{ order: 2 }}>
-            <Shot width={230} placeholder="Health — Live workout" caption="Live workout" />
+            <Shot
+              width={230}
+              placeholder="Health — Live workout"
+              src="/screens/health-live-workout.webp"
+              caption="Live workout"
+            />
           </div>
           <div>
             <span className="idx">02 — Health</span>
@@ -150,7 +168,12 @@ export function HomePage() {
             </a>
           </div>
           <div className="prod-shots" style={{ order: -1 }}>
-            <Shot width={230} placeholder="Events — Site map" caption="Site map" />
+            <Shot
+              width={230}
+              placeholder="Events — Now"
+              src="/screens/events-now.webp"
+              caption="Now"
+            />
           </div>
         </div>
       </section>

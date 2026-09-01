@@ -16,6 +16,9 @@ export default [
       '**/build/**',
       '**/.next/**',
       '**/coverage/**',
+      // wrangler dev's local state (bundle scratch under tmp/ churns while
+      // the stack runs and ESLint ENOENTs on files that vanish mid-scan).
+      '**/.wrangler/**',
       'db/migrations/**',
       // Agent worktrees are sandboxed branches — lint runs on the main checkout only.
       '.claude/worktrees/**',

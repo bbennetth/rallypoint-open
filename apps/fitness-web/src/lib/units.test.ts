@@ -10,6 +10,7 @@ import {
   formatTonnage,
   kgToDisplay,
   sanitizeWeightUnit,
+  snapLoadToIncrement,
 } from './units.js'
 
 describe('sanitizeWeightUnit', () => {
@@ -95,5 +96,18 @@ describe('distance units (running)', () => {
   it('formatDistanceM renders the natural unit', () => {
     expect(formatDistanceM(displayToM(5, 'mi'))).toBe('5 mi')
     expect(formatDistanceM(5000)).toBe('5,000 m')
+  })
+})
+
+describe('snapLoadToIncrement', () => {
+  it('snaps to whole 5s in lb and 2.5s in kg, kg matching the display', () => {
+    // 44.9 kg ≈ 98.99 lb → 100 lb; the returned kg round-trips to it.
+    expect(snapLoadToIncrement(44.9, 'lb')).toEqual({ display: 100, kg: 45.36 })
+    expect(snapLoadToIncrement(101.4, 'kg')).toEqual({ display: 102.5, kg: 102.5 })
+  })
+
+  it('floors at one increment — never a 0 (bodyweight) suggestion', () => {
+    expect(snapLoadToIncrement(0.8, 'lb').display).toBe(5)
+    expect(snapLoadToIncrement(0.4, 'kg').display).toBe(2.5)
   })
 })

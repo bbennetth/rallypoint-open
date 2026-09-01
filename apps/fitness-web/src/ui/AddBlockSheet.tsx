@@ -249,6 +249,8 @@ export function AddBlockSheet({ onClose, onAdd, blocks }: AddBlockSheetProps) {
         name: r.name,
         suggestedKg: rec?.kg ?? null,
         suggestedBasis: rec?.basis ?? null,
+        suggestedLastKg: rec?.lastKg ?? null,
+        suggestedBumpKg: rec?.bumpKg ?? null,
         sets: Array.from({ length: Math.max(1, r.sets) }, mkSet),
       }
       const restS = r.restS ? parseMmss(r.restS) : null

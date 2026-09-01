@@ -162,6 +162,15 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'done'] as const
 export const taskStatusField = z.enum(TASK_STATUSES)
 export type TaskStatus = (typeof TASK_STATUSES)[number]
 
+// System-only status for a recurring occurrence superseded by a newer
+// one (see ListItemSeriesRepo.skipStaleOccurrences). Deliberately NOT in
+// TASK_STATUSES: clients cannot PATCH an item to 'skipped'; the sweep
+// writes it directly with completed=true and completedAt=null so skipped
+// rows hide from every completed-filtered surface without counting as
+// "completed today".
+export const SKIPPED_STATUS = 'skipped' as const
+export type ItemStatus = TaskStatus | typeof SKIPPED_STATUS
+
 // --- Custom statuses (RPL v1.0.0 slice 1) ----------------------------
 
 // A status's category is the load-bearing classifier: completion
@@ -285,7 +294,7 @@ export const dueDateField = z
 // per-def validation is dynamic — the route runs `validateCustomFields`
 // against the list's field defs (a static schema can't know them). A
 // `null` value clears that key on PATCH.
-export const customFieldsField = z.record(z.unknown())
+export const customFieldsField = z.record(z.string(), z.unknown())
 
 // A label id (`lbl_…`) referenced by an item. Bounded like other ids;
 // referential integrity (belongs to the list, not deleted) is checked

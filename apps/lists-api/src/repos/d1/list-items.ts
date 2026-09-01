@@ -228,6 +228,13 @@ function buildUpdateSet(fields: UpdateListItemInput): Record<string, unknown> {
   if (fields.completed !== undefined) {
     set.completed = fields.completed
     set.completedAt = fields.completed ? new Date() : null
+    // Reopening a system-skipped occurrence (completed:false with no
+    // explicit status) resets 'skipped' back to 'todo' so the row
+    // behaves like any reopened task. An explicit status still wins via
+    // the block below.
+    if (fields.completed === false && fields.status === undefined) {
+      set.status = sql`case when ${listItems.status} = 'skipped' then 'todo' else ${listItems.status} end`
+    }
   }
   if (fields.status !== undefined) {
     set.status = fields.status

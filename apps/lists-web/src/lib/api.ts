@@ -25,6 +25,7 @@ import type {
   CreateStatusInput,
   FilterSpec,
   GroupRole,
+  ItemStatus,
   ListType,
   ReorderStatusesInput,
   ScopeType,
@@ -73,7 +74,8 @@ export interface ListItemDto {
   assigned_to: string | null
   completed: boolean
   completed_at: string | null
-  status: TaskStatus | null
+  // 'skipped' is system-set only (recurrence sweep); never sent on writes.
+  status: ItemStatus | null
   // Custom-status id (`lst_…`) the item sits on (RPL v1.0.0). Null on a
   // standard list, or on a tasks-list row that predates S1 and hasn't been
   // re-touched (the board falls back to the legacy `status` category).

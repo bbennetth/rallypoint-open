@@ -27,3 +27,11 @@ https://rallypt.dev/*
   # modern browsers.
   Content-Security-Policy: default-src 'self'; script-src 'self' https://t.rallypt.app https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://t.rallypt.app https://cloudflareinsights.com https://us.i.posthog.com https://*.i.posthog.com https://id.rallypt.app https://id.rallypt.dev https://events.rallypt.app https://events.rallypt.dev https://lists.rallypt.app https://lists.rallypt.dev https://money.rallypt.app https://money.rallypt.dev https://planner.rallypt.app https://planner.rallypt.dev https://health.rallypt.app https://health.rallypt.dev; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
   Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+
+# Marketing screenshots. Unlike vite's hashed bundle output these are
+# stable, unhashed paths that a re-capture overwrites in place, so they
+# can't be immutable-cached — one day is the deliberate tradeoff between
+# repeat-visit cost and how long a stale shot can linger after a
+# re-capture ships.
+/screens/*
+  Cache-Control: public, max-age=86400

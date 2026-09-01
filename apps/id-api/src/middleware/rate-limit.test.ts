@@ -22,8 +22,13 @@ const ENV = parseEnv({
   TRUSTED_PROXY_HEADER: 'xff',
 })
 
-function buildApp() {
+function buildApp(opts?: { takeTokenError?: unknown }) {
   const repos = buildInMemoryRepos()
+  if (opts?.takeTokenError) {
+    repos.rateLimit.takeToken = async () => {
+      throw opts.takeTokenError
+    }
+  }
   const services = {
     mailer: createLogMailer({ sink: () => undefined }),
     captcha: createAlwaysAllowVerifier(),
@@ -99,12 +104,13 @@ describe('rateLimit middleware', () => {
 // handlers (the email lives in the parsed body, the userId comes from the
 // session), so they take a Context rather than being middleware. We mount
 // tiny routes that call them and record every bucketKey the repo sees.
-function buildHelperApp() {
+function buildHelperApp(opts?: { takeTokenError?: unknown }) {
   const repos = buildInMemoryRepos()
   const recordedKeys: string[] = []
   const realTakeToken = repos.rateLimit.takeToken.bind(repos.rateLimit)
   repos.rateLimit.takeToken = async (input) => {
     recordedKeys.push(input.bucketKey)
+    if (opts?.takeTokenError) throw opts.takeTokenError
     return realTakeToken(input)
   }
   const services = {
@@ -149,6 +155,45 @@ function buildHelperApp() {
   })
   return { app, recordedKeys }
 }
+
+// id-api's surface is almost entirely abuse-facing, so its rate-limit config
+// sets onStoreError: 'deny' app-wide. These pin that wiring: when the limiter's
+// own store blips, id-api must NOT fall back to unlimited (a brute-force
+// window) — and must not 500 either. Uses the app's real config + error
+// handler, so an accidental revert to the api-kit default fails here.
+describe('rate-limit store failure (id-api fails closed)', () => {
+  // The production shape: drizzle's wrapper around a D1 storage reset.
+  const transient = () =>
+    new Error('Failed query: insert into "rate_limits" …', {
+      cause: new Error('D1 DB storage operation exceeded timeout which caused object to be reset.'),
+    })
+
+  it('429s (not 500, not unlimited) on the per-email bucket', async () => {
+    const { app } = buildHelperApp({ takeTokenError: transient() })
+    const res = await app.request('/email-limited?email=alice%40example.com')
+    expect(res.status).toBe(429)
+    expect(res.headers.get('retry-after')).toBeTruthy()
+    const body = (await res.json()) as { error?: { code?: string } }
+    expect(body.error?.code).toBe('rate_limited')
+  })
+
+  it('429s on the per-user bucket', async () => {
+    const { app } = buildHelperApp({ takeTokenError: transient() })
+    expect((await app.request('/user-limited?uid=user_1')).status).toBe(429)
+  })
+
+  it('429s on the per-IP middleware path', async () => {
+    const { app } = buildApp({ takeTokenError: transient() })
+    const res = await app.request('/limited', { headers: { 'x-forwarded-for': '203.0.113.1' } })
+    expect(res.status).toBe(429)
+  })
+
+  it('still 500s on a deterministic store error (a real bug must not read as rate-limiting)', async () => {
+    const { app } = buildHelperApp({ takeTokenError: new Error('Failed query: syntax error') })
+    const res = await app.request('/email-limited?email=alice%40example.com')
+    expect(res.status).toBe(500)
+  })
+})
 
 describe('applyPerEmailRateLimit', () => {
   const EMAIL = 'alice@example.com'

@@ -49,6 +49,16 @@ export function strengthSetUnit(
   return 'reps'
 }
 
+/** True when APPLY_SUGGESTED_LOAD would write to this set: undone,
+ *  working, rep-unit. The ONE copy of the rule — shared by the reducer's
+ *  touched-set filter and the live page's Use-pill gate so the button
+ *  can never render for an action that would no-op. */
+export function setTakesSuggestedLoad(
+  s: Pick<StrengthSet, 'reps' | 'calories' | 'distanceM' | 'timeS' | 'unit' | 'done' | 'setType'>,
+): boolean {
+  return !s.done && s.setType !== 'warmup' && strengthSetUnit(s) === 'reps'
+}
+
 export interface StrengthSet {
   /** null for sets prescribed in a non-rep unit (calories/distance/time). */
   reps: number | null
@@ -89,6 +99,13 @@ export interface StrengthBlock {
   /** Optional pre-computed weight suggestion (see weight-rec.ts). */
   suggestedKg: number | null
   suggestedBasis: string | null
+  /** Structured basis behind `suggestedBasis` (kg): the anchoring last
+   *  top-set load + progression bump, so the UI can rebuild the line
+   *  in the athlete's display unit instead of showing raw kg. Optional
+   *  — absent on pre-prefill persisted snapshots, which fall back to
+   *  the string. */
+  suggestedLastKg?: number | null
+  suggestedBumpKg?: number | null
   sets: StrengthSet[]
   currentSetIdx: number
   /** Prescribed rest between this block's sets (template `restS`).
@@ -104,6 +121,17 @@ export interface StrengthBlock {
    *  superset pass (template `intraRestS`). Undefined = 0, the classic
    *  no-rest handoff. Only meaningful on grouped blocks. */
   intraRestS?: number
+  /** History-prefill directive. 'override' lets prefillBlockFromHistory
+   *  replace this block's PRESCRIBED reps/loads with the athlete's last
+   *  logged session — stamped on template-hydrated blocks, whose targets
+   *  are stale snapshots of an older session. Absent (composer Start-now
+   *  and add-sheet blocks, whose numbers the athlete just typed) the
+   *  prefill fills blank fields only. One-shot: consumed by the first
+   *  prefill pass that sees fetched history, and disarmed the moment the
+   *  athlete interacts with the block (set edit/complete/toggle/add/
+   *  remove, applied suggestion), so a late fetch or a mid-session
+   *  reload can never rewrite fields the athlete has since touched. */
+  historyPrefill?: 'override'
 }
 
 export type StrengthPhase = 'pre' | 'running' | 'done'
@@ -117,6 +145,13 @@ export interface StrengthSessionState {
    *  starts, and sessions persisted before this field landed. Lets
    *  the done overlay / history offer "update the template". */
   templateId: string | null
+  /** The template this session was started from, custom OR benchmark
+   *  (null for free sessions). Unlike `templateId` this never gates on
+   *  ownership — it only marks the scheduled plan row done on the /log
+   *  dashboard (stamped into the workout payload as sourceTemplateId).
+   *  Lives on the state (not the URL) so it survives the live page
+   *  stripping `?templateId=` and a resume from localStorage. */
+  sourceTemplateId: string | null
   blocks: StrengthBlock[]
   /** Currently active block index (the one whose sets the user is
    *  working through). */
@@ -206,6 +241,13 @@ export type StrengthAction =
   /** Stop the running stopwatch, writing base + elapsed into the set's
    *  timeS. No-op when no watch is running. */
   | { kind: 'STOP_SET_TIMER'; nowMs: number }
+  /** Accept the block's SUGGESTED strip: write the suggestion into every
+   *  undone working rep set's load. Warmups, done sets, and non-rep
+   *  work are untouched; no-op when the block carries no suggestion.
+   *  `kg` is the display-snapped value the strip actually showed (the UI
+   *  rounds to the display unit's plate increment — recLineView);
+   *  omitted, the raw suggestedKg applies. */
+  | { kind: 'APPLY_SUGGESTED_LOAD'; blockIdx: number; kg?: number }
   | { kind: 'ADD_SET'; blockIdx: number }
   | { kind: 'REMOVE_SET'; blockIdx: number; setIdx: number }
   | { kind: 'TOGGLE_SET_TYPE'; blockIdx: number; setIdx: number }
@@ -222,10 +264,7 @@ function clamp(n: number, lo: number, hi: number): number {
 
 /** Inclusive index range of the consecutive same-group bracket that
  *  contains `idx`. Ungrouped blocks are a bracket of one. */
-export function bracketRange(
-  blocks: readonly StrengthBlock[],
-  idx: number,
-): [number, number] {
+export function bracketRange(blocks: readonly StrengthBlock[], idx: number): [number, number] {
   const g = blocks[idx]?.group ?? null
   if (g == null) return [idx, idx]
   let start = idx
@@ -236,6 +275,18 @@ export function bracketRange(
 }
 
 const hasUndone = (b: StrengthBlock) => b.sets.some((s) => !s.done)
+
+/** Strip the one-shot history-prefill override from a block the athlete
+ *  just interacted with. History fetches land asynchronously — an edit,
+ *  completion, or applied suggestion made before then must win over the
+ *  armed override, or the late prefill would silently rewrite it (see
+ *  strength-prefill.ts). */
+function disarmHistoryPrefill(b: StrengthBlock): StrengthBlock {
+  if (b.historyPrefill == null) return b
+  const next = { ...b }
+  delete next.historyPrefill
+  return next
+}
 
 /** First group letter A–Z not already used by any block. Falls back to
  *  'Z' if all 26 are somehow taken (schema caps blocks at 20, so this
@@ -304,10 +355,7 @@ export function pausedAwareElapsedMs(
 
 /** Fold an in-flight pause into pausedTotalMs so the clock resumes.
  *  No-op when not paused. Negative deltas (clock jitter) clamp to 0. */
-function resumeIfPaused(
-  state: StrengthSessionState,
-  nowMs: number,
-): StrengthSessionState {
+function resumeIfPaused(state: StrengthSessionState, nowMs: number): StrengthSessionState {
   if (state.pausedAtMs == null) return state
   return {
     ...state,
@@ -326,10 +374,7 @@ export function runningSetTimeS(timer: StrengthSetTimer, nowMs: number): number 
 /** Bank a running stopwatch into its set's timeS and clear it. No-op
  *  when no watch runs; a watch whose indices no longer resolve (block/
  *  set removed out from under it) is dropped without writing. */
-function bankSetTimer(
-  state: StrengthSessionState,
-  nowMs: number,
-): StrengthSessionState {
+function bankSetTimer(state: StrengthSessionState, nowMs: number): StrengthSessionState {
   const t = state.setTimer
   if (t == null) return state
   const block = state.blocks[t.blockIdx]
@@ -389,12 +434,15 @@ export function strengthSessionReducer(
     case 'EDIT_SET_METRIC': {
       const blocks = state.blocks.map((b, i) => {
         if (i !== action.blockIdx) return b
-        return {
+        // Out-of-range setIdx is a no-op (and must not disarm), mirroring
+        // the ADD_SET/REMOVE_SET guard order.
+        if (!b.sets[action.setIdx]) return b
+        return disarmHistoryPrefill({
           ...b,
           sets: b.sets.map((s, j) =>
             j === action.setIdx ? { ...s, [action.field]: action.value } : s,
           ),
-        }
+        })
       })
       return { ...state, blocks }
     }
@@ -414,13 +462,15 @@ export function strengthSessionReducer(
       }
       const blocks = state.blocks.map((b, i) => {
         if (i !== action.blockIdx) return b
-        return {
+        // Completing a set at the numbers on screen accepts them —
+        // disarm so a late history fetch can't rewrite the block.
+        return disarmHistoryPrefill({
           ...b,
           sets: b.sets.map((s, j) =>
             j === action.setIdx ? { ...s, done: true, doneAtMs: action.nowMs } : s,
           ),
           currentSetIdx: Math.min(action.setIdx + 1, b.sets.length - 1),
-        }
+        })
       })
       // Superset-aware advance: the pointer hands off between bracket
       // members mid-pass (no rest), loops back between passes (restS),
@@ -467,12 +517,8 @@ export function strengthSessionReducer(
       // Handoff semantics: minus clamps to 1s (never auto-dismisses —
       // Skip is the explicit exit), plus grows the total so the
       // countdown-ring fraction stays proportionate.
-      const next = Math.max(
-        action.deltaS < 0 ? 1 : 5,
-        state.restRemainingS + action.deltaS,
-      )
-      const restTotalS =
-        action.deltaS > 0 ? state.restTotalS + action.deltaS : state.restTotalS
+      const next = Math.max(action.deltaS < 0 ? 1 : 5, state.restRemainingS + action.deltaS)
+      const restTotalS = action.deltaS > 0 ? state.restTotalS + action.deltaS : state.restTotalS
       return { ...state, restRemainingS: next, restTotalS }
     }
     case 'SKIP_REST': {
@@ -501,16 +547,13 @@ export function strengthSessionReducer(
       if (state.phase !== 'running') return state
       if (action.blocks.length === 0) return state
       const attachTo =
-        action.attachTo != null &&
-        action.attachTo >= 0 &&
-        action.attachTo < state.blocks.length
+        action.attachTo != null && action.attachTo >= 0 && action.attachTo < state.blocks.length
           ? action.attachTo
           : null
       // The superset key the incoming blocks share: the attach target's
       // existing group, or a fresh unused letter.
       const group = action.asSuperset
-        ? (attachTo != null ? state.blocks[attachTo]!.group : null) ??
-          nextGroupKey(state.blocks)
+        ? ((attachTo != null ? state.blocks[attachTo]!.group : null) ?? nextGroupKey(state.blocks))
         : null
       const fresh: StrengthBlock[] = action.blocks.map((b) => ({
         ...b,
@@ -521,11 +564,7 @@ export function strengthSessionReducer(
       // is never split by the insertion.
       const insertAt =
         attachTo != null ? bracketRange(state.blocks, attachTo)[1] + 1 : state.blocks.length
-      const blocks = [
-        ...state.blocks.slice(0, insertAt),
-        ...fresh,
-        ...state.blocks.slice(insertAt),
-      ]
+      const blocks = [...state.blocks.slice(0, insertAt), ...fresh, ...state.blocks.slice(insertAt)]
       // Joining an ungrouped target stamps the shared key on it too, so
       // target + newcomers form one consecutive bracket.
       if (group != null && attachTo != null) {
@@ -635,6 +674,29 @@ export function strengthSessionReducer(
     case 'STOP_SET_TIMER': {
       return bankSetTimer(state, action.nowMs)
     }
+    case 'APPLY_SUGGESTED_LOAD': {
+      if (state.phase !== 'running') return state
+      const block = state.blocks[action.blockIdx]
+      if (!block || block.suggestedKg == null) return state
+      const kg = action.kg ?? block.suggestedKg
+      if (!Number.isFinite(kg) || kg < 0) return state
+      let changed = false
+      const sets = block.sets.map((s) => {
+        if (!setTakesSuggestedLoad(s)) return s
+        if (s.loadKg === kg) return s
+        changed = true
+        return { ...s, loadKg: kg }
+      })
+      if (!changed) return state
+      return {
+        ...state,
+        // Accepting the suggestion also disarms an armed override — a
+        // late history fetch must not rewrite the applied loads.
+        blocks: state.blocks.map((b, i) =>
+          i === action.blockIdx ? disarmHistoryPrefill({ ...b, sets }) : b,
+        ),
+      }
+    }
     case 'ADD_SET': {
       if (state.phase !== 'running') return state
       const blocks = state.blocks.map((b, i) => {
@@ -655,7 +717,7 @@ export function strengthSessionReducer(
         const sets = [...b.sets, fresh]
         // A fully-done block gets its pointer moved onto the new work.
         const currentSetIdx = b.sets.every((s) => s.done) ? sets.length - 1 : b.currentSetIdx
-        return { ...b, sets, currentSetIdx }
+        return disarmHistoryPrefill({ ...b, sets, currentSetIdx })
       })
       return { ...state, blocks }
     }
@@ -686,21 +748,26 @@ export function strengthSessionReducer(
         let currentSetIdx = b.currentSetIdx
         if (action.setIdx < currentSetIdx) currentSetIdx -= 1
         currentSetIdx = clamp(currentSetIdx, 0, sets.length - 1)
-        return { ...b, sets, currentSetIdx }
+        return disarmHistoryPrefill({ ...b, sets, currentSetIdx })
       })
       return { ...state, blocks, setTimer }
     }
     case 'TOGGLE_SET_TYPE': {
       const blocks = state.blocks.map((b, i) => {
         if (i !== action.blockIdx) return b
-        return {
+        // Same no-op-without-disarm guard as EDIT_SET_METRIC.
+        if (!b.sets[action.setIdx]) return b
+        return disarmHistoryPrefill({
           ...b,
           sets: b.sets.map((s, j) =>
             j === action.setIdx
-              ? { ...s, setType: (s.setType === 'warmup' ? 'working' : 'warmup') as 'warmup' | 'working' }
+              ? {
+                  ...s,
+                  setType: (s.setType === 'warmup' ? 'working' : 'warmup') as 'warmup' | 'working',
+                }
               : s,
           ),
-        }
+        })
       })
       return { ...state, blocks }
     }
@@ -735,6 +802,7 @@ export function buildStrengthSession({
   sessionId,
   templateName,
   templateId = null,
+  sourceTemplateId = null,
   blocks,
   defaultRestS = DEFAULT_REST_S,
 }: {
@@ -742,6 +810,9 @@ export function buildStrengthSession({
   templateName: string
   /** Source template id (custom templates only); omit for free sessions. */
   templateId?: string | null
+  /** Starting template id, benchmarks included (done-detection); omit
+   *  for free sessions. */
+  sourceTemplateId?: string | null
   blocks: Omit<StrengthBlock, 'currentSetIdx'>[]
   /** User's default rest setting; falls back to the engine's 90 s. */
   defaultRestS?: number
@@ -751,6 +822,7 @@ export function buildStrengthSession({
     sessionId,
     templateName,
     templateId,
+    sourceTemplateId,
     blocks: blocks.map((b) => ({ ...b, currentSetIdx: 0 })),
     currentBlockIdx: 0,
     startedAtMs: null,
@@ -779,6 +851,7 @@ export function sessionFromStrengthBody({
   sessionId,
   templateName,
   templateId = null,
+  sourceTemplateId = null,
   body,
   defaultRestS,
 }: {
@@ -786,6 +859,8 @@ export function sessionFromStrengthBody({
   templateName: string
   /** Source template id (custom templates only); omit for free sessions. */
   templateId?: string | null
+  /** Starting template id, benchmarks included (done-detection). */
+  sourceTemplateId?: string | null
   body: StrengthBody
   defaultRestS?: number
 }): StrengthSessionState {
@@ -793,6 +868,7 @@ export function sessionFromStrengthBody({
     sessionId,
     templateName,
     templateId,
+    sourceTemplateId,
     ...(defaultRestS !== undefined ? { defaultRestS } : {}),
     blocks: body.blocks.map((b) => {
       const firstReps = b.sets[0]?.reps
@@ -802,6 +878,8 @@ export function sessionFromStrengthBody({
         name: b.name,
         suggestedKg: rec?.kg ?? null,
         suggestedBasis: rec?.basis ?? null,
+        suggestedLastKg: rec?.lastKg ?? null,
+        suggestedBumpKg: rec?.bumpKg ?? null,
         sets: b.sets.map((s) => ({
           // A max-effort set's authored `reps` is only a "last time you
           // got N" hint — it must NOT pre-fill the achieved-reps input,
@@ -885,7 +963,7 @@ export function restoreStrengthSession(raw: string): StrengthSessionState | null
       typeof parsed.sessionId !== 'string' ||
       typeof parsed.templateName !== 'string' ||
       !Array.isArray(parsed.blocks) ||
-      parsed.phase !== 'pre' && parsed.phase !== 'running' && parsed.phase !== 'done'
+      (parsed.phase !== 'pre' && parsed.phase !== 'running' && parsed.phase !== 'done')
     ) {
       return null
     }
@@ -915,10 +993,7 @@ export function restoreStrengthSession(raw: string): StrengthSessionState | null
         if (s.rpe != null && (!Number.isFinite(s.rpe) || s.rpe < 0 || s.rpe > 10)) return null
       }
     }
-    if (
-      state.pausedAtMs != null &&
-      (!Number.isFinite(state.pausedAtMs) || state.pausedAtMs < 0)
-    ) {
+    if (state.pausedAtMs != null && (!Number.isFinite(state.pausedAtMs) || state.pausedAtMs < 0)) {
       return null
     }
     // Stopwatch snapshots restore live (startedAtMs is wall-clock, so
@@ -938,7 +1013,12 @@ export function restoreStrengthSession(raw: string): StrengthSessionState | null
       Number.isInteger(t.setIdx) &&
       state.blocks[t.blockIdx]?.sets[t.setIdx] != null
     ) {
-      setTimer = { blockIdx: t.blockIdx, setIdx: t.setIdx, startedAtMs: t.startedAtMs, baseTimeS: t.baseTimeS }
+      setTimer = {
+        blockIdx: t.blockIdx,
+        setIdx: t.setIdx,
+        startedAtMs: t.startedAtMs,
+        baseTimeS: t.baseTimeS,
+      }
     }
     const VALID_UNITS: readonly string[] = ['reps', 'calories', 'distanceM', 'timeS']
     return {
@@ -952,19 +1032,20 @@ export function restoreStrengthSession(raw: string): StrengthSessionState | null
       // templateId — restore as null (update-template simply isn't
       // offered for them). Non-string junk is dropped the same way.
       templateId: typeof state.templateId === 'string' ? state.templateId : null,
+      // Same backfill for the done-detection link (landed later still).
+      sourceTemplateId: typeof state.sourceTemplateId === 'string' ? state.sourceTemplateId : null,
       pausedTotalMs:
-        Number.isFinite(state.pausedTotalMs) && state.pausedTotalMs >= 0
-          ? state.pausedTotalMs
-          : 0,
+        Number.isFinite(state.pausedTotalMs) && state.pausedTotalMs >= 0 ? state.pausedTotalMs : 0,
       defaultRestS:
-        Number.isFinite(state.defaultRestS) &&
-        state.defaultRestS >= 0 &&
-        state.defaultRestS <= 600
+        Number.isFinite(state.defaultRestS) && state.defaultRestS >= 0 && state.defaultRestS <= 600
           ? state.defaultRestS
           : 90,
       setTimer,
-      blocks: state.blocks.map((b) => ({
+      blocks: state.blocks.map(({ historyPrefill, ...b }) => ({
         ...b,
+        // Junk directive values in a hand-rolled blob are stripped; only
+        // the literal 'override' survives a restore.
+        ...(historyPrefill === 'override' ? { historyPrefill: 'override' as const } : {}),
         sets: b.sets.map(({ unit, ...s }) => ({
           ...s,
           reps: s.reps ?? null,

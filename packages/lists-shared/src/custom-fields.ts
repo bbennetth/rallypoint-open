@@ -167,11 +167,17 @@ function fieldTypeSchema(def: FieldDefForValidation): z.ZodTypeAny {
     case 'text':
       return z.string().max(10000, 'Text value must be at most 10000 characters.')
     case 'number':
-      return z
-        .number({ invalid_type_error: 'Value must be a number.' })
-        .finite('Value must be a finite number.')
+      // zod 4 rejects non-finite numbers at the type level (v3 needed a
+      // `.finite()` step), so the finite-specific message is routed through
+      // the error callback instead of a now-unreachable `.finite()` check.
+      return z.number({
+        error: (iss) =>
+          typeof iss.input === 'number' && !Number.isNaN(iss.input)
+            ? 'Value must be a finite number.'
+            : 'Value must be a number.',
+      })
     case 'checkbox':
-      return z.boolean({ invalid_type_error: 'Value must be a boolean.' })
+      return z.boolean({ error: 'Value must be a boolean.' })
     case 'date':
       return z.union([z.string(), z.number()]).transform((v, ctx) => {
         const d = new Date(v)
@@ -256,7 +262,11 @@ export function validateCustomFields(
       for (const iss of parsed.error.issues) {
         issues.push({
           code: iss.code,
-          path: ['customFields', def.id, ...iss.path],
+          path: [
+            'customFields',
+            def.id,
+            ...iss.path.map((p) => (typeof p === 'symbol' ? String(p) : p)),
+          ],
           message: iss.message,
         })
       }

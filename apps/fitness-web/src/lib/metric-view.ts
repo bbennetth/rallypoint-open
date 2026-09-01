@@ -203,6 +203,36 @@ export function cardForWeightUnit(vm: MetricKindCardVm, weightUnit: WeightUnit):
 }
 
 // ---------------------------------------------------------------------------
+// /log launch-pad bodyweight tile
+// ---------------------------------------------------------------------------
+
+export interface BodyweightTileVm {
+  // Last logged bodyweight formatted in the display unit ("82.4 kg"),
+  // '—' while the metrics cache is cold, or null when the user has never
+  // logged a weigh-in (the sub line carries the prompt instead).
+  value: string | null
+  sub: string
+}
+
+/**
+ * The /log launch pad's bodyweight tile line. `undefined` metrics means
+ * the cached query hasn't resolved yet — show a placeholder rather than
+ * claiming "never logged" exactly when we don't know (same convention as
+ * foodTileVm's loading dash). Storage is kg; the shown value follows the
+ * weight-unit preference via cardForWeightUnit.
+ */
+export function bodyweightTileVm(
+  metrics: MetricDto[] | undefined,
+  weightUnit: WeightUnit,
+): BodyweightTileVm {
+  if (metrics === undefined) return { value: '—', sub: 'Last weigh-in' }
+  const card = buildKindCards(metrics).find((c) => c.kind === 'bodyweight')
+  if (!card || card.latestValue === null) return { value: null, sub: 'Log a weigh-in' }
+  const display = cardForWeightUnit(card, weightUnit)
+  return { value: formatValue(display.latestValue, display.unit), sub: 'Last weigh-in' }
+}
+
+// ---------------------------------------------------------------------------
 // Log data point form state → CreateMetricInput
 // ---------------------------------------------------------------------------
 
@@ -343,4 +373,41 @@ export function datetimeLocalToIso(dt: string): string {
 /** Return the current local datetime as a datetime-local input value */
 export function nowDatetimeLocal(): string {
   return isoToDatetimeLocal(new Date().toISOString())
+}
+
+// ---------------------------------------------------------------------------
+// Nearest-metric lookup (progress photo compare)
+// ---------------------------------------------------------------------------
+
+/**
+ * Find the metric whose recordedAt is closest (absolute distance) to
+ * `takenAt`, within `windowDays`. Tolerant of unsorted input; ties resolve
+ * to the earlier-recorded entry; non-finite values and metrics outside the
+ * window are ignored. Returns null when nothing qualifies.
+ */
+export function nearestMetricTo(
+  takenAt: string,
+  metrics: MetricDto[],
+  windowDays = 7,
+): MetricDto | null {
+  const target = new Date(takenAt).getTime()
+  if (!Number.isFinite(target)) return null
+  const windowMs = windowDays * 24 * 60 * 60 * 1000
+
+  let best: MetricDto | null = null
+  let bestDist = Infinity
+  let bestTime = Infinity
+  for (const m of metrics) {
+    if (!Number.isFinite(m.value)) continue
+    const t = new Date(m.recordedAt).getTime()
+    if (!Number.isFinite(t)) continue
+    const dist = Math.abs(t - target)
+    if (dist > windowMs) continue
+    if (dist < bestDist || (dist === bestDist && t < bestTime)) {
+      best = m
+      bestDist = dist
+      bestTime = t
+    }
+  }
+  return best
 }

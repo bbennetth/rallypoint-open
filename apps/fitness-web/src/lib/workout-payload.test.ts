@@ -17,9 +17,39 @@ function session(): StrengthSessionState {
         suggestedKg: null,
         suggestedBasis: null,
         sets: [
-          { reps: 5, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: 100, done: false, doneAtMs: null, setType: 'working' as const },
-          { reps: 5, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: null, done: false, doneAtMs: null, setType: 'working' as const },
-          { reps: 5, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: 100, done: false, doneAtMs: null, setType: 'working' as const },
+          {
+            reps: 5,
+            calories: null,
+            distanceM: null,
+            timeS: null,
+            inclinePct: null,
+            loadKg: 100,
+            done: false,
+            doneAtMs: null,
+            setType: 'working' as const,
+          },
+          {
+            reps: 5,
+            calories: null,
+            distanceM: null,
+            timeS: null,
+            inclinePct: null,
+            loadKg: null,
+            done: false,
+            doneAtMs: null,
+            setType: 'working' as const,
+          },
+          {
+            reps: 5,
+            calories: null,
+            distanceM: null,
+            timeS: null,
+            inclinePct: null,
+            loadKg: 100,
+            done: false,
+            doneAtMs: null,
+            setType: 'working' as const,
+          },
         ],
       },
       {
@@ -28,7 +58,17 @@ function session(): StrengthSessionState {
         suggestedKg: null,
         suggestedBasis: null,
         sets: [
-          { reps: 8, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: 0, done: false, doneAtMs: null, setType: 'working' as const },
+          {
+            reps: 8,
+            calories: null,
+            distanceM: null,
+            timeS: null,
+            inclinePct: null,
+            loadKg: 0,
+            done: false,
+            doneAtMs: null,
+            setType: 'working' as const,
+          },
         ],
       },
     ],
@@ -46,7 +86,12 @@ describe('buildStrengthWorkoutPayload', () => {
     s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 1, setIdx: 0, nowMs: 2 })
     const p = buildStrengthWorkoutPayload(s, null, AT)
     expect(p.sets).toHaveLength(2)
-    expect(p.sets![0]).toMatchObject({ exerciseId: 'fx_seed_back_squat', setIndex: 0, reps: 5, loadKg: 100 })
+    expect(p.sets![0]).toMatchObject({
+      exerciseId: 'fx_seed_back_squat',
+      setIndex: 0,
+      reps: 5,
+      loadKg: 100,
+    })
     expect(p.sets![1]).toMatchObject({ exerciseId: 'fx_seed_pull_up', setIndex: 1000, reps: 8 })
     // Bodyweight zero load drops from the logged set (junk-zero rule).
     expect(p.sets![1]!.loadKg).toBeUndefined()
@@ -67,6 +112,21 @@ describe('buildStrengthWorkoutPayload', () => {
     })
   })
 
+  it('stamps sourceTemplateId independently of templateId — benchmarks included', () => {
+    // A benchmark start: no custom templateId link, but the source id
+    // (carried on the session state, so it survives the live page
+    // stripping ?templateId= and a localStorage resume) still lands so
+    // /log done-detection can match the scheduled row.
+    const bench = { ...session(), sourceTemplateId: 'wt_bench_1' }
+    const p = buildStrengthWorkoutPayload(bench, null, AT)
+    expect(p.payload).toMatchObject({ sourceTemplateId: 'wt_bench_1' })
+    expect(p.payload).not.toHaveProperty('templateId')
+    // A free session stamps neither.
+    expect(buildStrengthWorkoutPayload(session(), null, AT).payload).not.toHaveProperty(
+      'sourceTemplateId',
+    )
+  })
+
   it('threads setType through to the logged set payload', () => {
     let s = session()
     s = strengthSessionReducer(s, { kind: 'TOGGLE_SET_TYPE', blockIdx: 0, setIdx: 0 })
@@ -81,7 +141,11 @@ describe('buildStrengthWorkoutPayload', () => {
     let s = session()
     s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 0, setIdx: 0, nowMs: 1 })
     s = strengthSessionReducer(s, {
-      kind: 'EDIT_SET_METRIC', blockIdx: 0, setIdx: 0, field: 'rpe', value: 9,
+      kind: 'EDIT_SET_METRIC',
+      blockIdx: 0,
+      setIdx: 0,
+      field: 'rpe',
+      value: 9,
     })
     const p = buildStrengthWorkoutPayload(s, 7, AT)
     expect(p.sets![0]!.rpe).toBe(9)

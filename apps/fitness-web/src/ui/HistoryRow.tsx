@@ -44,7 +44,10 @@ export function HistoryRow({ workout, isPr = false, onClick, onDelete }: History
     summaryLine = wodPayloadTypeLabel(wod)
     score = wodPayloadScore(wod)
   } else {
-    summaryLine = formatWorkoutSummaryLine(summary)
+    // The score below already renders the tonnage (same formatTonnage,
+    // same unit), so the line carries sets/distance only — otherwise the
+    // row read "12 sets · 16.1k lb" next to a "16.1k lb" score.
+    summaryLine = formatWorkoutSummaryLine(summary, { unit, omitTonnage: true })
     if (summary.tonnageKg > 0) {
       // stored kg -> display unit; storage stays kg
       score = formatTonnage(summary.tonnageKg, unit)
@@ -70,11 +73,7 @@ export function HistoryRow({ workout, isPr = false, onClick, onDelete }: History
         </span>
         <span className="mid">
           <span className="ti">
-            <span style={{
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}>{title}</span>
+            <span>{title}</span>
             {isPr && <span className="prtag">PR</span>}
           </span>
           {summaryLine && <span className="sumline">{summaryLine}</span>}

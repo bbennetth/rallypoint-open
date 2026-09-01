@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
-import { TENANT_DEFAULT } from '@rallypoint/shared'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
+import { applyPerUserRateLimit } from '../middleware/rate-limit.js'
 
 // Coordinate weather forecast for the workout logger (running weather
 // snapshots). Mirrors planner-api's My Day weather proxy: the browser
@@ -16,17 +16,15 @@ const RATE_LIMIT = { limit: 30, windowSeconds: 60 }
 export const weatherRoutes = new Hono<HonoApp>().get('/api/v1/ui/weather', async (c) => {
   const userId = c.var.session!.userId
 
-  const bucketKey = `user:${userId}:weather`
-  const decision = await c.var.repos.rateLimit.takeToken({
-    tenantId: TENANT_DEFAULT,
-    bucketKey,
+  // Via the shared helper rather than calling takeToken directly: it produces
+  // the identical `user:<id>:weather` bucket key and 429, and routes this
+  // through the store-failure handling (a D1 blip degrades instead of 500ing).
+  await applyPerUserRateLimit(c, {
+    userId,
+    route: 'weather',
     limit: RATE_LIMIT.limit,
     windowSeconds: RATE_LIMIT.windowSeconds,
   })
-  if (!decision.allowed) {
-    c.header('Retry-After', String(decision.retryAfterSeconds))
-    throw errors.rateLimited(decision.retryAfterSeconds, 'user:weather')
-  }
 
   const weather = c.var.services.weather
   if (!weather) {

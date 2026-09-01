@@ -1,5 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import { createRateLimit, createApplyPerUserRateLimit } from '@rallypoint/api-kit'
+import type { IpRateLimitPolicy } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 
@@ -8,10 +9,9 @@ import { errors } from '../errors.js'
 //   - Per-IP: `rateLimit()` middleware, bucket key `ip:<hash>:<route-slug>`.
 //   - Per-user: `applyPerUserRateLimit()` inside session-gated handlers.
 
-export interface RateLimitPolicy {
-  route: string // short slug included in the bucket key
-  perIp: { limit: number; windowSeconds: number }
-}
+// This middleware is the per-IP path (per-user buckets go through
+// applyPerUserRateLimit below), so the shared IP-narrowed policy applies.
+export type RateLimitPolicy = IpRateLimitPolicy
 
 // Shared per-user policy for the Workers AI vision endpoints (food
 // scan/text/label + WOD scan). One bucket across all four so a user can't

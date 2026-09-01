@@ -121,7 +121,12 @@ export const roundsForTimeBodySchema = baseRoundsBody.extend({
   // Barbara: exactly 3 minutes of rest between each of the 5 rounds. The
   // rest is part of the prescribed stimulus, so the live logger surfaces a
   // rest timer between rounds.
-  restBetweenRoundsS: z.number().int().min(0).max(30 * 60).optional(),
+  restBetweenRoundsS: z
+    .number()
+    .int()
+    .min(0)
+    .max(30 * 60)
+    .optional(),
 })
 
 export const amrapBodySchema = z.object({
@@ -141,7 +146,11 @@ export const amrapBodySchema = z.object({
 // sustained before falling behind.
 export const emomBodySchema = z.object({
   wodType: z.literal('emom'),
-  intervalS: z.number().int().min(5).max(30 * 60),
+  intervalS: z
+    .number()
+    .int()
+    .min(5)
+    .max(30 * 60),
   totalIntervals: posInt.max(120),
   movements: z.array(wodMovementSchema).min(1).max(20),
 })
@@ -153,8 +162,17 @@ export const emomBodySchema = z.object({
 export const intervalBodySchema = z.object({
   wodType: z.literal('interval'),
   rounds: posInt.max(50),
-  workS: z.number().int().min(5).max(30 * 60),
-  restBetweenRoundsS: z.number().int().min(0).max(30 * 60).optional(),
+  workS: z
+    .number()
+    .int()
+    .min(5)
+    .max(30 * 60),
+  restBetweenRoundsS: z
+    .number()
+    .int()
+    .min(0)
+    .max(30 * 60)
+    .optional(),
   movements: z.array(wodMovementSchema).min(1).max(20),
 })
 
@@ -166,7 +184,12 @@ export const intervalBodySchema = z.object({
 export const maxRepsRoundsBodySchema = z.object({
   wodType: z.literal('max_reps_rounds'),
   rounds: posInt.max(50),
-  durationS: z.number().int().min(60).max(90 * 60).optional(),
+  durationS: z
+    .number()
+    .int()
+    .min(60)
+    .max(90 * 60)
+    .optional(),
   movements: z.array(wodMovementSchema).min(1).max(20),
 })
 
@@ -302,7 +325,9 @@ const descriptionSchema = z.string().trim().max(500).optional()
 
 // Cross-field invariant: the outer `wodType` and the body's discriminator
 // must agree. A client can't claim "for_time" but send an AMRAP body.
-function bodyMatchesWodType<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T> {
+// Opaque return type: keeps callers from `.extend()`ing the refined schema,
+// which in zod 4 would silently rebuild the object WITHOUT this refinement.
+function bodyMatchesWodType<T extends z.ZodTypeAny>(schema: T): z.ZodType<z.output<T>, z.input<T>> {
   return schema.superRefine((data, ctx) => {
     const d = data as { wodType: WodType; body: WodBody }
     if (d.body.wodType !== d.wodType) {
@@ -328,7 +353,9 @@ function bodyMatchesWodType<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T> 
         })
       }
     }
-  })
+    // The cast is safe: superRefine keeps T's input/output types; it only
+    // widens the internals generic, which the opaque return type hides.
+  }) as unknown as z.ZodType<z.output<T>, z.input<T>>
 }
 
 export const createWodTemplateSchema = bodyMatchesWodType(

@@ -4,6 +4,7 @@ import {
   buildStream,
   categoriesInStream,
   decodeAiAnalysis,
+  decodeAnalysisFromCustomFields,
   encodeAiAnalysis,
   filterByCategory,
   findAnalysisField,
@@ -223,6 +224,30 @@ describe('fromBraindumpItem', () => {
   })
 })
 
+describe('decodeAnalysisFromCustomFields', () => {
+  it('finds a valid blob among unrelated string/number custom fields', () => {
+    const analysisRaw = encodeAiAnalysis(validAnalysisPayload)
+    expect(
+      decodeAnalysisFromCustomFields({ lfd_mood: 'okay', lfd_count: 3, lfd_ai: analysisRaw }),
+    ).toEqual({ v: 1, ...validAnalysisPayload })
+  })
+
+  it('returns null for an empty, undefined or null map', () => {
+    expect(decodeAnalysisFromCustomFields({})).toBeNull()
+    expect(decodeAnalysisFromCustomFields(undefined)).toBeNull()
+    expect(decodeAnalysisFromCustomFields(null)).toBeNull()
+  })
+
+  it('returns null when every value is malformed JSON or the wrong version', () => {
+    expect(decodeAnalysisFromCustomFields({ lfd_a: '{not json', lfd_b: 5 })).toBeNull()
+    expect(
+      decodeAnalysisFromCustomFields({
+        lfd_a: JSON.stringify({ v: 2, ...validAnalysisPayload }),
+      }),
+    ).toBeNull()
+  })
+})
+
 describe('fromDiaryItem / fromNote', () => {
   it('maps a diary item with null category/analysis', () => {
     const dItem: DiaryEntryDto = item({ id: 'd1', dueDate: '2026-06-02T00:00:00.000Z' })
@@ -232,6 +257,17 @@ describe('fromDiaryItem / fromNote', () => {
     expect(entry.category).toBeNull()
     expect(entry.analysis).toBeNull()
     expect(entry.day).toBe('2026-06-02')
+  })
+
+  it('surfaces analysis decoded from a diary item customFields, still null without one', () => {
+    const analysisRaw = encodeAiAnalysis(validAnalysisPayload)
+    const withAnalysis = fromDiaryItem(
+      item({ id: 'd2', customFields: { lfd_ai: analysisRaw } }) as DiaryEntryDto,
+    )
+    expect(withAnalysis.analysis).toEqual({ v: 1, ...validAnalysisPayload })
+
+    const without = fromDiaryItem(item({ id: 'd3' }) as DiaryEntryDto)
+    expect(without.analysis).toBeNull()
   })
 
   it('maps a note using createdAt as the day, listId null', () => {

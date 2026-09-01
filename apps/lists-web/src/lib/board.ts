@@ -31,7 +31,11 @@ export function resolveItemStatus(
     const direct = statuses.find((s) => s.id === item.status_id)
     if (direct) return direct
   }
-  const category = (item.status ?? 'todo') as StatusCategory
+  // System-skipped occurrences (recurrence sweep; completed=true) are
+  // closed — group them with done rather than falling through to the
+  // first column looking open.
+  const raw = item.status === 'skipped' ? 'done' : item.status
+  const category = (raw ?? 'todo') as StatusCategory
   const byCategory = defaultStatusForCategory(statuses, category)
   if (byCategory) return byCategory
   return statuses.slice().sort((a, b) => a.position - b.position)[0] ?? null

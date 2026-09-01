@@ -10,6 +10,8 @@ import {
   type RealtimeBus,
   type RealtimeHubNamespace,
 } from '@rallypoint/realtime'
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
+import { warmD1AndLog, isWarmTick } from '@rallypoint/api-kit'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
 import { buildLoggerWithFlush, type Logger } from './logger.js'
@@ -24,6 +26,9 @@ import type { Services } from './services/types.js'
 // per-request in `env`:
 //   - DB           — the D1 database (passed to buildD1Repos)
 //   - OBJECT_STORE — R2 bucket binding for map/ticket object storage (#409)
+//   - RATE_LIMITS  — the RateLimitCounter Durable Object namespace (#881):
+//                    one DO per token bucket, replacing the per-request D1
+//                    write in the rate limiter.
 //   - HUB          — the RealtimeHub Durable Object namespace. The publish
 //                    side (createDoRealtimeBus) resolves a channel DO and
 //                    POSTs the pointer envelope; the WS-upgrade route
@@ -41,6 +46,7 @@ export interface WorkerEnv {
   // R2 bucket binding for map image + ticket object storage (#409).
   OBJECT_STORE: R2Bucket
   HUB: DurableObjectNamespace
+  RATE_LIMITS: DurableObjectNamespace
   ASSETS?: Fetcher
   // Cloudflare WorkerEntrypoint RPC bindings to same-account producers
   // (wrangler.toml [[services]] + [[env.<env>.services]]): RPID -> IdRPC on
@@ -96,7 +102,12 @@ export function ensureDeps(env: WorkerEnv): Deps {
   // A DurableObjectNamespace satisfies the structural RealtimeHubNamespace
   // (idFromName + get); see do-bus.ts.
   const hub = env.HUB as unknown as RealtimeHubNamespace
-  const repos = buildD1Repos(createDb(env.DB))
+  // Same structural-assignability story as HUB: a real DurableObjectNamespace
+  // satisfies RateLimitCounterNamespace (idFromName + get).
+  const repos = buildD1Repos(
+    createDb(env.DB),
+    env.RATE_LIMITS as unknown as RateLimitCounterNamespace,
+  )
   const services = buildServices(
     parsed,
     { objectStore: env.OBJECT_STORE },
@@ -155,17 +166,22 @@ export default {
   // hard-purge pruner and the weather pre-warmer. Both are scheduled
   // independently via Promise.allSettled so one failing does not abort
   // the other.
-  async scheduled(_event: unknown, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: { cron?: string }, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
     const d = ensureDeps(env)
 
+    // Every tick pings D1 so the storage object never idle-evicts; the
+    // pruner/weather jobs only run on their own hourly cron (a missing
+    // cron — `wrangler dev --test-scheduled` with no ?cron= — still runs
+    // them so local smoke keeps working).
+    const jobs: Promise<unknown>[] = [warmD1AndLog(env.DB, d.logger)]
+    if (!isWarmTick(event.cron)) {
+      // Soft-delete hard-purge sweep (§5.1.1) + weather pre-warmer. The
+      // Cron Trigger drives the cadence; we just fire one tick of each on
+      // the isolate-cached handles (built once in ensureDeps).
+      jobs.push(d.pruner.tickOnce(), d.weather.tickOnce())
+    }
     ctx.waitUntil(
-      Promise.allSettled([
-        // Soft-delete hard-purge sweep (§5.1.1) + weather pre-warmer. The
-        // Cron Trigger drives the cadence; we just fire one tick of each on
-        // the isolate-cached handles (built once in ensureDeps).
-        d.pruner.tickOnce(),
-        d.weather.tickOnce(),
-      ])
+      Promise.allSettled(jobs)
         .then((results) => {
           for (const result of results) {
             if (result.status === 'rejected') {
@@ -188,6 +204,11 @@ export default {
 // entry so wrangler can bind the HUB namespace to it (wrangler.toml
 // [[durable_objects.bindings]] + [[migrations]] new_classes).
 export { RealtimeHub } from '@rallypoint/realtime'
+
+// Same for the per-bucket rate-limit counter DO (#881): wrangler binds the
+// RATE_LIMITS namespace to this export ([[durable_objects.bindings]] +
+// [[migrations]] new_sqlite_classes).
+export { RateLimitCounter } from '@rallypoint/rate-limit'
 
 // Named WorkerEntrypoint exposing the cross-Worker SDK surface as typed
 // RPC methods (PR 1 of feat/rpc-bindings). See ./rpc.ts.

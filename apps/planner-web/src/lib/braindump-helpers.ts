@@ -76,6 +76,23 @@ export function decodeAiAnalysis(raw: unknown): AiAnalysis | null {
   }
 }
 
+// Diary entries don't carry a known field-def id for AI Analysis at decode
+// time (the field may not even be provisioned yet on a given render), so
+// scan every custom-field value rather than looking one up by id. The
+// versioned envelope (`v: 1` + the exact themes/entities/summary/model
+// shape) makes a false-positive match on an unrelated text field
+// implausible — decodeAiAnalysis already rejects anything that doesn't fit.
+export function decodeAnalysisFromCustomFields(
+  customFields: Record<string, unknown> | null | undefined,
+): AiAnalysis | null {
+  if (!customFields) return null
+  for (const raw of Object.values(customFields)) {
+    const decoded = decodeAiAnalysis(raw)
+    if (decoded) return decoded
+  }
+  return null
+}
+
 // Encode for saving into the AI Analysis custom field (mirror of the BFF
 // codec so a client-side save round-trips through decodeAiAnalysis).
 export function encodeAiAnalysis(input: {
@@ -153,7 +170,7 @@ export function fromDiaryItem(item: DiaryEntryDto): StreamEntry {
     timed: !isDayOnlyDueDate(item.dueDate),
     createdAt: item.createdAt,
     category: null,
-    analysis: null,
+    analysis: decodeAnalysisFromCustomFields(item.customFields),
     raw: item,
   }
 }

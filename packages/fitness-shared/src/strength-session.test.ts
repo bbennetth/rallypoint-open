@@ -3,6 +3,7 @@ import {
   advanceAfterComplete,
   pausedAwareElapsedMs,
   sessionFromStrengthBody,
+  setTakesSuggestedLoad,
   bracketRange,
   buildStrengthSession,
   nextUpLabel,
@@ -17,11 +18,31 @@ import {
 } from './strength-session.js'
 
 function repSet(reps: number | null, loadKg: number | null) {
-  return { reps, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg, done: false, doneAtMs: null, setType: 'working' as const }
+  return {
+    reps,
+    calories: null,
+    distanceM: null,
+    timeS: null,
+    inclinePct: null,
+    loadKg,
+    done: false,
+    doneAtMs: null,
+    setType: 'working' as const,
+  }
 }
 
 function calSet(calories: number) {
-  return { reps: null, calories, distanceM: null, timeS: null, inclinePct: null, loadKg: 0, done: false, doneAtMs: null, setType: 'working' as const }
+  return {
+    reps: null,
+    calories,
+    distanceM: null,
+    timeS: null,
+    inclinePct: null,
+    loadKg: 0,
+    done: false,
+    doneAtMs: null,
+    setType: 'working' as const,
+  }
 }
 
 const squat = {
@@ -378,7 +399,10 @@ describe('strengthSessionReducer', () => {
 
       // 1e999 parses to Infinity (JSON.stringify(Infinity) is "null", so a
       // crafted raw literal is the realistic vector).
-      const inf = serializeStrengthSession(freshSession()).replace(/"loadKg":\s*100/, '"loadKg":1e999')
+      const inf = serializeStrengthSession(freshSession()).replace(
+        /"loadKg":\s*100/,
+        '"loadKg":1e999',
+      )
       expect(restoreStrengthSession(inf)).toBeNull()
     })
 
@@ -394,6 +418,19 @@ describe('strengthSessionReducer', () => {
       // Non-string junk in a hand-rolled blob is dropped, not kept.
       const junk = { ...freshSession(), templateId: 42 }
       expect(restoreStrengthSession(JSON.stringify(junk))!.templateId).toBeNull()
+    })
+
+    it('round-trips sourceTemplateId and backfills a pre-field blob to null', () => {
+      // Benchmarks carry the done-detection link even without the
+      // custom-only templateId.
+      const bench = { ...freshSession(), sourceTemplateId: 'wt_bench_1' }
+      expect(restoreStrengthSession(serializeStrengthSession(bench))!.sourceTemplateId).toBe(
+        'wt_bench_1',
+      )
+      const { sourceTemplateId: _drop, ...legacy } = freshSession()
+      expect(restoreStrengthSession(JSON.stringify(legacy))!.sourceTemplateId).toBeNull()
+      const junk = { ...freshSession(), sourceTemplateId: 42 }
+      expect(restoreStrengthSession(JSON.stringify(junk))!.sourceTemplateId).toBeNull()
     })
 
     it('restores a legacy blob without group/restAfterS/targetRpe (degrades to sequential)', () => {
@@ -419,8 +456,26 @@ describe('strengthSessionReducer', () => {
             suggestedBasis: null,
             currentSetIdx: 1,
             sets: [
-              { reps: 5, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: 100, done: true, doneAtMs: 5000 },
-              { reps: 5, calories: null, distanceM: null, timeS: null, inclinePct: null, loadKg: 100, done: false, doneAtMs: null },
+              {
+                reps: 5,
+                calories: null,
+                distanceM: null,
+                timeS: null,
+                inclinePct: null,
+                loadKg: 100,
+                done: true,
+                doneAtMs: 5000,
+              },
+              {
+                reps: 5,
+                calories: null,
+                distanceM: null,
+                timeS: null,
+                inclinePct: null,
+                loadKg: 100,
+                done: false,
+                doneAtMs: null,
+              },
             ],
           },
         ],
@@ -472,7 +527,13 @@ describe('strengthSessionReducer', () => {
 
     it('freezes a running rest countdown while paused', () => {
       let s = running()
-      s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 0, setIdx: 0, nowMs: 5_000, restS: 60 })
+      s = strengthSessionReducer(s, {
+        kind: 'COMPLETE_SET',
+        blockIdx: 0,
+        setIdx: 0,
+        nowMs: 5_000,
+        restS: 60,
+      })
       s = strengthSessionReducer(s, { kind: 'TICK', nowMs: 10_000 })
       expect(s.restRemainingS).toBe(50)
       s = strengthSessionReducer(s, { kind: 'PAUSE', nowMs: 10_000 })
@@ -689,7 +750,11 @@ describe('strengthSessionReducer', () => {
     it('ADD_SET clones the last set targets as a fresh undone set', () => {
       let s = runningTwoBlocks()
       s = strengthSessionReducer(s, {
-        kind: 'EDIT_SET_METRIC', blockIdx: 0, setIdx: 2, field: 'rpe', value: 8,
+        kind: 'EDIT_SET_METRIC',
+        blockIdx: 0,
+        setIdx: 2,
+        field: 'rpe',
+        value: 8,
       })
       s = strengthSessionReducer(s, { kind: 'ADD_SET', blockIdx: 0 })
       const added = s.blocks[0]!.sets[3]!
@@ -713,7 +778,11 @@ describe('strengthSessionReducer', () => {
         { kind: 'START', nowMs: 0 },
       )
       s = strengthSessionReducer(s, {
-        kind: 'EDIT_SET_METRIC', blockIdx: 0, setIdx: 0, field: 'reps', value: 15,
+        kind: 'EDIT_SET_METRIC',
+        blockIdx: 0,
+        setIdx: 0,
+        field: 'reps',
+        value: 15,
       })
       s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 0, setIdx: 0, nowMs: 1 })
       s = strengthSessionReducer(s, { kind: 'ADD_SET', blockIdx: 0 })
@@ -724,7 +793,8 @@ describe('strengthSessionReducer', () => {
     it('ADD_SET on a fully-done block moves the pointer to the new set', () => {
       let s = strengthSessionReducer(
         buildStrengthSession({
-          sessionId: 's', templateName: 'T',
+          sessionId: 's',
+          templateName: 'T',
           blocks: [{ ...squat, sets: [repSet(5, 100)] }],
         }),
         { kind: 'START', nowMs: 0 },
@@ -840,7 +910,11 @@ describe('strengthSessionReducer', () => {
     it('EDIT_SET_METRIC null clears the load; tonnage skips it', () => {
       let s = strengthSessionReducer(freshSession(), { kind: 'START', nowMs: 0 })
       s = strengthSessionReducer(s, {
-        kind: 'EDIT_SET_METRIC', blockIdx: 0, setIdx: 0, field: 'loadKg', value: null,
+        kind: 'EDIT_SET_METRIC',
+        blockIdx: 0,
+        setIdx: 0,
+        field: 'loadKg',
+        value: null,
       })
       expect(s.blocks[0]!.sets[0]!.loadKg).toBeNull()
       s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 0, setIdx: 0, nowMs: 1 })
@@ -901,7 +975,7 @@ describe('bracketRange', () => {
     const blocks = supersetSession([
       mkBlock('Squat', 3, { group: 'A' }),
       mkBlock('Pull-up', 3, { group: 'A' }),
-      mkBlock('Press', 3 ),
+      mkBlock('Press', 3),
       mkBlock('Row', 3, { group: 'B' }),
     ]).blocks
     expect(bracketRange(blocks, 0)).toEqual([0, 1])
@@ -984,8 +1058,10 @@ describe('superset interleaving (COMPLETE_SET)', () => {
   })
 
   it('restAfterS falls back to restS, then the 90s default', () => {
-    const blocks = supersetSession([mkBlock('Squat', 1, { restS: 120 }), mkBlock('Press', 1)])
-      .blocks
+    const blocks = supersetSession([
+      mkBlock('Squat', 1, { restS: 120 }),
+      mkBlock('Press', 1),
+    ]).blocks
     const doneBlocks = blocks.map((b, i) =>
       i === 0 ? { ...b, sets: b.sets.map((x) => ({ ...x, done: true })) } : b,
     )
@@ -1114,7 +1190,10 @@ describe('ADD_BLOCKS (mid-workout superset add)', () => {
   })
 
   it('stamps a fresh shared letter on a multi-block superset append', () => {
-    let s = supersetSession([mkBlock('Squat', 2, { group: 'A' }), mkBlock('Row', 2, { group: 'A' })])
+    let s = supersetSession([
+      mkBlock('Squat', 2, { group: 'A' }),
+      mkBlock('Row', 2, { group: 'A' }),
+    ])
     s = strengthSessionReducer(s, {
       kind: 'ADD_BLOCKS',
       blocks: [mkBlock('Curl', 3), mkBlock('Dip', 3)],
@@ -1318,7 +1397,12 @@ function ergSession() {
 describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
   it('start → stop banks elapsed seconds into timeS', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     expect(s.setTimer).toMatchObject({ blockIdx: 1, setIdx: 0, startedAtMs: 10_000, baseTimeS: 0 })
     s = strengthSessionReducer(s, { kind: 'STOP_SET_TIMER', nowMs: 73_500 })
     expect(s.setTimer).toBeNull()
@@ -1327,9 +1411,19 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('restart resumes from the banked time', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     s = strengthSessionReducer(s, { kind: 'STOP_SET_TIMER', nowMs: 40_000 }) // 30s banked
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 100_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 100_000,
+    })
     expect(s.setTimer!.baseTimeS).toBe(30)
     s = strengthSessionReducer(s, { kind: 'STOP_SET_TIMER', nowMs: 110_000 })
     expect(s.blocks[1]!.sets[0]!.timeS).toBe(40)
@@ -1337,15 +1431,30 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('starting a watch on another set banks the first', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 1, nowMs: 25_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 1,
+      nowMs: 25_000,
+    })
     expect(s.blocks[1]!.sets[0]!.timeS).toBe(15)
     expect(s.setTimer).toMatchObject({ blockIdx: 1, setIdx: 1, baseTimeS: 0 })
   })
 
   it('COMPLETE_SET on the timed set banks its stopwatch first', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 1, setIdx: 0, nowMs: 55_000 })
     expect(s.setTimer).toBeNull()
     expect(s.blocks[1]!.sets[0]).toMatchObject({ done: true, timeS: 45 })
@@ -1353,14 +1462,24 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('COMPLETE_SET on a DIFFERENT set leaves the watch running', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 0, setIdx: 0, nowMs: 20_000 })
     expect(s.setTimer).toMatchObject({ blockIdx: 1, setIdx: 0 })
   })
 
   it('PAUSE banks the running watch', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     s = strengthSessionReducer(s, { kind: 'PAUSE', nowMs: 30_000 })
     expect(s.setTimer).toBeNull()
     expect(s.blocks[1]!.sets[0]!.timeS).toBe(20)
@@ -1368,7 +1487,12 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('FINISH banks the running watch', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     s = strengthSessionReducer(s, { kind: 'FINISH', nowMs: 50_000 })
     expect(s.setTimer).toBeNull()
     expect(s.blocks[1]!.sets[0]!.timeS).toBe(40)
@@ -1378,17 +1502,24 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
     let s = ergSession()
     s = strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx: 1, setIdx: 0, nowMs: 5000 })
     expect(
-      strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 6000 }).setTimer,
+      strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 6000 })
+        .setTimer,
     ).toBeNull()
     expect(
-      strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 9, setIdx: 0, nowMs: 6000 }).setTimer,
+      strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 9, setIdx: 0, nowMs: 6000 })
+        .setTimer,
     ).toBeNull()
     expect(strengthSessionReducer(s, { kind: 'STOP_SET_TIMER', nowMs: 6000 })).toBe(s)
   })
 
   it('REMOVE_BLOCK clears a watch on the removed block and shifts a later one', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     const removedTimed = strengthSessionReducer(s, { kind: 'REMOVE_BLOCK', blockIdx: 1 })
     expect(removedTimed.setTimer).toBeNull()
     const removedOther = strengthSessionReducer(s, { kind: 'REMOVE_BLOCK', blockIdx: 0 })
@@ -1397,7 +1528,12 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('REMOVE_SET clears a watch on the removed set and shifts a later one', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 1, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 1,
+      nowMs: 10_000,
+    })
     const shifted = strengthSessionReducer(s, { kind: 'REMOVE_SET', blockIdx: 1, setIdx: 0 })
     expect(shifted.setTimer).toMatchObject({ blockIdx: 1, setIdx: 0 })
     const cleared = strengthSessionReducer(s, { kind: 'REMOVE_SET', blockIdx: 1, setIdx: 1 })
@@ -1412,7 +1548,12 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
   it('round-trips through serialize/restore and drops out-of-range timers', () => {
     let s = ergSession()
-    s = strengthSessionReducer(s, { kind: 'START_SET_TIMER', blockIdx: 1, setIdx: 0, nowMs: 10_000 })
+    s = strengthSessionReducer(s, {
+      kind: 'START_SET_TIMER',
+      blockIdx: 1,
+      setIdx: 0,
+      nowMs: 10_000,
+    })
     const restored = restoreStrengthSession(serializeStrengthSession(s))
     expect(restored!.setTimer).toMatchObject({ blockIdx: 1, setIdx: 0, startedAtMs: 10_000 })
     // A timer pointing at a set that no longer exists is dropped.
@@ -1429,14 +1570,24 @@ describe('set stopwatch (START_SET_TIMER / STOP_SET_TIMER)', () => {
 
 describe('strengthSetUnit', () => {
   it('prefers the explicit hint over field inference', () => {
-    expect(strengthSetUnit({ reps: null, calories: 12, distanceM: null, timeS: 60, unit: 'timeS' })).toBe('timeS')
+    expect(
+      strengthSetUnit({ reps: null, calories: 12, distanceM: null, timeS: 60, unit: 'timeS' }),
+    ).toBe('timeS')
   })
   it('falls back to field-priority inference without a hint', () => {
     expect(strengthSetUnit({ reps: 5, calories: null, distanceM: null, timeS: null })).toBe('reps')
-    expect(strengthSetUnit({ reps: null, calories: 12, distanceM: null, timeS: null })).toBe('calories')
-    expect(strengthSetUnit({ reps: null, calories: null, distanceM: 500, timeS: null })).toBe('distanceM')
-    expect(strengthSetUnit({ reps: null, calories: null, distanceM: null, timeS: 60 })).toBe('timeS')
-    expect(strengthSetUnit({ reps: null, calories: null, distanceM: null, timeS: null })).toBe('reps')
+    expect(strengthSetUnit({ reps: null, calories: 12, distanceM: null, timeS: null })).toBe(
+      'calories',
+    )
+    expect(strengthSetUnit({ reps: null, calories: null, distanceM: 500, timeS: null })).toBe(
+      'distanceM',
+    )
+    expect(strengthSetUnit({ reps: null, calories: null, distanceM: null, timeS: 60 })).toBe(
+      'timeS',
+    )
+    expect(strengthSetUnit({ reps: null, calories: null, distanceM: null, timeS: null })).toBe(
+      'reps',
+    )
   })
   it('survives serialize/restore; invalid hints are stripped', () => {
     let s = ergSession()
@@ -1455,7 +1606,11 @@ describe('strengthSetUnit', () => {
 
 describe('empty-blocks session (blank free strength start)', () => {
   function blank() {
-    const s = buildStrengthSession({ sessionId: 'sess_blank', templateName: 'Free strength', blocks: [] })
+    const s = buildStrengthSession({
+      sessionId: 'sess_blank',
+      templateName: 'Free strength',
+      blocks: [],
+    })
     return strengthSessionReducer(s, { kind: 'START', nowMs: 1000 })
   }
 
@@ -1496,11 +1651,8 @@ describe('nextUpLabel', () => {
     const s = buildStrengthSession({ sessionId: 'sess_t', templateName: 'T', blocks })
     return strengthSessionReducer(s, { kind: 'START', nowMs: 0 })
   }
-  const complete = (
-    s: ReturnType<typeof running>,
-    blockIdx: number,
-    setIdx: number,
-  ) => strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx, setIdx, nowMs: 1 })
+  const complete = (s: ReturnType<typeof running>, blockIdx: number, setIdx: number) =>
+    strengthSessionReducer(s, { kind: 'COMPLETE_SET', blockIdx, setIdx, nowMs: 1 })
 
   it('names the next set mid-block', () => {
     let s = running([{ ...squat }, { ...bike }])
@@ -1535,5 +1687,212 @@ describe('nextUpLabel', () => {
   it('is empty for an empty session', () => {
     const s = buildStrengthSession({ sessionId: 'sess_t', templateName: 'T', blocks: [] })
     expect(nextUpLabel(s)).toBe('')
+  })
+})
+
+describe('APPLY_SUGGESTED_LOAD (accept the SUGGESTED strip)', () => {
+  function running(blocks: Omit<StrengthBlock, 'currentSetIdx'>[]) {
+    return strengthSessionReducer(
+      buildStrengthSession({ sessionId: 'sess_t', templateName: 'T', blocks }),
+      { kind: 'START', nowMs: 1000 },
+    )
+  }
+
+  it('writes suggestedKg into every undone working rep set', () => {
+    const s = running([
+      {
+        ...squat,
+        suggestedKg: 102.5,
+        sets: [repSet(5, 100), repSet(5, null), repSet(5, 90)],
+      },
+    ])
+    const next = strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 0 })
+    expect(next.blocks[0]!.sets.map((x) => x.loadKg)).toEqual([102.5, 102.5, 102.5])
+    // Reps and everything else stay untouched.
+    expect(next.blocks[0]!.sets.map((x) => x.reps)).toEqual([5, 5, 5])
+  })
+
+  it('skips done sets, warmups, and non-rep work', () => {
+    const doneSet = { ...repSet(5, 100), done: true, doneAtMs: 5 }
+    const warmup = { ...repSet(10, 60), setType: 'warmup' as const }
+    const s = running([
+      { ...squat, suggestedKg: 110, sets: [doneSet, warmup, repSet(5, 100)] },
+      { ...bike, suggestedKg: 110 },
+    ])
+    const next = strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 0 })
+    expect(next.blocks[0]!.sets.map((x) => x.loadKg)).toEqual([100, 60, 110])
+    const cardio = strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 1 })
+    expect(cardio.blocks[1]!.sets.map((x) => x.loadKg)).toEqual([0, 0])
+  })
+
+  it('only touches the addressed block', () => {
+    const s = running([
+      { ...squat, suggestedKg: 110 },
+      { ...squat, exerciseId: 'fx2', suggestedKg: 120 },
+    ])
+    const next = strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 1 })
+    expect(next.blocks[0]!.sets.map((x) => x.loadKg)).toEqual([100, 100, 100])
+    expect(next.blocks[1]!.sets.map((x) => x.loadKg)).toEqual([120, 120, 120])
+  })
+
+  it('prefers an explicit display-snapped kg over the raw suggestion', () => {
+    // The UI snaps the shown value to the display unit's plate increment
+    // (5 lb / 2.5 kg) and passes the matching kg so rows land on exactly
+    // the number the strip showed.
+    const s = running([{ ...squat, suggestedKg: 44.9, sets: [repSet(5, null)] }])
+    const next = strengthSessionReducer(s, {
+      kind: 'APPLY_SUGGESTED_LOAD',
+      blockIdx: 0,
+      kg: 45.36,
+    })
+    expect(next.blocks[0]!.sets[0]!.loadKg).toBe(45.36)
+    // A junk explicit value no-ops rather than poisoning the session.
+    expect(
+      strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 0, kg: Number.NaN }),
+    ).toBe(s)
+  })
+
+  it('no-ops (same reference) without a suggestion, on a bad index, or when already applied', () => {
+    const noSuggestion = running([{ ...squat, suggestedKg: null }])
+    expect(
+      strengthSessionReducer(noSuggestion, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 0 }),
+    ).toBe(noSuggestion)
+    const s = running([{ ...squat, suggestedKg: 100 }])
+    expect(strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 5 })).toBe(s)
+    // Every fillable set already carries the suggestion — identity.
+    expect(strengthSessionReducer(s, { kind: 'APPLY_SUGGESTED_LOAD', blockIdx: 0 })).toBe(s)
+  })
+})
+
+describe('historyPrefill directive restore', () => {
+  it('round-trips the literal override directive and strips junk values', () => {
+    const s = buildStrengthSession({
+      sessionId: 'sess_t',
+      templateName: 'T',
+      blocks: [{ ...squat, historyPrefill: 'override' }, { ...bike }],
+    })
+    const restored = restoreStrengthSession(serializeStrengthSession(s))!
+    expect(restored.blocks[0]!.historyPrefill).toBe('override')
+    expect(restored.blocks[1]!.historyPrefill).toBeUndefined()
+
+    const junk = JSON.parse(serializeStrengthSession(s)) as {
+      blocks: { historyPrefill?: unknown }[]
+    }
+    junk.blocks[0]!.historyPrefill = 'everything'
+    const cleaned = restoreStrengthSession(JSON.stringify(junk))!
+    expect(cleaned.blocks[0]!.historyPrefill).toBeUndefined()
+  })
+})
+
+describe('historyPrefill disarm on athlete interaction', () => {
+  function armedRunning() {
+    const s = buildStrengthSession({
+      sessionId: 'sess_t',
+      templateName: 'T',
+      blocks: [
+        { ...squat, historyPrefill: 'override' },
+        { ...squat, exerciseId: 'fx2', historyPrefill: 'override' },
+      ],
+    })
+    return strengthSessionReducer(s, { kind: 'START', nowMs: 1000 })
+  }
+
+  it('EDIT_SET_METRIC strips the directive from the edited block only', () => {
+    const next = strengthSessionReducer(armedRunning(), {
+      kind: 'EDIT_SET_METRIC',
+      blockIdx: 0,
+      setIdx: 0,
+      field: 'loadKg',
+      value: 80,
+    })
+    expect(next.blocks[0]!.historyPrefill).toBeUndefined()
+    expect(next.blocks[1]!.historyPrefill).toBe('override')
+  })
+
+  it('COMPLETE_SET and APPLY_SUGGESTED_LOAD strip it too', () => {
+    const completed = strengthSessionReducer(armedRunning(), {
+      kind: 'COMPLETE_SET',
+      blockIdx: 0,
+      setIdx: 0,
+      nowMs: 2000,
+    })
+    expect(completed.blocks[0]!.historyPrefill).toBeUndefined()
+    expect(completed.blocks[1]!.historyPrefill).toBe('override')
+
+    const applied = strengthSessionReducer(armedRunning(), {
+      kind: 'APPLY_SUGGESTED_LOAD',
+      blockIdx: 1,
+      kg: 110,
+    })
+    expect(applied.blocks[1]!.historyPrefill).toBeUndefined()
+    expect(applied.blocks[0]!.historyPrefill).toBe('override')
+  })
+
+  it('ADD_SET, REMOVE_SET, and TOGGLE_SET_TYPE strip it as well', () => {
+    const added = strengthSessionReducer(armedRunning(), { kind: 'ADD_SET', blockIdx: 0 })
+    expect(added.blocks[0]!.historyPrefill).toBeUndefined()
+    const removed = strengthSessionReducer(armedRunning(), {
+      kind: 'REMOVE_SET',
+      blockIdx: 0,
+      setIdx: 2,
+    })
+    expect(removed.blocks[0]!.historyPrefill).toBeUndefined()
+    const toggled = strengthSessionReducer(armedRunning(), {
+      kind: 'TOGGLE_SET_TYPE',
+      blockIdx: 0,
+      setIdx: 0,
+    })
+    expect(toggled.blocks[0]!.historyPrefill).toBeUndefined()
+  })
+})
+
+describe('historyPrefill survives non-interactive actions', () => {
+  it('UNDO_SET does not disarm (unreachable while armed, asserted for the contract)', () => {
+    const s = strengthSessionReducer(
+      buildStrengthSession({
+        sessionId: 'sess_t',
+        templateName: 'T',
+        blocks: [{ ...squat, historyPrefill: 'override' }],
+      }),
+      { kind: 'START', nowMs: 1000 },
+    )
+    const undone = strengthSessionReducer(s, { kind: 'UNDO_SET', blockIdx: 0, setIdx: 0 })
+    expect(undone.blocks[0]!.historyPrefill).toBe('override')
+  })
+
+  it('an out-of-range EDIT_SET_METRIC / TOGGLE_SET_TYPE is a no-op that keeps the directive', () => {
+    const s = strengthSessionReducer(
+      buildStrengthSession({
+        sessionId: 'sess_t',
+        templateName: 'T',
+        blocks: [{ ...squat, historyPrefill: 'override' }],
+      }),
+      { kind: 'START', nowMs: 1000 },
+    )
+    const edited = strengthSessionReducer(s, {
+      kind: 'EDIT_SET_METRIC',
+      blockIdx: 0,
+      setIdx: 99,
+      field: 'loadKg',
+      value: 80,
+    })
+    expect(edited.blocks[0]).toBe(s.blocks[0])
+    const toggled = strengthSessionReducer(s, {
+      kind: 'TOGGLE_SET_TYPE',
+      blockIdx: 0,
+      setIdx: 99,
+    })
+    expect(toggled.blocks[0]).toBe(s.blocks[0])
+  })
+})
+
+describe('setTakesSuggestedLoad', () => {
+  it('accepts only undone working rep sets — the one rule the reducer and Use pill share', () => {
+    expect(setTakesSuggestedLoad(repSet(5, 100))).toBe(true)
+    expect(setTakesSuggestedLoad({ ...repSet(5, 100), done: true })).toBe(false)
+    expect(setTakesSuggestedLoad({ ...repSet(5, 100), setType: 'warmup' as const })).toBe(false)
+    expect(setTakesSuggestedLoad(calSet(15))).toBe(false)
+    // A fully-blank set infers 'reps' (strengthSetUnit fallback).
+    expect(setTakesSuggestedLoad(repSet(null, null))).toBe(true)
   })
 })

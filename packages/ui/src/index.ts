@@ -181,3 +181,4 @@ export type {
 // Brand
 export { BRAND } from './brand.js'
 export type { Brand } from './brand.js'
+export { brandMarkSvg } from './brand-svg.js'

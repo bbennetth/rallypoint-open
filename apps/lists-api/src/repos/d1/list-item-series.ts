@@ -289,7 +289,15 @@ export class D1ListItemSeriesRepo implements ListItemSeriesRepo {
         }) as Stmt,
       )
 
-    const stmts: [Stmt, ...Stmt[]] = [updateSeries, softDeleteFutureLive, ...newInserts]
+    // The scoped skip sweep runs last so the freshly-inserted today
+    // occurrence (if any) is the anchor — an edited series is clean
+    // immediately rather than at the next cron tick.
+    const stmts: [Stmt, ...Stmt[]] = [
+      updateSeries,
+      softDeleteFutureLive,
+      ...newInserts,
+      this.skipStaleStmt(todayISO, id) as Stmt,
+    ]
     const results = await this.db.batch(stmts)
 
     // updateSeries is first; zero RETURNING rows ⇒ series was deleted
@@ -298,6 +306,47 @@ export class D1ListItemSeriesRepo implements ListItemSeriesRepo {
     if (!updatedRows[0]) return null
 
     return rowToRecord(updatedRows[0])
+  }
+
+  // UPDATE marking superseded open occurrences skipped (see the repo
+  // contract for the full rule). Anchor = newest live non-exception
+  // occurrence with occurrence_date <= today, found per-row via a
+  // correlated subquery over the (series_id, occurrence_date) index.
+  // completed=true hides skipped rows from every completed-filtered
+  // surface; completedAt stays null so they never count as "completed
+  // today". Idempotent: skipped rows have completed=1 and no longer match.
+  private skipStaleStmt(todayISO: string, seriesId?: string) {
+    const anchor = sql`(
+      select max(li2.occurrence_date) from ${listItems} li2
+      where li2.series_id = ${listItems.seriesId}
+        and li2.deleted_at is null
+        and li2.is_exception = 0
+        and li2.occurrence_date <= ${todayISO}
+    )`
+    return this.db
+      .update(listItems)
+      .set({
+        status: 'skipped',
+        statusId: null,
+        completed: true,
+        completedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          seriesId ? eq(listItems.seriesId, seriesId) : isNotNull(listItems.seriesId),
+          isNull(listItems.deletedAt),
+          eq(listItems.isException, false),
+          eq(listItems.completed, false),
+          sql`${listItems.occurrenceDate} < ${anchor}`,
+        ),
+      )
+      .returning({ id: listItems.id })
+  }
+
+  async skipStaleOccurrences(todayISO: string, seriesId?: string): Promise<number> {
+    const rows = await this.skipStaleStmt(todayISO, seriesId)
+    return rows.length
   }
 
   async softDelete(id: string, _actor: string): Promise<boolean> {

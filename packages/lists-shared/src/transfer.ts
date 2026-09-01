@@ -118,8 +118,11 @@ export const listItemBundleSchema = z.object({
   /** Label NAMES on the source list, matched by name on the target. */
   labelNames: z.array(shortText).max(64).optional(),
   /** Keyed by the SOURCE list's field-def ids; re-keyed on import. */
-  customFields: z.record(z.unknown()).optional(),
-  comments: z.array(z.object({ body: longText })).max(200).optional(),
+  customFields: z.record(z.string(), z.unknown()).optional(),
+  comments: z
+    .array(z.object({ body: longText }))
+    .max(200)
+    .optional(),
 })
 
 export const listBundleSchema = z.object({

@@ -65,6 +65,20 @@ describe('bucketTasks', () => {
     expect(ids(buckets.thisWeek)).toEqual(['tomorrow'])
   })
 
+  it('never buckets skipped occurrences, even if the completed mirror drifted', () => {
+    const buckets = bucketTasks(
+      [
+        // Normal shape: the recurrence sweep sets completed=true.
+        { ...task('swept', iso(2026, 6, 20)), completed: true, status: 'skipped' },
+        // Drifted shape: status says skipped but completed never mirrored.
+        { ...task('drifted', iso(2026, 6, 20)), status: 'skipped' },
+        { ...task('open', iso(2026, 6, 20)), status: 'todo' },
+      ],
+      WED,
+    )
+    expect(ids(buckets.overdue)).toEqual(['open'])
+  })
+
   it('bounds "this week" at Sunday of the current ISO week', () => {
     const buckets = bucketTasks(
       [

@@ -2,8 +2,9 @@ import type { ConnectionView } from '../lib/connection-status.js'
 import { BRAND } from '../brand.js'
 import { Compass } from './icons.js'
 
-// Brand lockup: the compass mark followed by the "rallypoint" wordmark
-// in Inter 600, with an optional status dot. The compass was dropped in
+// Brand lockup: the compass mark followed by the two-tone "rallypt"
+// wordmark (`.pl-wordmark`, shared with `AppBrandLockup`), with an
+// optional status dot. The compass was dropped in
 // issue #192 Slice 4, leaving a text-only wordmark; it is back by user
 // directive — the app chrome reads as unbranded without it.
 //
@@ -69,17 +70,16 @@ export function BrandLockup({
       }}
     >
       {mark}
-      <span
-        style={{
-          fontFamily: 'var(--font-body, Inter, system-ui, sans-serif)',
-          fontSize: size,
-          fontWeight: 600,
-          letterSpacing: '-0.02em',
-          color: 'var(--ink)',
-          userSelect: 'none',
-        }}
-      >
-        {BRAND.displayName}
+      {/*
+        Two-tone "rallypt" wordmark — the same `.pl-wordmark` styling
+        (and the same `BRAND.wordmark` split) that `AppBrandLockup`
+        renders in every other app's chrome, so the Events attendee
+        header no longer reads "rallypoint" while Planner/Health/Lists
+        read "rallypt" (issue #894). Font size stays caller-controlled.
+      */}
+      <span className="pl-wordmark" style={{ fontSize: size, userSelect: 'none' }}>
+        {BRAND.wordmark.primary}
+        <b>{BRAND.wordmark.accent}</b>
       </span>
       <span
         aria-hidden

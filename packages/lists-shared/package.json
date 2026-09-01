@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@rallypoint/shared": "*",
-    "zod": "^3.23.0"
+    "zod": "^4.4.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

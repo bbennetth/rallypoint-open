@@ -36,7 +36,7 @@ describe('buildConceptGraph', () => {
     expect(graph.edges[0]?.weight).toBe(1)
   })
 
-  it('dedupes case-insensitively and keeps the first-seen casing', () => {
+  it('dedupes case-insensitively and displays the dominant casing', () => {
     const e1 = entry({ key: 'e1', analysis: analysis({ themes: ['Focus'] }) })
     const e2 = entry({ key: 'e2', analysis: analysis({ themes: ['FOCUS'] }) })
     const graph = buildConceptGraph([e1, e2])
@@ -66,14 +66,42 @@ describe('buildConceptGraph', () => {
     expect(graph.nodes).toHaveLength(1)
   })
 
-  it('distinguishes entities of different kinds sharing a name', () => {
+  it('produces a node for a non-Latin theme instead of dropping it', () => {
+    const e1 = entry({ key: 'e1', analysis: analysis({ themes: ['東京'] }) })
+    const graph = buildConceptGraph([e1])
+    expect(graph.nodes).toHaveLength(1)
+    expect(graph.nodes[0]?.label).toBe('東京')
+  })
+
+  it('merges the same name across kinds into one node (id has no kind prefix)', () => {
+    // The per-dump LLM classifies inconsistently: "Trump" tagged person in
+    // one entry, topic in another, must render as ONE node, not two.
     const e1 = entry({
       key: 'e1',
-      analysis: analysis({ entities: [{ name: 'Paris', kind: 'place' }, { name: 'Paris', kind: 'person' }] }),
+      analysis: analysis({ entities: [{ name: 'Trump', kind: 'person' }] }),
     })
-    const graph = buildConceptGraph([e1])
-    expect(graph.nodes).toHaveLength(2)
-    expect(graph.nodes.map((n) => n.kind).sort()).toEqual(['person', 'place'])
+    const e2 = entry({
+      key: 'e2',
+      analysis: analysis({ entities: [{ name: 'Trump', kind: 'topic' }] }),
+    })
+    const graph = buildConceptGraph([e1, e2])
+    expect(graph.nodes).toHaveLength(1)
+    expect(graph.nodes[0]?.id).toBe('trump')
+    expect(graph.nodes[0]?.weight).toBe(2)
+    expect(graph.nodes[0]?.entryKeys).toEqual(['e1', 'e2'])
+    // Vote tie broken by precedence: person > topic.
+    expect(graph.nodes[0]?.kind).toBe('person')
+  })
+
+  it('merges a theme with an entity of the same normalized label', () => {
+    const e1 = entry({ key: 'e1', analysis: analysis({ themes: ['Skin'] }) })
+    const e2 = entry({
+      key: 'e2',
+      analysis: analysis({ entities: [{ name: 'skins', kind: 'topic' }] }),
+    })
+    const graph = buildConceptGraph([e1, e2])
+    expect(graph.nodes).toHaveLength(1)
+    expect(graph.nodes[0]?.weight).toBe(2)
   })
 
   it('caps nodes at MAX_GRAPH_NODES, keeping the highest-weight nodes', () => {
@@ -116,10 +144,38 @@ describe('buildConceptGraph', () => {
     }
   })
 
+  it('handles a normalized label containing "|" without corrupting edges', () => {
+    const e1 = entry({
+      key: 'e1',
+      analysis: analysis({ themes: ['cost|benefit', 'Rest'] }),
+    })
+    const graph = buildConceptGraph([e1])
+    const pipe = graph.nodes.find((n) => n.label === 'cost|benefit')
+    const rest = graph.nodes.find((n) => n.label === 'Rest')
+    expect(pipe).toBeDefined()
+    expect(rest).toBeDefined()
+    expect(graph.edges).toHaveLength(1)
+    expect(new Set([graph.edges[0]?.a, graph.edges[0]?.b])).toEqual(
+      new Set([pipe!.id, rest!.id]),
+    )
+  })
+
   it('returns an empty graph for an empty stream', () => {
     const graph = buildConceptGraph([])
     expect(graph.nodes).toEqual([])
     expect(graph.edges).toEqual([])
+  })
+
+  it('orders equal-weight edges deterministically by a then b', () => {
+    // 'ab'+'c' vs 'a'+'bc' would collide under naive key concatenation —
+    // the comparator must treat a and b as separate terms.
+    const e1 = entry({ key: 'e1', analysis: analysis({ themes: ['ab', 'c'] }) })
+    const e2 = entry({ key: 'e2', analysis: analysis({ themes: ['a', 'bc'] }) })
+    const graph = buildConceptGraph([e1, e2])
+    expect(graph.edges.map((e) => [e.a, e.b])).toEqual([
+      ['a', 'bc'],
+      ['ab', 'c'],
+    ])
   })
 })
 

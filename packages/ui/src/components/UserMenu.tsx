@@ -23,7 +23,11 @@ export interface UserMenuProps {
   size?: 'desktop' | 'mobile'
   /** Sign the user out (app owns the API call + post-signout navigation). */
   onSignout?: () => void | Promise<void>
-  /** Absolute URL of the hosted account page; opens in a new tab. Hidden if unset. */
+  /**
+   * Absolute http(s) URL of the hosted account page; opens in a new tab.
+   * Hidden if unset — or if the value is relative or a non-http(s) scheme
+   * (`javascript:` etc.), which the component rejects as defense-in-depth.
+   */
   accountUrl?: string
   /**
    * In-app account navigation (same tab). id-web IS the account app, so it
@@ -32,6 +36,20 @@ export interface UserMenuProps {
    * the "Account" item shows if either is set.
    */
   onAccount?: () => void
+}
+
+// Guard for the injected account deep-link: this is a shared library
+// component, so it enforces its own "absolute http(s) URL" contract rather
+// than trusting every future caller. Returns the normalized href (so the
+// validated parse is also what gets opened), or null for relative URLs and
+// non-http(s) schemes (javascript:, data:, etc.).
+function parseAccountUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    return /^https?:$/.test(parsed.protocol) ? parsed.href : null
+  } catch {
+    return null
+  }
 }
 
 function displayName(profile: UserMenuProfile | null): string {
@@ -116,9 +134,10 @@ export function UserMenu({
       onAccount()
       return
     }
-    if (accountUrl) window.open(accountUrl, '_blank', 'noopener,noreferrer')
+    if (safeAccountUrl) window.open(safeAccountUrl, '_blank', 'noopener,noreferrer')
   }
 
+  const safeAccountUrl = accountUrl ? parseAccountUrl(accountUrl) : null
   const name = displayName(profile)
   const avatarSize = size === 'mobile' ? 28 : 32
 
@@ -177,7 +196,7 @@ export function UserMenu({
           onKeyDown={onFlyoutKeyDown}
         >
           <div style={{ display: 'grid', gap: 6 }}>
-            {(accountUrl || onAccount) && (
+            {(safeAccountUrl || onAccount) && (
               <button type="button" role="menuitem" className="pl-shortcut" onClick={openAccount}>
                 Account
               </button>

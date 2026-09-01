@@ -2,9 +2,11 @@
 # -> planner.rallypt.dev, `--env prod` -> planner.rallypt.app. Entry is
 # src/worker.ts (`{ fetch, scheduled }`); the Node server.ts is retired.
 #
-# planner is a BFF: it proxies lists/events/RPID over HTTP. It has NO Durable
-# Object (no realtime) and NO R2 (no object store). As the owner of its own
-# push notifications it carries a [triggers] cron + two infra tables
+# planner is a BFF: it proxies lists/events/RPID over HTTP. It has NO
+# realtime Durable Object and NO R2 (no object store) — it does carry a
+# RateLimitCounter Durable Object (RATE_LIMITS, #881) for the per-bucket
+# rate limiter, unrelated to realtime. As the owner of its own push
+# notifications it carries a [triggers] cron + two infra tables
 # (push_subscriptions, scheduled_notifications) — the documented exception to
 # the otherwise fetch-only / no-domain-table BFF posture.
 #
@@ -33,9 +35,21 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*"]
 
-# planner has no realtime (no Durable Object) and no object store (no R2),
-# so there is NO [[durable_objects.bindings]] or [[r2_buckets]] block. It
-# DOES carry a [triggers] cron (below) for the notification drain.
+# planner has no realtime Durable Object and no object store (no R2), so
+# there is NO [[r2_buckets]] block. It DOES carry a [triggers] cron (below)
+# for the notification drain, plus the RateLimitCounter Durable Object below
+# (#881) for the per-bucket rate limiter.
+
+# RateLimitCounter Durable Object (#881) — one SQLite-backed DO per token
+# bucket, replacing the per-request D1 write in the rate limiter. DO
+# migrations are append-only: this is a NEW tag, never edit it once shipped.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimitCounter"]
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
 # dev-safe defaults for the secrets. RPID/LISTS/EVENTS are reached via the
@@ -119,6 +133,10 @@ database_name = "rp-planner-qa"
 # (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-planner-qa || true`).
 migrations_dir = "../../packages/planner-db/migrations"
 
+[[env.qa.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 # Service bindings: same-account cross-Worker calls to id/lists/events
 # dispatch in-process via these bindings (the CF edge drops same-account
 # loopback fetches to public hostnames). Path-matched against the bound
@@ -170,6 +188,10 @@ database_name = "rp-planner-prod"
 # database_id injected by cf-deploy.yml at deploy time — do NOT add manually
 # (name-linking fails `d1 migrations apply --remote`; bootstrap: `wrangler d1 create rp-planner-prod || true`).
 migrations_dir = "../../packages/planner-db/migrations"
+
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 [[env.prod.services]]
 binding = "RPID"

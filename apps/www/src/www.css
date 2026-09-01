@@ -7,6 +7,8 @@
 
 body{--bg:#0b1b2b;--sf:#152638;--sf2:#1d2f45;--ln:#24364e;--ink:#fff;--dim:#a8bcd4;--mut:#7a8fa6;--acid:#0ea5e9;--hot:#f87171;margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body,'Space Grotesk',sans-serif);min-height:100dvh;overflow-x:hidden}
 a{color:var(--acid)}a:hover{color:var(--ink)}
+/* .wrap uses the `padding` shorthand — co-classed blocks (.hero-in) must set
+   only padding-top/bottom longhands, and this rule must stay above them. */
 .wrap{max-width:1120px;margin:0 auto;padding:0 32px;width:100%;box-sizing:border-box}
 .mono{font-family:var(--font-mono,'Space Mono',monospace);text-transform:uppercase}
 .eyebrow{font-family:var(--font-mono,'Space Mono',monospace);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut)}
@@ -50,8 +52,10 @@ p.desc{font-size:15.5px;line-height:1.6;color:var(--dim);margin:16px 0 0;max-wid
 .cap h3{font-family:var(--font-display,'Archivo Black',sans-serif);font-size:18px;letter-spacing:-.01em;margin:14px 0 0;color:var(--ink)}
 .cap p{font-size:14px;line-height:1.55;color:var(--dim);margin:8px 0 0}
 /* phone frame for screenshot slots */
-.phone{width:280px;max-width:100%;aspect-ratio:390/844;background:var(--sf);border-radius:28px;padding:8px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.06)}
-.phone .slot{width:100%;height:100%;border-radius:22px;overflow:hidden;background:var(--sf2);display:flex;align-items:center;justify-content:center;text-align:center;padding:16px;box-sizing:border-box;font-family:var(--font-mono,'Space Mono',monospace);font-size:10px;letter-spacing:.02em;color:var(--mut);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}
+/* aspect-ratio lives on the slot, not the frame: the 8px bezel would skew
+   the inner ratio and make object-fit:cover crop the 390×844 captures. */
+.phone{width:280px;max-width:100%;background:var(--sf);border-radius:28px;padding:8px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.06)}
+.phone .slot{width:100%;aspect-ratio:390/844;border-radius:22px;overflow:hidden;background:var(--sf2);display:flex;align-items:center;justify-content:center;text-align:center;padding:16px;box-sizing:border-box;font-family:var(--font-mono,'Space Mono',monospace);font-size:10px;letter-spacing:.02em;color:var(--mut);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}
 .phone img.slot{display:block;object-fit:cover;padding:0}
 .shot-cap{display:block;text-align:center;font-family:var(--font-mono,'Space Mono',monospace);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);margin-top:12px}
 /* footer */
@@ -66,7 +70,7 @@ footer.site{padding:40px 0 48px;box-shadow:0 -1px 0 rgba(255,255,255,.05)}
 /* home — hero + product sections */
 .hero{position:relative;overflow:hidden}
 .hero-cmp{position:absolute;right:-140px;top:-100px;color:var(--acid);opacity:.07;pointer-events:none}
-.hero-in{position:relative;display:grid;grid-template-columns:1.15fr .85fr;gap:48px;align-items:center;padding:76px 0 84px}
+.hero-in{position:relative;display:grid;grid-template-columns:1.15fr .85fr;gap:48px;align-items:center;padding-top:76px;padding-bottom:84px}
 .hero-phones{display:flex;gap:18px;justify-content:center}
 .hero-phones .phone{width:216px}
 .hero-phones .phone-col:last-child .phone{margin-top:56px}
@@ -99,7 +103,7 @@ footer.site{padding:40px 0 48px;box-shadow:0 -1px 0 rgba(255,255,255,.05)}
 .p-hero{padding:72px 0 64px;text-align:center}
 .p-hero p.lede{margin-left:auto;margin-right:auto}
 .p-hero .chips{justify-content:center}
-.shots{display:flex;gap:26px;justify-content:center;align-items:flex-start;padding:0 0 76px;flex-wrap:wrap}
+.shots{display:flex;gap:26px;justify-content:center;align-items:flex-start;padding:0 32px 76px;flex-wrap:wrap}
 .shots>div:nth-child(2){margin-top:-24px}
 .feat{padding:0 0 76px}
 .feat-g{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:32px}
@@ -124,5 +128,5 @@ footer.site{padding:40px 0 48px;box-shadow:0 -1px 0 rgba(255,255,255,.05)}
 .host{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:32px}
 .host .cap h3{font-size:16px}
 /* responsive */
-@media (max-width:880px){.wrap{padding:0 20px}nav.main a.lnk{display:none}.g2{grid-template-columns:1fr;gap:36px}.g3{grid-template-columns:1fr}.sec{padding:52px 0}.hero-in{grid-template-columns:1fr;padding:52px 0}.hero-phones .phone-col:last-child .phone{margin-top:0}.g2 .prod-shots{order:2}.repos{grid-template-columns:1fr}.feat-g{grid-template-columns:1fr}.shots>div:nth-child(2){margin-top:0}.stats-strip{grid-template-columns:1fr 1fr}.panel-strip{grid-template-columns:1fr 1fr}.host{grid-template-columns:1fr}.cmd code{white-space:normal}}
+@media (max-width:880px){.wrap{padding:0 20px}.shots{padding:0 20px 76px}nav.main a.lnk{display:none}.g2{grid-template-columns:1fr;gap:36px}.g2>*{min-width:0}.bv-row{flex-wrap:wrap}.g3{grid-template-columns:1fr}.sec{padding:52px 0}.hero-in{grid-template-columns:1fr;padding-top:52px;padding-bottom:52px}.hero-in>*{min-width:0;overflow-wrap:anywhere}.hero-phones .phone-col{flex:0 1 216px;min-width:0}.hero-phones .phone-col:last-child .phone{margin-top:0}.g2 .prod-shots{order:2}.repos{grid-template-columns:1fr}.feat-g{grid-template-columns:1fr}.shots>div:nth-child(2){margin-top:0}.stats-strip{grid-template-columns:1fr 1fr}.panel-strip{grid-template-columns:1fr 1fr}.host{grid-template-columns:1fr}.cmd code{white-space:normal}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}

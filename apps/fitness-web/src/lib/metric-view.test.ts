@@ -14,9 +14,11 @@ import {
   buildMetricPayload,
   buildMetricLogPayload,
   metricEntryDisplayUnit,
+  bodyweightTileVm,
   formatMetricDate,
   isoToDatetimeLocal,
   datetimeLocalToIso,
+  nearestMetricTo,
 } from './metric-view.js'
 import { displayToKg, kgToDisplay } from './units.js'
 
@@ -569,5 +571,98 @@ describe('datetimeLocalToIso', () => {
   it('returns a valid ISO string', () => {
     const result = datetimeLocalToIso('2026-06-23T09:00')
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  })
+})
+
+describe('bodyweightTileVm', () => {
+  it('shows a placeholder while the metrics cache is cold', () => {
+    expect(bodyweightTileVm(undefined, 'kg')).toEqual({ value: '—', sub: 'Last weigh-in' })
+  })
+
+  it('prompts a first weigh-in when no bodyweight rows exist', () => {
+    expect(bodyweightTileVm([], 'kg')).toEqual({ value: null, sub: 'Log a weigh-in' })
+    const otherKind = [makeMetric({ kind: 'sleep', value: 7.5, recordedAt: '2026-06-20T08:00:00.000Z' })]
+    expect(bodyweightTileVm(otherKind, 'kg')).toEqual({ value: null, sub: 'Log a weigh-in' })
+  })
+
+  it('formats the latest bodyweight in kg', () => {
+    const metrics = [
+      makeMetric({ kind: 'bodyweight', value: 82.4, recordedAt: '2026-06-22T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 83.1, recordedAt: '2026-06-20T08:00:00.000Z' }),
+    ]
+    expect(bodyweightTileVm(metrics, 'kg')).toEqual({ value: '82.4 kg', sub: 'Last weigh-in' })
+  })
+
+  it('picks the latest reading regardless of input order', () => {
+    const metrics = [
+      makeMetric({ kind: 'bodyweight', value: 83.1, recordedAt: '2026-06-20T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 82.4, recordedAt: '2026-06-22T08:00:00.000Z' }),
+    ]
+    expect(bodyweightTileVm(metrics, 'kg').value).toBe('82.4 kg')
+  })
+
+  it('converts to lb when that is the preference', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-22T08:00:00.000Z' })]
+    const expected = kgToDisplay(80, 'lb', 1)
+    expect(bodyweightTileVm(metrics, 'lb').value).toBe(`${expected} lb`)
+  })
+})
+
+// ── nearestMetricTo ──────────────────────────────────────────────────────────
+
+describe('nearestMetricTo', () => {
+  it('returns an exact hit', () => {
+    const metrics = [
+      makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-20T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 81, recordedAt: '2026-06-22T08:00:00.000Z' }),
+    ]
+    expect(nearestMetricTo('2026-06-22T08:00:00.000Z', metrics)?.value).toBe(81)
+  })
+
+  it('picks a metric recorded before the photo', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-19T08:00:00.000Z' })]
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', metrics)?.value).toBe(80)
+  })
+
+  it('picks a metric recorded after the photo', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-23T08:00:00.000Z' })]
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', metrics)?.value).toBe(80)
+  })
+
+  it('returns null when nothing is within the window', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-01T08:00:00.000Z' })]
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', metrics, 7)).toBeNull()
+  })
+
+  it('returns null for an empty list', () => {
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', [])).toBeNull()
+  })
+
+  it('returns null for an invalid takenAt', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-20T08:00:00.000Z' })]
+    expect(nearestMetricTo('not-a-date', metrics)).toBeNull()
+  })
+
+  it('is tolerant of unsorted input', () => {
+    const metrics = [
+      makeMetric({ kind: 'bodyweight', value: 90, recordedAt: '2026-06-25T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-20T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 85, recordedAt: '2026-06-15T08:00:00.000Z' }),
+    ]
+    expect(nearestMetricTo('2026-06-21T08:00:00.000Z', metrics)?.value).toBe(80)
+  })
+
+  it('resolves ties to the earlier-recorded entry', () => {
+    const metrics = [
+      makeMetric({ kind: 'bodyweight', value: 80, recordedAt: '2026-06-18T08:00:00.000Z' }),
+      makeMetric({ kind: 'bodyweight', value: 81, recordedAt: '2026-06-22T08:00:00.000Z' }),
+    ]
+    // Target is exactly 2 days from each side.
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', metrics)?.value).toBe(80)
+  })
+
+  it('ignores non-finite values', () => {
+    const metrics = [makeMetric({ kind: 'bodyweight', value: Number.NaN, recordedAt: '2026-06-20T08:00:00.000Z' })]
+    expect(nearestMetricTo('2026-06-20T08:00:00.000Z', metrics)).toBeNull()
   })
 })

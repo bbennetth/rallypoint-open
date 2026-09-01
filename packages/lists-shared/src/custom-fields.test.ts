@@ -165,7 +165,9 @@ describe('mergeUpdateOptions', () => {
 })
 
 describe('validateCustomFields', () => {
-  function def(partial: Partial<FieldDefForValidation> & Pick<FieldDefForValidation, 'id' | 'fieldType'>): FieldDefForValidation {
+  function def(
+    partial: Partial<FieldDefForValidation> & Pick<FieldDefForValidation, 'id' | 'fieldType'>,
+  ): FieldDefForValidation {
     return { required: false, options: {}, ...partial }
   }
 
@@ -178,12 +180,22 @@ describe('validateCustomFields', () => {
   const singleDef = def({
     id: 'lfd_single',
     fieldType: 'single_select',
-    options: { choices: [{ id: 'opt_a', label: 'A' }, { id: 'opt_z', label: 'Z', archived: true }] },
+    options: {
+      choices: [
+        { id: 'opt_a', label: 'A' },
+        { id: 'opt_z', label: 'Z', archived: true },
+      ],
+    },
   })
   const multiDef = def({
     id: 'lfd_multi',
     fieldType: 'multi_select',
-    options: { choices: [{ id: 'opt_x', label: 'X' }, { id: 'opt_y', label: 'Y' }] },
+    options: {
+      choices: [
+        { id: 'opt_x', label: 'X' },
+        { id: 'opt_y', label: 'Y' },
+      ],
+    },
   })
 
   it('returns empty values for empty input and no defs (v1 behaviour)', () => {
@@ -266,8 +278,12 @@ describe('validateCustomFields', () => {
   })
 
   it('rejects NaN and Infinity for a number field', () => {
-    expect(validateCustomFields([numDef], { lfd_num: Number.NaN }).ok).toBe(false)
-    expect(validateCustomFields([numDef], { lfd_num: Number.POSITIVE_INFINITY }).ok).toBe(false)
+    const nan = validateCustomFields([numDef], { lfd_num: Number.NaN })
+    expect(nan.ok).toBe(false)
+    if (!nan.ok) expect(nan.issues[0]!.message).toBe('Value must be a number.')
+    const inf = validateCustomFields([numDef], { lfd_num: Number.POSITIVE_INFINITY })
+    expect(inf.ok).toBe(false)
+    if (!inf.ok) expect(inf.issues[0]!.message).toBe('Value must be a finite number.')
   })
 
   it('rejects a url without an http(s) scheme', () => {

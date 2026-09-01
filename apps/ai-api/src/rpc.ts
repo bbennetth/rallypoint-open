@@ -54,7 +54,10 @@ const traceRecordSchema = z.object({
   provider: z.string().min(1).max(64),
   model: z.string().min(1).max(128),
   request: z
-    .object({ messages: z.array(messageSchema), params: z.record(z.unknown()).optional() })
+    .object({
+      messages: z.array(messageSchema),
+      params: z.record(z.string(), z.unknown()).optional(),
+    })
     .optional(),
   response: z.object({ messages: z.array(messageSchema) }).optional(),
   latencyMs: z.number().int().min(0),

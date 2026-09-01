@@ -20,10 +20,13 @@ import type {
   ExerciseHistorySession,
 } from '@rallypoint/fitness-shared'
 import {
+  armHistoryPrefillOverride,
   bracketRange,
   formatMmss,
   nextUpLabel as sharedNextUpLabel,
   parseMmss,
+  prefillBlockFromHistory,
+  prefillSessionFromHistory,
   runningSetTimeS,
   sessionFromStrengthBody,
   strengthSessionReducer,
@@ -42,6 +45,7 @@ import {
   getWodTemplate,
   isTempId,
 } from '../lib/api.js'
+import { canApplySuggestion, recLineView } from '../lib/rec-line-view.js'
 import { NumericField } from '../ui/NumericField.js'
 import { MmssInput } from '../ui/MmssInput.js'
 import { RestTimerOverlay } from '../ui/RestTimerOverlay.js'
@@ -53,7 +57,6 @@ import { LiveSettingsSheet } from '../ui/LiveSettingsSheet.js'
 import type { MachineSettingEntry } from '@rallypoint/fitness-shared'
 import {
   displayToKg,
-  formatLoad,
   formatTonnage,
   kgToDisplay,
   useWeightUnit,
@@ -132,17 +135,31 @@ function setMetric(s: {
 function buildSessionFromTemplate(
   tpl: WodTemplateDto,
   defaultRestS: number,
+  /** False for the composer's "Save & start" handoff — its body is what
+   *  the athlete JUST typed, so the history override must not arm. */
+  armOverride: boolean,
 ): StrengthSessionState | null {
   if (tpl.kind !== 'strength') return null
-  return sessionFromStrengthBody({
+  const seeded = sessionFromStrengthBody({
     sessionId: newLiveSessionId(),
     templateName: tpl.name,
     // Only custom (user-owned) templates are patchable, so only they
     // get the link — a benchmark link would offer an update that 404s.
     templateId: tpl.isCustom && !tpl.isBenchmark ? tpl.id : null,
+    // The done-detection link has no ownership gate: any template start
+    // (benchmarks included) should mark its scheduled /log row done. On
+    // the state, not the URL — the ?templateId= param is stripped right
+    // after hydration and a localStorage resume never has it.
+    sourceTemplateId: tpl.id,
     body: tpl.body as StrengthBody,
     defaultRestS,
   })
+  // A saved template's prescribed reps/loads are a stale snapshot of an
+  // older session — arm the one-shot override so the history prefill
+  // replaces them with the athlete's LAST logged numbers once the
+  // exercise history lands. Freshly authored bodies (composer Start-now
+  // and Save & start) deliberately skip the stamp.
+  return armOverride ? armHistoryPrefillOverride(seeded) : seeded
 }
 
 export function StrengthSessionPage() {
@@ -152,6 +169,13 @@ export function StrengthSessionPage() {
   const alertsMode = useRestAlertsMode()
   const [searchParams, setSearchParams] = useSearchParams()
   const templateIdParam = searchParams.get('templateId')
+  // The composer's "Save & start" marks its handoff fresh (`&fresh=1`):
+  // the template body is what the athlete just typed, so the
+  // history-prefill override must not arm for it. A query param rather
+  // than router state so a reload during the template fetch keeps the
+  // marker; it's stripped with templateId after hydration. Plan/library
+  // starts never set it.
+  const freshTemplate = searchParams.get('fresh') === '1'
   // Hydrate from localStorage on first render — if the user left a
   // session mid-set, we resume rather than asking them to re-pick. A
   // `phase==='done'` row is surfaced too (finished but never saved).
@@ -189,15 +213,16 @@ export function StrengthSessionPage() {
 
   // Per-exercise recent-set history for the inline "LAST · …" hint, loaded
   // lazily the first time a block appears (mirrors machineSettingsByExercise).
-  // A never-logged exercise stores [] so it isn't refetched.
+  // A never-logged exercise (404) stores [] so it isn't refetched; a
+  // TRANSIENT failure (offline, 500) stores 'error' — also not refetched
+  // this mount, but distinguished so the prefill pass skips it without
+  // consuming an armed override directive (it survives to the next
+  // mount, where the fetch retries).
   const [historyByExercise, setHistoryByExercise] = useState<
-    Record<string, ExerciseHistorySession[]>
+    Record<string, ExerciseHistorySession[] | 'error'>
   >({})
   // The exercise whose full history drawer is open, or null.
-  const [historyExercise, setHistoryExercise] = useState<
-    { id: string; name: string } | null
-  >(null)
-
+  const [historyExercise, setHistoryExercise] = useState<{ id: string; name: string } | null>(null)
 
   // `?templateId=<id>` hydration (Plan-tab Start, code-review F3). When
   // the param is present AND no resumed session is mounted, fetch the
@@ -208,7 +233,12 @@ export function StrengthSessionPage() {
   // empty picker with an error banner — the Plan handler shouldn't
   // produce these, but a hand-typed URL might.
   useEffect(() => {
-    if (!templateIdParam) return
+    if (!templateIdParam) {
+      // A stray fresh=1 without templateId (hand-edited URL) has nothing
+      // to mark — drop it so it doesn't linger in the address bar.
+      if (freshTemplate) setSearchParams({}, { replace: true })
+      return
+    }
     if (state) {
       // Already resumed a session — drop the param so it doesn't fight
       // the resume on a remount.
@@ -219,7 +249,7 @@ export function StrengthSessionPage() {
     getWodTemplate(templateIdParam)
       .then((tpl) => {
         if (cancelled) return
-        const seeded = buildSessionFromTemplate(tpl, defaultRestS)
+        const seeded = buildSessionFromTemplate(tpl, defaultRestS, !freshTemplate)
         if (!seeded) {
           setError("That template isn't a strength session.")
           setSearchParams({}, { replace: true })
@@ -254,7 +284,9 @@ export function StrengthSessionPage() {
   useEffect(() => {
     if (!state || state.phase !== 'running') return
     const id = window.setInterval(() => {
-      setState((cur) => (cur ? strengthSessionReducer(cur, { kind: 'TICK', nowMs: Date.now() }) : cur))
+      setState((cur) =>
+        cur ? strengthSessionReducer(cur, { kind: 'TICK', nowMs: Date.now() }) : cur,
+      )
     }, 1000)
     tickRef.current = id
     return () => {
@@ -324,14 +356,16 @@ export function StrengthSessionPage() {
   // every other combination gets the go tone (the old hidden-only gate
   // dropped the alert entirely when the user refocused the tab right
   // as the timer fired).
-  const signalRestDone = useCallback((nextUp: string) => {
+  const signalRestDone = useCallback((nextUp: string, deadlineMs?: number) => {
     const now = Date.now()
     if (!shouldSignalRestFinish(lastFinishSignalMs.current, now)) return
     lastFinishSignalMs.current = now
     // The local alert is landing — the server-side backstop push for this
-    // rest period is no longer needed. Best-effort; if the push already
-    // left the push service, the shared notification tag collapses it
-    // into the same banner.
+    // rest period is no longer needed. Best-effort; the backstop is also
+    // parked REST_PUSH_GRACE_MS after this deadline server-side, so this
+    // disarm normally wins, and the SW silently re-paints (rather than
+    // re-alerts) a push whose deadline matches a banner that's already
+    // up (data.deadlineMs below).
     if (restPushArmedRef.current) {
       restPushArmedRef.current = false
       void disarmRestPush(sessionIdRef.current)
@@ -349,6 +383,11 @@ export function StrengthSessionPage() {
           body: nextUp ? `Next up: ${nextUp}` : 'Back to work.',
           tag: restNotificationTag(sessionIdRef.current),
           icon: '/icons/icon-192.png',
+          // Same deadline armRestPush sent the server: lets the SW
+          // recognize THIS rest period's banner and show the late
+          // backstop push for it silently (sw.ts), without a stale
+          // banner from an earlier rest muting a later rest's alert.
+          data: deadlineMs != null ? { deadlineMs } : undefined,
         }),
       )
     } else {
@@ -362,7 +401,12 @@ export function StrengthSessionPage() {
     prevRestRemaining.current = next
     if (alertsMode === 'off') return
     if (countdownBeepSecond(prev, next) != null) countdownBeep()
-    if (isNaturalRestFinish(prev, next)) signalRestDone(nextUpLabel)
+    if (isNaturalRestFinish(prev, next)) {
+      // restTimerRef is declared below — safe (the closure runs
+      // post-render, and effect order means the arm effect hasn't torn
+      // it down yet when rest hits 0), so don't "fix" the ordering.
+      signalRestDone(nextUpLabel, restTimerRef.current?.deadlineMs)
+    }
     // nextUpLabel is read at fire time on purpose — label churn alone
     // must not re-run the transition detector.
   }, [state?.restRemainingS, alertsMode, signalRestDone])
@@ -402,7 +446,7 @@ export function StrengthSessionPage() {
     if (restTimerRef.current) window.clearTimeout(restTimerRef.current.id)
     const id = window.setTimeout(() => {
       restTimerRef.current = null
-      signalRestDone(nextUp)
+      signalRestDone(nextUp, projected)
     }, remaining * 1000)
     restTimerRef.current = { id, deadlineMs: projected, nextUp }
     // Server-side backstop: park a push at the same deadline so the alert
@@ -506,17 +550,56 @@ export function StrengthSessionPage() {
           if (cancelled) return
           setHistoryByExercise((cur) => ({ ...cur, [id]: res.sessions }))
         })
-        .catch(() => {
+        .catch((err: unknown) => {
           if (cancelled) return
-          // 404 (never logged) or a transient error: cache empty so the
-          // hint stays hidden and we don't refetch in a loop.
-          setHistoryByExercise((cur) => ({ ...cur, [id]: [] }))
+          // 404 = the exercise isn't visible to this actor (e.g. a tmp
+          // id the server hasn't seen) — a definitive "no history here",
+          // so cache [] like the endpoint's own empty answer for a
+          // visible-but-never-logged exercise. Anything else is
+          // transient → cache the 'error' sentinel: the hint stays
+          // hidden and we don't refetch in a loop, but the prefill pass
+          // won't mistake it for "no history" and burn the override
+          // directive.
+          const definitiveMiss = err instanceof ApiError && err.status === 404
+          setHistoryByExercise((cur) => ({ ...cur, [id]: definitiveMiss ? [] : 'error' }))
         })
     }
     return () => {
       cancelled = true
     }
   }, [state?.blocks, historyByExercise])
+
+  // Prefill last-logged weight/reps (and the SUGGESTED strip) once per
+  // exercise when its history lands. The ref caps it at one attempt per
+  // exerciseId per mount, so within this mount a field the athlete
+  // clears stays cleared (a reload re-runs the pass, which only fills
+  // still-blank fields); empty ([]) history is still marked so it isn't
+  // retried. A block added mid-session for a NEW exercise gets this
+  // path via its history fetch; one duplicating an already-fetched
+  // exercise is prefilled at ADD_BLOCKS dispatch below instead.
+  const prefilledExerciseIds = useRef<Set<string>>(new Set())
+  // NB: the effect reads `state` ONLY as this null guard (the update
+  // itself is a functional setState), which is why the dependency is
+  // `hasSession` rather than `state` — don't add other `state` reads
+  // here without widening the deps.
+  const hasSession = state != null
+  useEffect(() => {
+    if (!hasSession) return
+    // 'error' entries are excluded (not marked prefilled either): the
+    // prefill only ever sees genuinely fetched history, so a transient
+    // failure can't consume a block's armed override directive.
+    const fresh = Object.keys(historyByExercise).filter(
+      (id) => historyByExercise[id] !== 'error' && !prefilledExerciseIds.current.has(id),
+    )
+    if (fresh.length === 0) return
+    const slice: Record<string, ExerciseHistorySession[]> = {}
+    for (const id of fresh) {
+      prefilledExerciseIds.current.add(id)
+      const rows = historyByExercise[id]
+      if (rows != null && rows !== 'error') slice[id] = rows
+    }
+    setState((cur) => (cur ? prefillSessionFromHistory(cur, slice) : cur))
+  }, [historyByExercise, hasSession])
 
   // Helper used by Save + Discard to wipe the persisted resume slot.
   const clearPersisted = useCallback(() => {
@@ -564,7 +647,11 @@ export function StrengthSessionPage() {
       nav('/log/history')
     } catch (err: unknown) {
       setError(
-        err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Could not save that session.',
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Could not save that session.',
       )
     } finally {
       setSaving(false)
@@ -624,7 +711,12 @@ export function StrengthSessionPage() {
       onPointerDownCapture={alertsMode === 'off' ? undefined : unlockAudio}
     >
       <div className="live-top">
-        <button type="button" className="live-iconbtn" onClick={() => nav('/log')} aria-label="Minimize">
+        <button
+          type="button"
+          className="live-iconbtn"
+          onClick={() => nav('/log')}
+          aria-label="Minimize"
+        >
           <Icon name="chevron" size={16} />
         </button>
         <div className="ttl center">
@@ -651,9 +743,7 @@ export function StrengthSessionPage() {
             <button
               type="button"
               className={`live-iconbtn${isPaused ? ' on' : ''}`}
-              onClick={() =>
-                dispatch({ kind: isPaused ? 'RESUME' : 'PAUSE', nowMs: Date.now() })
-              }
+              onClick={() => dispatch({ kind: isPaused ? 'RESUME' : 'PAUSE', nowMs: Date.now() })}
               aria-label={isPaused ? 'Resume session' : 'Pause session'}
               aria-pressed={isPaused}
             >
@@ -746,11 +836,7 @@ export function StrengthSessionPage() {
               replaces the empty list (the small "+ Add exercise" below
               still renders, but the first add deserves prominence). */}
           {state.blocks.length === 0 && (
-            <button
-              type="button"
-              className="fit-startbtn"
-              onClick={() => setAddSheetOpen(true)}
-            >
+            <button type="button" className="fit-startbtn" onClick={() => setAddSheetOpen(true)}>
               ＋ Add your first exercise
             </button>
           )}
@@ -805,9 +891,13 @@ export function StrengthSessionPage() {
                   })()}
                   {(() => {
                     // Inline "last time" hint from the most recent session;
-                    // tap to open the full history drawer.
+                    // tap to open the full history drawer. A fetch-failure
+                    // sentinel renders nothing, same as no history.
                     const hist = historyByExercise[b.exerciseId]
-                    const summary = hist && hist[0] ? inlineHistorySummary(hist[0], unit) : ''
+                    const summary =
+                      hist && hist !== 'error' && hist[0]
+                        ? inlineHistorySummary(hist[0], unit)
+                        : ''
                     if (!summary) return null
                     return (
                       <button
@@ -858,13 +948,43 @@ export function StrengthSessionPage() {
                   </button>
                 </div>
               </SwipeActions>
-              {b.suggestedKg != null && (
-                <div className="rec-line">
-                  <span className="rec-k">SUGGESTED</span>
-                  <b>{formatLoad(b.suggestedKg, unit)}</b>
-                  {b.suggestedBasis && <span className="rec-b">· {b.suggestedBasis}</span>}
-                </div>
-              )}
+              {(() => {
+                // Display rules (display-unit plate snapping + unit-aware
+                // basis rebuild) live in the pure, unit-tested recLineView.
+                // The strip renders whenever a suggestion exists.
+                const rec = recLineView(b, unit)
+                if (!rec) return null
+                // Pure, unit-tested gate: renders the Use button only
+                // while a set would actually change. The reducer's one
+                // extra guard (phase === 'running') is covered by this
+                // whole list rendering inside the !isDone branch and
+                // mounted sessions never sitting in 'pre' (both hydration
+                // paths dispatch START).
+                const canApply = canApplySuggestion(b, rec.applyKg)
+                return (
+                  <div className="rec-line">
+                    <span className="rec-k">SUGGESTED</span>
+                    <b>{rec.shown}</b>
+                    {rec.basis && <span className="rec-b">· {rec.basis}</span>}
+                    {/* Accept: write the suggestion into every undone
+                        working rep set. The strip stays up afterwards —
+                        with the rows matching, it reads as confirmation
+                        (recLineView no longer duplicate-hides). */}
+                    {canApply && (
+                      <button
+                        type="button"
+                        className="rec-apply"
+                        onClick={() =>
+                          dispatch({ kind: 'APPLY_SUGGESTED_LOAD', blockIdx: bi, kg: rec.applyKg })
+                        }
+                        aria-label={`Use suggested ${rec.shown} for ${b.name}`}
+                      >
+                        Use
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
               {b.sets.map((s, si) => {
                 const metric = setMetric(s)
                 const isRep = metric.field === 'reps'
@@ -885,11 +1005,10 @@ export function StrengthSessionPage() {
                 // readout derived from wall clock.
                 const timer = state.setTimer
                 const timerHere = timer != null && timer.blockIdx === bi && timer.setIdx === si
-                const liveTimeS = timer != null && timerHere ? runningSetTimeS(timer, Date.now()) : null
+                const liveTimeS =
+                  timer != null && timerHere ? runningSetTimeS(timer, Date.now()) : null
                 const canTime =
-                  !s.done &&
-                  !isDone &&
-                  (metric.field === 'timeS' || metric.field === 'distanceM')
+                  !s.done && !isDone && (metric.field === 'timeS' || metric.field === 'distanceM')
                 const stopwatchBtn = canTime ? (
                   <button
                     type="button"
@@ -915,88 +1034,96 @@ export function StrengthSessionPage() {
                   </button>
                 ) : null
                 return (
-                // Remove-set lives directly in the row's swipe/hover tray
-                // (no Edit toggle in between) on removable rows; done and
-                // last-remaining sets pass empty actions.
-                <SwipeActions
-                  key={si}
-                  className="swipe-inline"
-                  actions={
-                    removable
-                      ? [
-                          {
-                            key: 'delete',
-                            label: `Remove set ${si + 1}`,
-                            text: 'Remove',
-                            icon: <Icon name="trash" size={14} />,
-                            onAction: () =>
-                              dispatch({ kind: 'REMOVE_SET', blockIdx: bi, setIdx: si }),
-                          },
-                        ]
-                      : []
-                  }
-                  contentClassName={`set-row${s.done ? ' done' : ''}${isWarmup ? ' warmup' : ''}`}
-                >
-                  <button
-                    type="button"
-                    className={`ix-toggle${isWarmup ? ' warmup' : ''}`}
-                    onClick={() => dispatch({ kind: 'TOGGLE_SET_TYPE', blockIdx: bi, setIdx: si })}
-                    aria-label={isWarmup ? `Set ${si + 1}: warmup (tap to mark working)` : `Set ${si + 1}: working (tap to mark warmup)`}
-                    title={isWarmup ? 'Warmup set — tap to mark working' : 'Tap to mark as warmup'}
+                  // Remove-set lives directly in the row's swipe/hover tray
+                  // (no Edit toggle in between) on removable rows; done and
+                  // last-remaining sets pass empty actions.
+                  <SwipeActions
+                    key={si}
+                    className="swipe-inline"
+                    actions={
+                      removable
+                        ? [
+                            {
+                              key: 'delete',
+                              label: `Remove set ${si + 1}`,
+                              text: 'Remove',
+                              icon: <Icon name="trash" size={14} />,
+                              onAction: () =>
+                                dispatch({ kind: 'REMOVE_SET', blockIdx: bi, setIdx: si }),
+                            },
+                          ]
+                        : []
+                    }
+                    contentClassName={`set-row${s.done ? ' done' : ''}${isWarmup ? ' warmup' : ''}`}
                   >
-                    {isWarmup ? 'W' : si + 1}
-                  </button>
-                  {metric.field === 'timeS' ? (
-                    // Time-unit sets edit as mm:ss; while the stopwatch
-                    // runs the cell becomes a live readout.
-                    s.done ? (
-                      <span className="n">{formatMmss(s.timeS ?? 0)}</span>
-                    ) : timerHere ? (
-                      <span className="n">{formatMmss(liveTimeS ?? 0)}</span>
+                    <button
+                      type="button"
+                      className={`ix-toggle${isWarmup ? ' warmup' : ''}`}
+                      onClick={() =>
+                        dispatch({ kind: 'TOGGLE_SET_TYPE', blockIdx: bi, setIdx: si })
+                      }
+                      aria-label={
+                        isWarmup
+                          ? `Set ${si + 1}: warmup (tap to mark working)`
+                          : `Set ${si + 1}: working (tap to mark warmup)`
+                      }
+                      title={
+                        isWarmup ? 'Warmup set — tap to mark working' : 'Tap to mark as warmup'
+                      }
+                    >
+                      {isWarmup ? 'W' : si + 1}
+                    </button>
+                    {metric.field === 'timeS' ? (
+                      // Time-unit sets edit as mm:ss; while the stopwatch
+                      // runs the cell becomes a live readout.
+                      s.done ? (
+                        <span className="n">{formatMmss(s.timeS ?? 0)}</span>
+                      ) : timerHere ? (
+                        <span className="n">{formatMmss(liveTimeS ?? 0)}</span>
+                      ) : (
+                        <MmssInput
+                          className="set-edit"
+                          value={s.timeS != null ? formatMmss(s.timeS) : ''}
+                          maxS={4 * 60 * 60}
+                          placeholder="0:00"
+                          onCommit={(v) =>
+                            dispatch({
+                              kind: 'EDIT_SET_METRIC',
+                              blockIdx: bi,
+                              setIdx: si,
+                              field: 'timeS',
+                              value: v ? parseMmss(v) : null,
+                            })
+                          }
+                          aria-label="Time (mm:ss)"
+                        />
+                      )
+                    ) : s.done ? (
+                      <span className="n">{s[metric.field] ?? 0}</span>
                     ) : (
-                      <MmssInput
+                      <NumericField
                         className="set-edit"
-                        value={s.timeS != null ? formatMmss(s.timeS) : ''}
-                        maxS={4 * 60 * 60}
-                        placeholder="0:00"
+                        value={s[metric.field] ?? null}
+                        min={0}
+                        allowEmpty={s.amrapTarget === true}
+                        {...(s.amrapTarget ? { placeholder: 'max' } : {})}
                         onCommit={(v) =>
                           dispatch({
                             kind: 'EDIT_SET_METRIC',
                             blockIdx: bi,
                             setIdx: si,
-                            field: 'timeS',
-                            value: v ? parseMmss(v) : null,
+                            field: metric.field,
+                            // MAX sets stay blank until the athlete
+                            // enters the achieved count; fixed sets
+                            // never go blank (0 is the floor).
+                            value: s.amrapTarget ? v : (v ?? 0),
                           })
                         }
-                        aria-label="Time (mm:ss)"
+                        aria-label={metric.label}
                       />
-                    )
-                  ) : s.done ? (
-                    <span className="n">{s[metric.field] ?? 0}</span>
-                  ) : (
-                    <NumericField
-                      className="set-edit"
-                      value={s[metric.field] ?? null}
-                      min={0}
-                      allowEmpty={s.amrapTarget === true}
-                      {...(s.amrapTarget ? { placeholder: 'max' } : {})}
-                      onCommit={(v) =>
-                        dispatch({
-                          kind: 'EDIT_SET_METRIC',
-                          blockIdx: bi,
-                          setIdx: si,
-                          field: metric.field,
-                          // MAX sets stay blank until the athlete
-                          // enters the achieved count; fixed sets
-                          // never go blank (0 is the floor).
-                          value: s.amrapTarget ? v : (v ?? 0),
-                        })
-                      }
-                      aria-label={metric.label}
-                    />
-                  )}
-                  <span className="x">{isRep ? '×' : ''}</span>
-                  {/* The reducer's internal state.loadKg is ALWAYS kg
+                    )}
+                    <span className="x">{isRep ? '×' : ''}</span>
+                    {/* The reducer's internal state.loadKg is ALWAYS kg
                       (recommendLoad / strengthTonnage / the save +
                       save-as-template paths downstream all read it as
                       kg) — we only convert at this render/input edge.
@@ -1006,171 +1133,173 @@ export function StrengthSessionPage() {
                       a phantom 0. A deliberate 0 still round-trips as a
                       true zero. Non-rep metrics leave the cell empty so
                       the grid tracks stay aligned. */}
-                  {metric.field === 'distanceM' ? (
-                    // Running work: the load slot carries the total time
-                    // (mm:ss) instead — distance + time coexist on a
-                    // cardio set (reducer field timeS).
-                    s.done ? (
-                      <span className="n">{s.timeS != null ? formatMmss(s.timeS) : '—'}</span>
-                    ) : timerHere ? (
-                      <span className="n">{formatMmss(liveTimeS ?? 0)}</span>
+                    {metric.field === 'distanceM' ? (
+                      // Running work: the load slot carries the total time
+                      // (mm:ss) instead — distance + time coexist on a
+                      // cardio set (reducer field timeS).
+                      s.done ? (
+                        <span className="n">{s.timeS != null ? formatMmss(s.timeS) : '—'}</span>
+                      ) : timerHere ? (
+                        <span className="n">{formatMmss(liveTimeS ?? 0)}</span>
+                      ) : (
+                        <MmssInput
+                          className="set-edit"
+                          value={s.timeS != null ? formatMmss(s.timeS) : ''}
+                          maxS={4 * 60 * 60}
+                          placeholder="time"
+                          onCommit={(v) =>
+                            dispatch({
+                              kind: 'EDIT_SET_METRIC',
+                              blockIdx: bi,
+                              setIdx: si,
+                              field: 'timeS',
+                              value: v ? parseMmss(v) : null,
+                            })
+                          }
+                          aria-label="Total time (mm:ss)"
+                        />
+                      )
+                    ) : metric.field === 'timeS' ? (
+                      // Time-unit sets carry the stopwatch toggle in the
+                      // load slot (no load applies to timed cardio work).
+                      (stopwatchBtn ?? <span />)
+                    ) : !isRep ? (
+                      <span />
+                    ) : s.done ? (
+                      s.loadKg == null || s.loadKg === 0 ? (
+                        <span className="n">BW</span>
+                      ) : (
+                        <span className="n">{kgToDisplay(s.loadKg, unit)}</span>
+                      )
                     ) : (
-                      <MmssInput
+                      <NumericField
                         className="set-edit"
-                        value={s.timeS != null ? formatMmss(s.timeS) : ''}
-                        maxS={4 * 60 * 60}
-                        placeholder="time"
+                        value={s.loadKg == null ? null : kgToDisplay(s.loadKg, unit)}
+                        min={0}
+                        decimals={1}
+                        allowEmpty
+                        placeholder="BW"
                         onCommit={(v) =>
                           dispatch({
                             kind: 'EDIT_SET_METRIC',
                             blockIdx: bi,
                             setIdx: si,
-                            field: 'timeS',
-                            value: v ? parseMmss(v) : null,
+                            field: 'loadKg',
+                            value: v == null ? null : displayToKg(v, unit),
                           })
                         }
-                        aria-label="Total time (mm:ss)"
+                        aria-label={`Load ${unit}`}
                       />
-                    )
-                  ) : metric.field === 'timeS' ? (
-                    // Time-unit sets carry the stopwatch toggle in the
-                    // load slot (no load applies to timed cardio work).
-                    (stopwatchBtn ?? <span />)
-                  ) : !isRep ? (
-                    <span />
-                  ) : s.done ? (
-                    s.loadKg == null || s.loadKg === 0 ? (
-                      <span className="n">BW</span>
-                    ) : (
-                      <span className="n">{kgToDisplay(s.loadKg, unit)}</span>
-                    )
-                  ) : (
+                    )}
+                    <div className="meta2">
+                      <span className="mu">
+                        {isRep ? unit : metric.field === 'distanceM' ? 'm × time' : metric.label}
+                      </span>
+                      {target && <span className="mt">{target}</span>}
+                      {isWarmup && <span className="mt warmup-badge">warmup</span>}
+                      {metric.field === 'distanceM' &&
+                        (s.done ? (
+                          s.inclinePct != null && (
+                            <span className="mt">{`${s.inclinePct}% incl`}</span>
+                          )
+                        ) : (
+                          <NumericField
+                            className="set-edit incl"
+                            value={s.inclinePct ?? null}
+                            min={0}
+                            max={100}
+                            decimals={1}
+                            allowEmpty
+                            placeholder="incl%"
+                            onCommit={(v) =>
+                              dispatch({
+                                kind: 'EDIT_SET_METRIC',
+                                blockIdx: bi,
+                                setIdx: si,
+                                field: 'inclinePct',
+                                value: v,
+                              })
+                            }
+                            aria-label="Incline percent"
+                          />
+                        ))}
+                      {metric.field === 'distanceM' && stopwatchBtn}
+                      {/* Timed cardio can log calories alongside — the
+                        explicit unit hint keeps the row rendering as
+                        time even once calories carry a value. */}
+                      {metric.field === 'timeS' &&
+                        (s.done ? (
+                          s.calories != null && <span className="mt">{s.calories} cal</span>
+                        ) : (
+                          <NumericField
+                            className="set-edit incl"
+                            value={s.calories ?? null}
+                            min={0}
+                            allowEmpty
+                            placeholder="cal"
+                            onCommit={(v) =>
+                              dispatch({
+                                kind: 'EDIT_SET_METRIC',
+                                blockIdx: bi,
+                                setIdx: si,
+                                field: 'calories',
+                                value: v,
+                              })
+                            }
+                            aria-label="Calories"
+                          />
+                        ))}
+                    </div>
+                    {/* Achieved RPE is editable on EVERY set (before or
+                      after the check) — the reducer has always accepted
+                      rpe edits on undone sets. */}
                     <NumericField
-                      className="set-edit"
-                      value={s.loadKg == null ? null : kgToDisplay(s.loadKg, unit)}
-                      min={0}
-                      decimals={1}
+                      className="set-edit rpe"
+                      value={s.rpe ?? null}
+                      min={1}
+                      max={10}
                       allowEmpty
-                      placeholder="BW"
+                      placeholder="RPE"
                       onCommit={(v) =>
                         dispatch({
                           kind: 'EDIT_SET_METRIC',
                           blockIdx: bi,
                           setIdx: si,
-                          field: 'loadKg',
-                          value: v == null ? null : displayToKg(v, unit),
+                          field: 'rpe',
+                          value: v,
                         })
                       }
-                      aria-label={`Load ${unit}`}
+                      aria-label="Achieved RPE"
                     />
-                  )}
-                  <div className="meta2">
-                    <span className="mu">
-                      {isRep ? unit : metric.field === 'distanceM' ? 'm × time' : metric.label}
-                    </span>
-                    {target && <span className="mt">{target}</span>}
-                    {isWarmup && <span className="mt warmup-badge">warmup</span>}
-                    {metric.field === 'distanceM' &&
-                      (s.done ? (
-                        s.inclinePct != null && (
-                          <span className="mt">{`${s.inclinePct}% incl`}</span>
+                    <button
+                      type="button"
+                      className="set-check"
+                      aria-label={s.done ? 'Undo set' : 'Complete set'}
+                      disabled={
+                        !s.done && s.amrapTarget === true && (s.reps == null || s.reps <= 0)
+                      }
+                      onClick={() => {
+                        // Audio unlock happens on the root's pointerdown
+                        // capture — every tap in the takeover counts.
+                        dispatch(
+                          s.done
+                            ? { kind: 'UNDO_SET', blockIdx: bi, setIdx: si }
+                            : {
+                                // No explicit restS: the reducer computes
+                                // superset-aware rest (0 between bracket
+                                // members, restS between passes, restAfterS
+                                // after the bracket / block).
+                                kind: 'COMPLETE_SET',
+                                blockIdx: bi,
+                                setIdx: si,
+                                nowMs: Date.now(),
+                              },
                         )
-                      ) : (
-                        <NumericField
-                          className="set-edit incl"
-                          value={s.inclinePct ?? null}
-                          min={0}
-                          max={100}
-                          decimals={1}
-                          allowEmpty
-                          placeholder="incl%"
-                          onCommit={(v) =>
-                            dispatch({
-                              kind: 'EDIT_SET_METRIC',
-                              blockIdx: bi,
-                              setIdx: si,
-                              field: 'inclinePct',
-                              value: v,
-                            })
-                          }
-                          aria-label="Incline percent"
-                        />
-                      ))}
-                    {metric.field === 'distanceM' && stopwatchBtn}
-                    {/* Timed cardio can log calories alongside — the
-                        explicit unit hint keeps the row rendering as
-                        time even once calories carry a value. */}
-                    {metric.field === 'timeS' &&
-                      (s.done ? (
-                        s.calories != null && <span className="mt">{s.calories} cal</span>
-                      ) : (
-                        <NumericField
-                          className="set-edit incl"
-                          value={s.calories ?? null}
-                          min={0}
-                          allowEmpty
-                          placeholder="cal"
-                          onCommit={(v) =>
-                            dispatch({
-                              kind: 'EDIT_SET_METRIC',
-                              blockIdx: bi,
-                              setIdx: si,
-                              field: 'calories',
-                              value: v,
-                            })
-                          }
-                          aria-label="Calories"
-                        />
-                      ))}
-                  </div>
-                  {/* Achieved RPE is editable on EVERY set (before or
-                      after the check) — the reducer has always accepted
-                      rpe edits on undone sets. */}
-                  <NumericField
-                    className="set-edit rpe"
-                    value={s.rpe ?? null}
-                    min={1}
-                    max={10}
-                    allowEmpty
-                    placeholder="RPE"
-                    onCommit={(v) =>
-                      dispatch({
-                        kind: 'EDIT_SET_METRIC',
-                        blockIdx: bi,
-                        setIdx: si,
-                        field: 'rpe',
-                        value: v,
-                      })
-                    }
-                    aria-label="Achieved RPE"
-                  />
-                  <button
-                    type="button"
-                    className="set-check"
-                    aria-label={s.done ? 'Undo set' : 'Complete set'}
-                    disabled={!s.done && s.amrapTarget === true && (s.reps == null || s.reps <= 0)}
-                    onClick={() => {
-                      // Audio unlock happens on the root's pointerdown
-                      // capture — every tap in the takeover counts.
-                      dispatch(
-                        s.done
-                          ? { kind: 'UNDO_SET', blockIdx: bi, setIdx: si }
-                          : {
-                              // No explicit restS: the reducer computes
-                              // superset-aware rest (0 between bracket
-                              // members, restS between passes, restAfterS
-                              // after the bracket / block).
-                              kind: 'COMPLETE_SET',
-                              blockIdx: bi,
-                              setIdx: si,
-                              nowMs: Date.now(),
-                            },
-                      )
-                    }}
-                  >
-                    <Icon name="check" size={20} />
-                  </button>
-                </SwipeActions>
+                      }}
+                    >
+                      <Icon name="check" size={20} />
+                    </button>
+                  </SwipeActions>
                 )
               })}
               {!isDone && (
@@ -1186,11 +1315,7 @@ export function StrengthSessionPage() {
           ))}
 
           {!isDone && (
-            <button
-              type="button"
-              className="live-addset"
-              onClick={() => setAddSheetOpen(true)}
-            >
+            <button type="button" className="live-addset" onClick={() => setAddSheetOpen(true)}>
               + Add exercise
             </button>
           )}
@@ -1276,7 +1401,22 @@ export function StrengthSessionPage() {
         <AddBlockSheet
           blocks={state.blocks}
           onClose={() => setAddSheetOpen(false)}
-          onAdd={(payload) => dispatch({ kind: 'ADD_BLOCKS', ...payload })}
+          onAdd={(payload) =>
+            dispatch({
+              kind: 'ADD_BLOCKS',
+              ...payload,
+              // Prefill added blocks from the already-fetched history
+              // cache right here — the ref-guarded effect above only
+              // fires once per exerciseId, so a block duplicating an
+              // exercise already in the session would otherwise start
+              // blank. Unfetched ids (and the fetch-failure sentinel)
+              // pass through and take the fetch → effect path instead.
+              blocks: payload.blocks.map((b) => {
+                const rows = historyByExercise[b.exerciseId]
+                return prefillBlockFromHistory(b, rows === 'error' ? undefined : rows)
+              }),
+            })
+          }
         />
       )}
 
@@ -1354,7 +1494,12 @@ export function StrengthSessionPage() {
           exerciseId={historyExercise.id}
           exerciseName={historyExercise.name}
           unit={unit}
-          initialSessions={historyByExercise[historyExercise.id]}
+          // On the fetch-failure sentinel, pass nothing — the sheet
+          // fetches for itself, giving the user a natural retry.
+          initialSessions={(() => {
+            const rows = historyByExercise[historyExercise.id]
+            return rows === 'error' ? undefined : rows
+          })()}
           onClose={() => setHistoryExercise(null)}
         />
       )}

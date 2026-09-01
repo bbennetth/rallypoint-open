@@ -3,6 +3,7 @@ import type {
   FieldDefOptions,
   FieldType,
   GroupRole,
+  ItemStatus,
   ListType,
   RecurrenceFreq,
   ScopeType,
@@ -122,7 +123,7 @@ export interface ListItemRecord {
   assignedTo: string | null
   completed: boolean
   completedAt: Date | null
-  status: TaskStatus | null
+  status: ItemStatus | null
   // Custom-status linkage (`lst_…`); null for non-task items / unresolved
   // rows. Kept in lockstep with `status` (which holds the category slug).
   // RPL v1.0.0 slice 1.
@@ -704,6 +705,16 @@ export interface ListItemSeriesRepo {
   // Soft-deletes the series row + future non-exception occurrences.
   // Past and exception occurrences are preserved.
   softDelete(id: string, actor: string): Promise<boolean>
+  // Mark superseded open occurrences skipped, so a series never shows
+  // more than one active instance. Anchor per series = newest live
+  // non-exception occurrence with occurrenceDate <= todayISO (any
+  // status); every strictly older live, non-exception, incomplete
+  // sibling becomes status='skipped', statusId=null, completed=true,
+  // completedAt=null. Future occurrences, exceptions, and soft-deleted
+  // rows are untouched. Idempotent; returns rows changed. Optional
+  // seriesId scopes the sweep to one series (used by update()'s
+  // re-projection batch); without it the sweep spans all tenants (cron).
+  skipStaleOccurrences(todayISO: string, seriesId?: string): Promise<number>
 }
 
 // --- mcp tokens (RPL v1.0.0 slice 11) ------------------------------

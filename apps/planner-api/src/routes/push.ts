@@ -76,6 +76,26 @@ export const pushRoutes = new Hono<HonoApp>()
     return c.body(null, 204)
   })
 
+  // Does this browser's subscription still exist server-side? The client
+  // heal (packages/web-kit push-sync) asks before touching a local
+  // subscription that looks healthy: iOS can keep a subscription the push
+  // service already killed, whose row the send loop then reaps on 404/410.
+  // Re-registering that endpoint would just be reaped again, so a missing
+  // row is the client's cue to cycle the subscription instead.
+  //
+  // POST (not GET) because the endpoint is a capability URL and must stay
+  // out of access logs / referrers. Another user's row reads as
+  // unregistered — same ownership scoping as the DELETE below, so this
+  // never discloses whether an endpoint belongs to someone else.
+  .post('/api/v1/ui/push/subscription/verify', requireSession(), async (c) => {
+    const userId = c.var.session!.userId
+    const parsed = UnsubscribeSchema.safeParse(await readJsonBody(c))
+    if (!parsed.success) throw errors.validation({ issues: parsed.error.issues })
+    const idHash = hashToken(parsed.data.endpoint)
+    const existing = await c.var.repos.pushSubscriptions.listByUser(userId)
+    return c.json({ registered: existing.some((s) => s.idHash === idHash) })
+  })
+
   // Remove a push subscription (the browser unsubscribed / notifications off).
   // Only deletes a row owned by the session user.
   .delete('/api/v1/ui/push/subscription', requireSession(), async (c) => {

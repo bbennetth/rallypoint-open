@@ -1,3 +1,4 @@
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
 import type { Repos } from '../types.js'
 import { type Db, createDb } from './db.js'
 import { D1EventRepo } from './events.js'
@@ -33,7 +34,11 @@ import { D1EventPlannerPrefRepo } from './event-planner-prefs.js'
 import { D1LineupIngestionRepo } from './lineup-ingestions.js'
 import { createRateLimitRepo } from './rate-limit.js'
 
-export function buildD1Repos(db: Db): Repos {
+// `rateLimitNamespace` is optional so the ~hundreds of existing
+// buildD1Repos(db) call sites (every *.d1.test.ts) keep exercising the D1
+// rate-limit path unchanged; only production ensureDeps passes the
+// RATE_LIMITS DO namespace (#881).
+export function buildD1Repos(db: Db, rateLimitNamespace?: RateLimitCounterNamespace): Repos {
   return {
     events: new D1EventRepo(db),
     members: new D1EventMemberRepo(db),
@@ -66,7 +71,7 @@ export function buildD1Repos(db: Db): Repos {
     personalTickets: new D1PersonalTicketRepo(db),
     eventPlannerPrefs: new D1EventPlannerPrefRepo(db),
     lineupIngestions: new D1LineupIngestionRepo(db),
-    rateLimit: createRateLimitRepo(db),
+    rateLimit: createRateLimitRepo(db, rateLimitNamespace),
   }
 }
 

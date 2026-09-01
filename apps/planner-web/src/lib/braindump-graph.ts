@@ -3,13 +3,17 @@
 // lays it out deterministically for an inline-SVG render — no graph library,
 // no randomness (seeded), no DOM. Unit-tested in braindump-graph.test.ts.
 
+import { dominantKind, dominantLabel, normalizeConceptLabel } from './braindump-concepts.js'
+import type { ConceptKind } from './braindump-concepts.js'
 import type { StreamEntry } from './braindump-helpers.js'
 
 export interface GraphNode {
-  /** `${kind}:${lowercased label}` — stable across renders. */
+  /** normalizeConceptLabel(label) — stable across renders, no kind prefix
+   *  (a label merges across kinds, since the per-dump LLM classifies kind
+   *  inconsistently entry to entry). */
   id: string
   label: string
-  kind: 'theme' | 'person' | 'place' | 'topic'
+  kind: ConceptKind
   /** Number of entries the concept appears in. */
   weight: number
   /** Entry keys the concept appears in (drives tap-to-filter). */
@@ -30,61 +34,112 @@ export interface ConceptGraph {
 
 export const MAX_GRAPH_NODES = 60
 
-// Build the co-occurrence graph across the analyzed entries. Concepts are
-// case-insensitive on their label (first-seen casing wins); nodes are ranked
-// by weight (then label) and capped at MAX_GRAPH_NODES; edges reference only
-// surviving nodes. Entries without an analysis contribute nothing.
+// Build the co-occurrence graph across the analyzed entries. Concepts merge
+// on normalizeConceptLabel(label) alone — NOT kind — since the per-dump LLM
+// classifies kind inconsistently entry to entry (the same label can show up
+// as a person in one entry and a topic in another). Each node accumulates
+// every spelling and every kind vote seen across entries; the displayed
+// label/kind are resolved once at the end via dominantLabel/dominantKind so
+// the result never depends on entry iteration order. Nodes are ranked by
+// weight (then label) and capped at MAX_GRAPH_NODES; edges reference only
+// surviving nodes. Entries without an analysis, or concepts that normalize
+// to '', contribute nothing.
 export function buildConceptGraph(entries: readonly StreamEntry[]): ConceptGraph {
-  const nodes = new Map<string, GraphNode>()
-  const edgeCounts = new Map<string, number>()
+  const acc = new Map<
+    string,
+    { labels: string[]; kinds: GraphNode['kind'][]; weight: number; entryKeys: string[] }
+  >()
+  // Keyed by the pair of node ids directly (nested map) rather than a
+  // joined string — normalizeConceptLabel keys can contain arbitrary
+  // characters, including '|' or a literal space, so no delimiter is safe
+  // to join+split on.
+  const edgeCounts = new Map<string, Map<string, number>>()
 
   for (const entry of entries) {
     if (!entry.analysis) continue
     // Distinct concepts within one entry (a theme repeated in the analysis
-    // counts once per entry).
-    const ids = new Map<string, { label: string; kind: GraphNode['kind'] }>()
+    // counts once per entry, one kind vote per entry).
+    const seen = new Map<string, { label: string; kind: GraphNode['kind'] }>()
     for (const t of entry.analysis.themes) {
       const label = t.trim()
       if (label === '') continue
-      ids.set(`theme:${label.toLowerCase()}`, { label, kind: 'theme' })
+      const key = normalizeConceptLabel(label)
+      if (key === '') continue
+      seen.set(key, { label, kind: 'theme' })
     }
     for (const e of entry.analysis.entities) {
       const label = e.name.trim()
       if (label === '') continue
-      ids.set(`${e.kind}:${label.toLowerCase()}`, { label, kind: e.kind })
+      const key = normalizeConceptLabel(label)
+      if (key === '') continue
+      seen.set(key, { label, kind: e.kind })
     }
-    const idList = [...ids.keys()].sort()
-    for (const id of idList) {
-      const meta = ids.get(id)!
-      const existing = nodes.get(id)
+    const keyList = [...seen.keys()].sort()
+    for (const key of keyList) {
+      const meta = seen.get(key)!
+      const existing = acc.get(key)
       if (existing) {
+        existing.labels.push(meta.label)
+        existing.kinds.push(meta.kind)
         existing.weight += 1
         existing.entryKeys.push(entry.key)
       } else {
-        nodes.set(id, { id, label: meta.label, kind: meta.kind, weight: 1, entryKeys: [entry.key] })
+        acc.set(key, {
+          labels: [meta.label],
+          kinds: [meta.kind],
+          weight: 1,
+          entryKeys: [entry.key],
+        })
       }
     }
-    for (let i = 0; i < idList.length; i++) {
-      for (let j = i + 1; j < idList.length; j++) {
-        const key = `${idList[i]}|${idList[j]}`
-        edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1)
+    for (let i = 0; i < keyList.length; i++) {
+      for (let j = i + 1; j < keyList.length; j++) {
+        const a = keyList[i]!
+        const b = keyList[j]!
+        let inner = edgeCounts.get(a)
+        if (!inner) {
+          inner = new Map()
+          edgeCounts.set(a, inner)
+        }
+        inner.set(b, (inner.get(b) ?? 0) + 1)
       }
     }
   }
 
+  const nodes = new Map<string, GraphNode>()
+  for (const [id, v] of acc) {
+    nodes.set(id, {
+      id,
+      label: dominantLabel(v.labels),
+      kind: dominantKind(v.kinds),
+      weight: v.weight,
+      entryKeys: v.entryKeys,
+    })
+  }
+
   const ranked = [...nodes.values()].sort(
-    (a, b) => b.weight - a.weight || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0),
+    (a, b) =>
+      b.weight - a.weight ||
+      (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   )
   const kept = ranked.slice(0, MAX_GRAPH_NODES)
   const keptIds = new Set(kept.map((n) => n.id))
 
   const edges: GraphEdge[] = []
-  for (const [key, weight] of edgeCounts) {
-    const [a, b] = key.split('|') as [string, string]
-    if (!keptIds.has(a) || !keptIds.has(b)) continue
-    edges.push({ a, b, weight })
+  for (const [a, inner] of edgeCounts) {
+    if (!keptIds.has(a)) continue
+    for (const [b, weight] of inner) {
+      if (!keptIds.has(b)) continue
+      edges.push({ a, b, weight })
+    }
   }
-  edges.sort((x, y) => y.weight - x.weight || (x.a + x.b < y.a + y.b ? -1 : 1))
+  edges.sort(
+    (x, y) =>
+      y.weight - x.weight ||
+      (x.a < y.a ? -1 : x.a > y.a ? 1 : 0) ||
+      (x.b < y.b ? -1 : x.b > y.b ? 1 : 0),
+  )
 
   return { nodes: kept, edges }
 }

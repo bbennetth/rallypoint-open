@@ -31,6 +31,8 @@ export * from './training-plans.js'
 // Ink redesign S10: live strength session reducer + weight recommender.
 export * from './strength-session.js'
 export * from './weight-rec.js'
+// Prefill last-logged weight/reps into a live session from history.
+export * from './strength-prefill.js'
 // Feature batch 2026-07: mm:ss rest-time parse/format helpers.
 export * from './duration.js'
 // Food logger (issue #700): OFF normalizer, macro scaling, diary validators.

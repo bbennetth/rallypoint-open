@@ -130,6 +130,22 @@ export function foodEditAllowed(s: Pick<AssistSuggestion, 'items'>): boolean {
   return (s.items?.length ?? 0) > 0
 }
 
+// What to ask the user to check when a low-confidence suggestion opens the
+// edit card. `dateUncertain` is the server's own reason for the downgrade
+// (see coerceSuggestion) — deriving it here from category + startAt can't
+// work, because a backwards-resolved date arrives WITH a startAt and a model
+// that was merely unsure about the category arrives with a perfectly good one.
+export function lowConfidenceHint(
+  s: Pick<AssistSuggestion, 'dateUncertain' | 'startAt'>,
+): string {
+  if (s.dateUncertain) {
+    return s.startAt
+      ? 'Not sure this landed on the right date — check when it happens.'
+      : "Couldn't pin down a date for that one — set when it happens."
+  }
+  return 'Not fully sure on this one — check the category before saving.'
+}
+
 // The subset of a suggestion the edit card can change. Comparing it to the
 // original picks the feedback verdict when the user saves after "Change".
 export interface EditedFields {

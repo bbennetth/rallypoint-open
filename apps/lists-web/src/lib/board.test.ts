@@ -57,6 +57,11 @@ describe('resolveItemStatus', () => {
     expect(resolveItemStatus(item({ id: 'a' }), STATUSES)?.id).toBe('lst_todo')
   })
 
+  it('groups a system-skipped occurrence with done', () => {
+    const skipped = item({ id: 'a', status: 'skipped', completed: true })
+    expect(resolveItemStatus(skipped, STATUSES)?.id).toBe('lst_done')
+  })
+
   it('falls back to category when status_id points at a deleted status', () => {
     const it = item({ id: 'a', status_id: 'lst_gone', status: 'in_progress' })
     expect(resolveItemStatus(it, STATUSES)?.id).toBe('lst_doing')

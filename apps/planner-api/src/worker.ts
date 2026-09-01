@@ -1,11 +1,18 @@
 /// <reference types="@cloudflare/workers-types" />
-import type { D1Database, ExecutionContext, Fetcher, Service } from '@cloudflare/workers-types'
+import type {
+  D1Database,
+  DurableObjectNamespace,
+  ExecutionContext,
+  Fetcher,
+  Service,
+} from '@cloudflare/workers-types'
 import type { IdRPC } from '@rallypoint/id-api'
 import type { ListsRPC } from '@rallypoint/lists-api'
 import type { EventsRPC } from '@rallypoint/events-api'
 import type { FitnessRPC } from '@rallypoint/fitness-api'
 import type { AiTracesRpc } from '@rallypoint/ai'
 import { createEventCapture, type CaptureEvent } from '@rallypoint/logger'
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
 import type { AiBinding } from './services/assist.js'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
@@ -23,19 +30,24 @@ import type { Services } from './services/types.js'
 //              non-/api paths; the Worker only handles /api/*
 //              (wrangler.toml `assets.run_worker_first`), so we never call
 //              ASSETS.fetch.
+//   - RATE_LIMITS — the RateLimitCounter Durable Object namespace (#881):
+//                    one DO per token bucket, replacing the per-request D1
+//                    write in the rate limiter.
 //   - string vars/secrets (PLANNER_SESSION_KEY_V1, PLANNER_UI_ORIGIN, …)
 //     that feed parseEnv.
 //
 // planner is a BFF: it proxies lists/events/fitness/RPID via typed RPC
-// bindings. It has NO
-// realtime/Durable Object and NO object store. As the owner of its own push
-// notifications (each app owns its notifications), it DOES carry two infra
-// tables (push_subscriptions, scheduled_notifications) and a `scheduled` cron
+// bindings. It has NO realtime Durable Object and NO object store — the
+// RATE_LIMITS binding above is the one Durable Object it does carry (#881),
+// unrelated to realtime. As the owner of its own push notifications (each
+// app owns its notifications), it also carries two infra tables
+// (push_subscriptions, scheduled_notifications) and a `scheduled` cron
 // handler that drains the notification queue — the documented exception to
 // the otherwise fetch-only / no-domain-table BFF posture.
 
 interface WorkerEnv {
   DB: D1Database
+  RATE_LIMITS: DurableObjectNamespace
   ASSETS?: Fetcher
   // Typed RPC bindings to the same-account producers (PR 2 of
   // feat/rpc-bindings). The fetch-style fallback path is gone — services
@@ -85,12 +97,14 @@ function ensureDeps(env: WorkerEnv): Deps {
     host: parsed.POSTHOG_HOST,
     service: 'rallypoint-planner',
   })
+  // A real DurableObjectNamespace satisfies the structural
+  // RateLimitCounterNamespace (idFromName + get).
   deps = {
     env: parsed,
     logger,
     flushLogs,
     captureEvent,
-    repos: buildD1Repos(createDb(env.DB)),
+    repos: buildD1Repos(createDb(env.DB), env.RATE_LIMITS as unknown as RateLimitCounterNamespace),
     services: buildServices(parsed, {
       ...(env.RPID ? { rpid: env.RPID } : {}),
       ...(env.LISTS ? { lists: env.LISTS } : {}),
@@ -150,3 +164,8 @@ export default {
     )
   },
 }
+
+// The per-bucket rate-limit counter DO (#881): wrangler binds the
+// RATE_LIMITS namespace to this export ([[durable_objects.bindings]] +
+// [[migrations]] new_sqlite_classes).
+export { RateLimitCounter } from '@rallypoint/rate-limit'

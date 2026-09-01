@@ -6,7 +6,8 @@
   "description": "Shared browser session + CSRF transport for the Rallypoint web apps (events-web, lists-web). React-version-agnostic (peer dep >=18).",
   "exports": {
     ".": "./src/index.ts",
-    "./sw": "./src/sw-listener.ts"
+    "./sw": "./src/sw-listener.ts",
+    "./sw-push": "./src/sw-push.ts"
   },
   "scripts": {
     "build": "tsc --build",

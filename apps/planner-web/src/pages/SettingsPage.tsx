@@ -11,7 +11,13 @@ import {
   PUSH_NOTIFICATIONS_KEY,
 } from '../lib/api.js'
 import { useCachedQuery } from '../lib/offline/use-cached-query.js'
-import { enablePush, disablePush, pushSupported, testPushStatusMessage } from '../lib/push.js'
+import {
+  enablePush,
+  disablePush,
+  pushHealthStatus,
+  pushSupported,
+  testPushStatusMessage,
+} from '../lib/push.js'
 import { choresInFeedsEnabled } from '../lib/chores-helpers.js'
 import { weatherUnitFromSettings, type WeatherUnit } from '../lib/weather-helpers.js'
 import { holidaysEnabled, hiddenHolidays as readHiddenHolidays } from '../lib/holidays-helpers.js'
@@ -82,10 +88,18 @@ export function SettingsPage() {
   const [hiddenIds, setHiddenIds] = useState<string[]>([])
   // My Day weather temperature unit. Absent → 'fahrenheit' (default).
   const [weatherUnit, setWeatherUnit] = useState<WeatherUnit>('fahrenheit')
-  // Push notifications (planner-owned). Absent → false (opt-in). pushStatus
-  // surfaces a hint when the browser blocks or can't do Web Push.
+  // Push notifications (planner-owned). Absent → false (opt-in).
+  //
+  // Two independent sources feed one status line, kept in separate state:
+  // `pushStatus` is what the user's last tap produced (toggle outcome,
+  // test-push result) and `pushHealth` is the passively-derived "this
+  // toggle reads ON but can't deliver" hint. They must not share a slot —
+  // the settings doc revalidates on any other setting's write, and a
+  // derived recompute would silently wipe a warning the user hasn't acted
+  // on yet. The action message wins while it exists.
   const [notificationsOn, setNotificationsOn] = useState<boolean>(false)
   const [pushStatus, setPushStatus] = useState<string | null>(null)
+  const [pushHealth, setPushHealth] = useState<string | null>(null)
   // Export/import (backup–restore) status line, shared by both buttons.
   const [dataStatus, setDataStatus] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
@@ -142,7 +156,12 @@ export function SettingsPage() {
     setHolidaysOn(holidaysEnabled(s))
     setHiddenIds(readHiddenHolidays(s))
     setWeatherUnit(weatherUnitFromSettings(s))
-    setNotificationsOn(s[PUSH_NOTIFICATIONS_KEY] === true)
+    const pushOn = s[PUSH_NOTIFICATIONS_KEY] === true
+    setNotificationsOn(pushOn)
+    // A toggle that reads ON while permission was revoked (or the
+    // background heal couldn't re-subscribe) would silently deliver
+    // nothing — say so instead.
+    setPushHealth(pushHealthStatus(pushOn))
   }, [settingsQ.data])
 
   function onToggleAutoCategorize() {
@@ -169,6 +188,8 @@ export function SettingsPage() {
       if (result === 'subscribed') {
         setNotificationsOn(true)
         setPushStatus(null)
+        // A fresh subscribe clears whatever the heal was complaining about.
+        setPushHealth(pushHealthStatus(true))
         void updateSettings('planner', { [PUSH_NOTIFICATIONS_KEY]: true })
       } else if (result === 'denied') {
         setPushStatus('Notifications are blocked — enable them in your browser settings, then try again.')
@@ -178,6 +199,8 @@ export function SettingsPage() {
     } else {
       setNotificationsOn(false)
       setPushStatus(null)
+      // Switched off: no "on but can't deliver" warning applies any more.
+      setPushHealth(null)
       setTestStatus(null)
       await disablePush()
       void updateSettings('planner', { [PUSH_NOTIFICATIONS_KEY]: false })
@@ -325,8 +348,8 @@ export function SettingsPage() {
             label="Enable push notifications"
           />
         </div>
-        {pushStatus && (
-          <div className="set-sub" style={{ paddingTop: 10 }}>{pushStatus}</div>
+        {(pushStatus ?? pushHealth) && (
+          <div className="set-sub" style={{ paddingTop: 10 }}>{pushStatus ?? pushHealth}</div>
         )}
         {notificationsOn && (
           <div

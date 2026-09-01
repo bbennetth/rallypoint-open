@@ -5,6 +5,7 @@
 // braindump-analytics.test.ts.
 
 import type { BraindumpSummaryEntry } from './api.js'
+import { dominantLabel, normalizeConceptLabel } from './braindump-concepts.js'
 import { UNCATEGORIZED, type StreamEntry } from './braindump-helpers.js'
 
 // Mirrors the BFF caps in apps/planner-api/src/lib/braindump.ts (client
@@ -43,25 +44,38 @@ export interface ThemeCount {
   count: number
 }
 
-// Top themes across analyzed entries (case-insensitive, first casing wins),
-// most frequent first, capped at `limit`.
+// Top themes across analyzed entries, grouped by normalizeConceptLabel so
+// this merges the same way the map does (buildConceptGraph in
+// braindump-graph.ts) — the per-dump LLM's casing/plural drift shouldn't
+// split one theme into two rows. Displayed label is the most common exact
+// spelling (dominantLabel), most frequent first, capped at `limit`.
 export function topThemes(entries: readonly StreamEntry[], limit = 8): ThemeCount[] {
-  const counts = new Map<string, { theme: string; count: number }>()
+  const counts = new Map<string, number>()
+  const labelsByKey = new Map<string, string[]>()
   for (const e of entries) {
     if (!e.analysis) continue
     const seen = new Set<string>()
     for (const t of e.analysis.themes) {
-      const key = t.trim().toLowerCase()
+      const label = t.trim()
+      const key = normalizeConceptLabel(label)
       if (key === '' || seen.has(key)) continue
       seen.add(key)
-      const hit = counts.get(key)
-      if (hit) hit.count += 1
-      else counts.set(key, { theme: t.trim(), count: 1 })
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+      const labels = labelsByKey.get(key)
+      if (labels) labels.push(label)
+      else labelsByKey.set(key, [label])
     }
   }
-  return [...counts.values()]
-    .sort((a, b) => b.count - a.count || (a.theme < b.theme ? -1 : 1))
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, theme: dominantLabel(labelsByKey.get(key)!), count }))
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        (a.theme < b.theme ? -1 : a.theme > b.theme ? 1 : 0) ||
+        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+    )
     .slice(0, limit)
+    .map(({ theme, count }) => ({ theme, count }))
 }
 
 // Entries per ISO week ('YYYY-Www'), most recent first. Undated rows are

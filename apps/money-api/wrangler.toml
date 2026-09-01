@@ -39,7 +39,22 @@ new_classes = ["RealtimeHub"]
 name = "HUB"
 class_name = "RealtimeHub"
 
-# money has no scheduled handler (no pruner/cron), so NO [triggers] block.
+# RateLimitCounter Durable Object (#881) — one SQLite-backed DO per token
+# bucket, replacing the per-request D1 write in the rate limiter. DO
+# migrations are append-only: this is a NEW tag, never edit v1.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitCounter"]
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
+# D1 keep-warm ping (worker.ts `scheduled`): every 5 minutes so the D1
+# storage object never idle-evicts. Restated per env below (crons do not
+# inherit into named envs).
+[triggers]
+crons = ["*/5 * * * *"]
 
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
 # dev-safe defaults for the secrets.
@@ -91,6 +106,10 @@ migrations_dir = "../../packages/money-db/migrations"
 name = "HUB"
 class_name = "RealtimeHub"
 
+[[env.qa.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 # Service binding: same-account cross-Worker calls to id-api dispatch
 # in-process via this binding (the CF edge drops same-account loopback
 # fetches to public hostnames). Path-matched against the bound Worker, so
@@ -105,6 +124,9 @@ service = "rallypoint-id-qa"
 [[env.qa.routes]]
 pattern = "money.rallypt.dev"
 custom_domain = true
+
+[env.qa.triggers]
+crons = ["*/5 * * * *"]
 
 # ---- Prod: money.rallypt.app ----------------------------------------
 [env.prod]
@@ -125,6 +147,10 @@ migrations_dir = "../../packages/money-db/migrations"
 name = "HUB"
 class_name = "RealtimeHub"
 
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 [[env.prod.services]]
 binding = "RPID"
 entrypoint = "IdRPC"
@@ -133,3 +159,6 @@ service = "rallypoint-id-prod"
 [[env.prod.routes]]
 pattern = "money.rallypt.app"
 custom_domain = true
+
+[env.prod.triggers]
+crons = ["*/5 * * * *"]

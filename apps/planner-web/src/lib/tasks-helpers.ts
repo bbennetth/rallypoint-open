@@ -41,10 +41,9 @@ function localDayStart(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
 }
 
-export function bucketTasks<T extends { completed: boolean; dueDate: string | null }>(
-  items: readonly T[],
-  now: Date,
-): Record<TaskBucket, T[]> {
+export function bucketTasks<
+  T extends { completed: boolean; dueDate: string | null; status?: string | null },
+>(items: readonly T[], now: Date): Record<TaskBucket, T[]> {
   const today = localDayStart(now)
   // Days left through Sunday of the current ISO week (getDay: Sun=0 → Mon=0).
   const daysToSunday = 6 - ((now.getDay() + 6) % 7)
@@ -63,7 +62,10 @@ export function bucketTasks<T extends { completed: boolean; dueDate: string | nu
   const dueDay = new Map<T, number>()
 
   for (const item of items) {
-    if (item.completed) continue
+    // Skipped occurrences carry completed=true, so the first check already
+    // drops them; the status guard is a defensive belt should a caller
+    // ever pass rows where the mirror drifted.
+    if (item.completed || item.status === 'skipped') continue
     const due = item.dueDate ? new Date(item.dueDate) : null
     if (!due || Number.isNaN(due.getTime())) {
       buckets.undated.push(item)

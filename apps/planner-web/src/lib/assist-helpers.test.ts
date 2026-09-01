@@ -6,6 +6,7 @@ import {
   foodEditAllowed,
   foodLogEntries,
   foodToastLabel,
+  lowConfidenceHint,
   moodChoiceId,
   rescaleFoodItem,
   taskCreateOpts,
@@ -25,6 +26,7 @@ function suggestion(overrides: Partial<AssistSuggestion>): AssistSuggestion {
     mood: null,
     items: null,
     confidence: 'high',
+    dateUncertain: false,
     traceId: 't1',
     responseId: 'r1',
     ...overrides,
@@ -115,6 +117,47 @@ describe('eventCreateFields', () => {
   it('omits absent optional fields', () => {
     const f = eventCreateFields(suggestion({ category: 'event', title: 'Trip', allDay: true }))
     expect(f).toEqual({ name: 'Trip', allDay: true })
+  })
+})
+
+describe('lowConfidenceHint', () => {
+  it('points a date-driven downgrade at its missing date, not its category', () => {
+    // The server downgrades these precisely because the date was lost, so
+    // "check the category" would send the user to the wrong field.
+    const h = lowConfidenceHint(
+      suggestion({ category: 'event', startAt: null, dateUncertain: true }),
+    )
+    expect(h).toMatch(/date/i)
+    expect(h).not.toMatch(/category/i)
+  })
+
+  it('still points at the date when a start survived but may be wrong', () => {
+    // A year-less date resolved backwards arrives WITH a startAt — having a
+    // value is not evidence the date is right.
+    const h = lowConfidenceHint(
+      suggestion({
+        category: 'event',
+        startAt: '2025-10-23T19:00:00.000Z',
+        dateUncertain: true,
+      }),
+    )
+    expect(h).toMatch(/date/i)
+    expect(h).not.toMatch(/category/i)
+  })
+
+  it('asks about the category when the date was not the problem', () => {
+    // An event the MODEL called low-confidence while resolving its date
+    // perfectly well — the date is the one thing not worth checking.
+    expect(
+      lowConfidenceHint(
+        suggestion({
+          category: 'event',
+          startAt: '2027-03-05T15:00:00.000Z',
+          dateUncertain: false,
+        }),
+      ),
+    ).toMatch(/category/i)
+    expect(lowConfidenceHint(suggestion({ category: 'note' }))).toMatch(/category/i)
   })
 })
 

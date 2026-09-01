@@ -2,6 +2,8 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { ulid } from 'ulid'
 import { TENANT_DEFAULT } from '@rallypoint/shared'
+import { isTransientD1Error } from '@rallypoint/api-kit'
+import { errorCauseChain } from '@rallypoint/logger'
 import {
   barcodeLookupSchema,
   computePortionBias,
@@ -278,13 +280,28 @@ export const foodRoutes = new Hono<HonoApp>()
       return c.json({ items: localDtos, external: false })
     }
 
-    // Global bucket — OFF's search endpoint is shared infrastructure.
-    const decision = await c.var.repos.rateLimit.takeToken({
-      tenantId: TENANT_DEFAULT,
-      bucketKey: 'off:search',
-      limit: SEARCH_OFF_RATE.limit,
-      windowSeconds: SEARCH_OFF_RATE.windowSeconds,
-    })
+    // Global bucket — OFF's search endpoint is shared infrastructure. Kept as
+    // a direct takeToken (not createRateLimitBucket) because this route
+    // deliberately degrades instead of 429ing; the shared helper's tail
+    // throws. It still must not 500 when the limiter's own store blips, so a
+    // transient D1 failure degrades exactly like an exhausted budget — we
+    // can't account for the spend, so don't spend it against a third party.
+    let decision
+    try {
+      decision = await c.var.repos.rateLimit.takeToken({
+        tenantId: TENANT_DEFAULT,
+        bucketKey: 'off:search',
+        limit: SEARCH_OFF_RATE.limit,
+        windowSeconds: SEARCH_OFF_RATE.windowSeconds,
+      })
+    } catch (err) {
+      if (!isTransientD1Error(err)) throw err
+      c.var.logger.warn(
+        { err, causes: errorCauseChain(err) },
+        'off:search rate-limit store unavailable (transient); serving local results',
+      )
+      return c.json({ items: localDtos, external: false })
+    }
     if (!decision.allowed) {
       // Budget spent — serve what we have rather than 429ing a search box.
       return c.json({ items: localDtos, external: false })

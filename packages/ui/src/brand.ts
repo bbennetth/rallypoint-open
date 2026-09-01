@@ -7,6 +7,8 @@
 export const BRAND = {
   name: 'rallypoint',
   shortName: 'rallypt',
+  // Long-form product name for prose/metadata. NOT the chrome lockup —
+  // every app's header renders the two-tone `wordmark` split below.
   displayName: 'rallypoint',
   // Wordmark splits per the logo spec: "rally" in ink, "pt" in accent.
   wordmark: { primary: 'rally', accent: 'pt' },
@@ -26,6 +28,12 @@ export const BRAND = {
     gray300: '#E5E5E7',
     gray700: '#5A5A60',
     red: '#C8302B',
+    // Default (dark chassis / blue accent) theme values — colors.css:29
+    // (--bg) and colors.css:78 (--acid). For off-DOM rendering (canvas,
+    // data-URL rasterization) where CSS custom properties don't resolve;
+    // see brand-svg.ts. Kept in parity by tokens.test.ts.
+    acid: '#0EA5E9',
+    bg: '#0B1B2B',
   },
 } as const
 

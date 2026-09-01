@@ -52,13 +52,13 @@ const idRefField = (label: string) =>
 // Rally lifecycle status. Matches rallies.status (default 'proposed').
 export const RALLY_STATUSES = ['proposed', 'active', 'cancelled'] as const
 export const rallyStatusField = z.enum(RALLY_STATUSES, {
-  errorMap: () => ({ message: 'Status must be proposed, active, or cancelled.' }),
+  error: 'Status must be proposed, active, or cancelled.',
 })
 
 // RSVP status. Matches rally_attendees.status.
 export const RALLY_RSVP_STATUSES = ['going', 'maybe', 'out'] as const
 export const rallyRsvpStatusField = z.enum(RALLY_RSVP_STATUSES, {
-  errorMap: () => ({ message: 'RSVP must be going, maybe, or out.' }),
+  error: 'RSVP must be going, maybe, or out.',
 })
 
 // lat/lng for an off-map rally spot — both optional, but must travel
@@ -103,7 +103,7 @@ function refineCoords(
 // long-press creation). All three fields travel together — a partial
 // pin is meaningless, exactly like a lone lat or lng.
 export const rallyPinLayerField = z.enum(MAP_LAYERS, {
-  errorMap: () => ({ message: 'Pin layer must be site, camp, or full.' }),
+  error: 'Pin layer must be site, camp, or full.',
 })
 const rallyPinPctField = (label: string) =>
   z

@@ -33,6 +33,7 @@ import {
   foodEditAllowed,
   foodLogEntries,
   foodToastLabel,
+  lowConfidenceHint,
   moodChoiceId,
   rescaleFoodItem,
   taskCreateOpts,
@@ -278,6 +279,9 @@ export function AssistDrawer({
           mood: null,
           items: null,
           confidence: 'low',
+          // Unparseable output, so nothing was resolved — but the category is
+          // what the user has to pick here, not a date we never attempted.
+          dateUncertain: false,
           traceId: '',
           responseId: '',
         }
@@ -295,7 +299,7 @@ export function AssistDrawer({
     // Low confidence: don't commit blind — let the user confirm first.
     if (s.confidence === 'low') {
       seedEdit(s)
-      setHint('Not fully sure on this one — check the category before saving.')
+      setHint(lowConfidenceHint(s))
       setPhase('edit')
       return
     }

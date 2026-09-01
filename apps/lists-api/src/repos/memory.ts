@@ -401,6 +401,12 @@ export class MemoryListItemRepo implements ListItemRepo {
     if (fields.completed !== undefined) {
       r.completed = fields.completed
       r.completedAt = fields.completed ? new Date() : null
+      // Reopening a system-skipped occurrence resets 'skipped' → 'todo'
+      // (mirrors buildUpdateSet in d1/list-items.ts); an explicit status
+      // in the same patch still wins below.
+      if (fields.completed === false && fields.status === undefined && r.status === 'skipped') {
+        r.status = 'todo'
+      }
     }
     // status drives completed/completedAt for task items.
     if (fields.status !== undefined) {
@@ -1026,7 +1032,49 @@ export class MemoryListItemSeriesRepo implements ListItemSeriesRepo {
       }
     }
 
+    // Mirror the D1 update() batch: the scoped skip sweep runs after
+    // re-projection so a freshly-inserted today occurrence is the anchor.
+    await this.skipStaleOccurrences(todayISO, id)
+
     return { ...r }
+  }
+
+  // Memory twin of D1's skipStaleStmt (see repo contract). Anchor per
+  // series = newest live non-exception occurrence with occurrenceDate <=
+  // todayISO; every strictly older live, non-exception, incomplete
+  // sibling becomes skipped (completed=true, completedAt=null).
+  async skipStaleOccurrences(todayISO: string, seriesId?: string): Promise<number> {
+    if (!this.items) return 0
+    const itemStore = (this.items as unknown as { byId: Map<string, ListItemRecord> })['byId']
+
+    const anchors = new Map<string, string>()
+    for (const item of this.seriesItems()) {
+      if (item.seriesId === null || item.occurrenceDate === null) continue
+      if (seriesId !== undefined && item.seriesId !== seriesId) continue
+      if (item.deletedAt !== null || item.isException) continue
+      if (item.occurrenceDate > todayISO) continue
+      const cur = anchors.get(item.seriesId)
+      if (cur === undefined || item.occurrenceDate > cur) {
+        anchors.set(item.seriesId, item.occurrenceDate)
+      }
+    }
+
+    let changed = 0
+    const now = new Date()
+    for (const item of this.seriesItems()) {
+      if (item.seriesId === null || item.occurrenceDate === null) continue
+      if (item.deletedAt !== null || item.isException || item.completed) continue
+      const anchor = anchors.get(item.seriesId)
+      if (anchor === undefined || item.occurrenceDate >= anchor) continue
+      item.status = 'skipped'
+      item.statusId = null
+      item.completed = true
+      item.completedAt = null
+      item.updatedAt = now
+      itemStore.set(item.id, item as unknown as ListItemRecord)
+      changed++
+    }
+    return changed
   }
 
   async softDelete(id: string, _actor: string): Promise<boolean> {

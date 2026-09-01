@@ -43,7 +43,7 @@ const TICKET_PLATFORM_IDS = TICKET_PLATFORMS.map((p) => p.id) as [
 
 /** Validates a ticket-platform id; nullable+optional (null clears it). */
 export const ticketPlatformField = z
-  .enum(TICKET_PLATFORM_IDS, { errorMap: () => ({ message: 'Unknown ticket platform.' }) })
+  .enum(TICKET_PLATFORM_IDS, { error: 'Unknown ticket platform.' })
   .nullable()
   .optional()
 

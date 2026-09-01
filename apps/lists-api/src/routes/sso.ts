@@ -21,7 +21,7 @@ export const ssoRoutes = new Hono<HonoApp>()
   .get('/api/v1/ui/csrf', csrfIssueHandler)
   .post(
     '/api/v1/ui/sso/exchange',
-    rateLimit({ route: 'sso-exchange', perIp: { limit: 10, windowSeconds: 10 * 60 } }),
+    rateLimit({ route: 'sso-exchange', onStoreError: 'deny', perIp: { limit: 10, windowSeconds: 10 * 60 } }),
     createSsoExchangeHandler({
       bearerPrefix: LISTS_SESSION_BEARER_PREFIX,
       stateCookieEnvKey: 'LISTS_SSO_STATE_COOKIE_NAME',

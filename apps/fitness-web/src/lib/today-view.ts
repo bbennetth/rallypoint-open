@@ -201,7 +201,7 @@ const TODAY_FALLBACK_BLURB: Record<DayType, string> = {
 
 const TODAY_FALLBACK_CTA: Record<DayType, { label: string; to: string } | null> = {
   strength: { label: 'Start strength session', to: '/composer?mode=strength' },
-  cardio: { label: 'Log a run', to: '/run/log' },
+  cardio: { label: 'Log cardio', to: '/run/log' },
   hiit: { label: 'Browse WODs', to: '/library/wods' },
   mobility: { label: 'Browse library', to: '/library' },
   rest: null,
@@ -223,10 +223,10 @@ export function resolveTodayFallback(dayKey: DayKey, dayTypes: DayTypesMap): Tod
 }
 
 // --- today's training, for the /log dashboard ---------------------------
-// One resolver feeds BOTH the START WORKOUT hero tile and the detail card
-// under it, so the two can never disagree — the pre-dashboard code picked
-// the hero WOD-only, which would have let the tile offer "Start Upper
-// Strength" while the card below still read "Nothing scheduled today".
+// One resolver feeds the START WORKOUT hero tile — the single entry point
+// into today's training (the old detail card under it was removed as
+// redundant): start the one open session, pick among several, or read
+// "Workout complete" once everything scheduled is logged.
 
 /** One of today's plan rows, flattened to what it takes to start it. */
 export interface StartableToday {
@@ -234,11 +234,16 @@ export interface StartableToday {
   name: string
   /** Uppercase type chip — 'STRENGTH' / 'ROUNDS FOR TIME' / 'RUN'. */
   meta: string
-  /** The route that starts this session. */
+  /** The route that starts this session. Run rows keep a /run/log deep
+   *  link for hosts without an inline sheet; the /log dashboard opens
+   *  its cardio sheet via `run` instead. */
   to: string
-  /** Set only for WOD-kind rows: the detail card renders the full
-   *  WodHeroCard for these and a compact row for everything else. */
-  wodTemplateId: string | null
+  /** The source template id (WOD or strength) — the key `doneTemplateIds`
+   *  matching uses. Null for run rows (they self-delete on save). */
+  templateId: string | null
+  /** Run rows: the plan ref a host needs to open the cardio log sheet
+   *  and clear the item after a save. Null for template-backed rows. */
+  run: { planId: string; planItemId: string; note: string | null } | null
 }
 
 /** A resolved plan row as the Today view sees it, structurally — keeps
@@ -267,7 +272,8 @@ export function startableFromRow(row: TodayRowInput): StartableToday | null {
       name: row.note ?? 'Run',
       meta: 'RUN',
       to: `/run/log?${params.toString()}`,
-      wodTemplateId: null,
+      templateId: null,
+      run: { planId: row.planId, planItemId: row.itemId, note: row.note },
     }
   }
   const tpl = row.template
@@ -278,7 +284,8 @@ export function startableFromRow(row: TodayRowInput): StartableToday | null {
       name: tpl.name,
       meta: 'STRENGTH',
       to: `/live/strength/new?templateId=${encodeURIComponent(tpl.id)}`,
-      wodTemplateId: null,
+      templateId: tpl.id,
+      run: null,
     }
   }
   return {
@@ -286,7 +293,8 @@ export function startableFromRow(row: TodayRowInput): StartableToday | null {
     name: tpl.name,
     meta: (tpl.wodType ?? 'wod').replace(/_/g, ' ').toUpperCase(),
     to: `/live/wod/${encodeURIComponent(tpl.id)}/run`,
-    wodTemplateId: tpl.id,
+    templateId: tpl.id,
+    run: null,
   }
 }
 
@@ -304,35 +312,88 @@ export interface TrainingCta {
 export const NOTHING_SCHEDULED_CTAS: readonly TrainingCta[] = [
   { label: 'Free strength', action: { kind: 'start-strength' } },
   { label: 'Browse WODs', action: { kind: 'nav', to: '/library/wods' } },
-  { label: 'Log a run', action: { kind: 'nav', to: '/run/log' } },
+  { label: 'Log cardio', action: { kind: 'nav', to: '/run/log' } },
 ]
 
 export type TodayTraining =
   | { kind: 'session'; session: StartableToday }
+  /** 2+ scheduled sessions still undone — the tile opens a picker. */
+  | { kind: 'choice'; sessions: readonly StartableToday[] }
+  /** Something was scheduled and it's all been logged. */
+  | { kind: 'complete' }
   | { kind: 'fallback'; fallback: TodayFallback }
   | { kind: 'empty'; ctas: readonly TrainingCta[] }
 
-/** Today's training in priority order: a real scheduled session beats the
+/** How many workouts logged on `today` (local date) came from each
+ *  template. The WOD engine stamps `payload.templateId` on every save;
+ *  the strength engine stamps `payload.sourceTemplateId` for any
+ *  template start (its `templateId` is custom-only — it powers "update
+ *  the template" — so benchmarks would read never-done through it).
+ *  Counts, not a set, so a template scheduled twice today needs two logs
+ *  before both rows read done. Run rows never appear here — a saved
+ *  scheduled run deletes its plan item, so it drops out of `todaysRows`
+ *  instead. */
+export function doneTemplateCountsOn(
+  workouts: readonly WorkoutDto[],
+  today: string,
+): Map<string, number> {
+  const done = new Map<string, number>()
+  for (const w of workouts) {
+    if (!w.performedAt) continue
+    if (dateKey(new Date(w.performedAt)) !== today) continue
+    const raw = w.payload?.sourceTemplateId ?? w.payload?.templateId
+    if (typeof raw === 'string' && raw) done.set(raw, (done.get(raw) ?? 0) + 1)
+  }
+  return done
+}
+
+/** Today's training in priority order: scheduled sessions beat the
  *  weekly-rhythm guess, which beats the empty state. `todaysRows` is
  *  today's rows in schedule order, already flattened by `startableFromRow`
- *  — nulls (deleted templates) are scanned past, so a stale row at the top
- *  of the day can't hide a startable one below it. */
+ *  — nulls (deleted templates) are dropped, so a stale row can't hide a
+ *  startable one, and an all-stale day falls through to fallback/empty.
+ *  `doneCounts` (from doneTemplateCountsOn) marks rows already logged —
+ *  consumed row-by-row in schedule order, so a template scheduled twice
+ *  with one log leaves exactly one row open. One undone row starts
+ *  directly, several undone offer a choice, and a day whose every real
+ *  row is done reads complete. */
 export function resolveTodayTraining(
   todaysRows: readonly (StartableToday | null)[],
   fallback: TodayFallback | null,
+  doneCounts: ReadonlyMap<string, number> = new Map(),
 ): TodayTraining {
-  const session = todaysRows.find((r): r is StartableToday => r !== null)
-  if (session) return { kind: 'session', session }
+  const rows = todaysRows.filter((r): r is StartableToday => r !== null)
+  if (rows.length > 0) {
+    const remaining = new Map(doneCounts)
+    const undone = rows.filter((r) => {
+      if (r.templateId == null) return true
+      const n = remaining.get(r.templateId) ?? 0
+      if (n <= 0) return true
+      remaining.set(r.templateId, n - 1)
+      return false
+    })
+    if (undone.length === 0) return { kind: 'complete' }
+    const first = undone[0]!
+    if (undone.length === 1) return { kind: 'session', session: first }
+    return { kind: 'choice', sessions: undone }
+  }
   if (fallback) return { kind: 'fallback', fallback }
   return { kind: 'empty', ctas: NOTHING_SCHEDULED_CTAS }
 }
 
 /** The START WORKOUT tile: a big line over a small qualifier. A rest day
  *  says so rather than urging a session — the tile still opens the picker
- *  if you want one anyway. */
+ *  if you want one anyway, and a completed day celebrates instead of
+ *  nagging (tapping it offers to start another). */
 export function trainingTileVm(today: TodayTraining): { value: string; sub: string } {
   if (today.kind === 'session') {
     return { value: today.session.name, sub: today.session.meta }
+  }
+  if (today.kind === 'choice') {
+    return { value: 'Start a workout', sub: `${today.sessions.length} SCHEDULED` }
+  }
+  if (today.kind === 'complete') {
+    return { value: 'Workout complete', sub: 'TAP TO START ANOTHER' }
   }
   if (today.kind === 'fallback') {
     if (today.fallback.type === 'rest') return { value: 'Rest day', sub: 'RECOVERY' }

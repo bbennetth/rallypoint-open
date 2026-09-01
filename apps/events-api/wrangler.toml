@@ -46,12 +46,24 @@ new_classes = ["RealtimeHub"]
 name = "HUB"
 class_name = "RealtimeHub"
 
+# RateLimitCounter Durable Object (#881) — one SQLite-backed DO per token
+# bucket, replacing the per-request D1 write in the rate limiter. DO
+# migrations are append-only: this is a NEW tag, never edit v1.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitCounter"]
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 # Cron Trigger — runs the events pruner + weather refresher once per hour.
 # The pruner grace period is 30 days so hourly is plenty; the weather
 # refresher staleness gate is 3 hours (EVENTS_WEATHER_FRESHNESS_MS default)
-# so an hourly tick stays well within it.
+# so an hourly tick stays well within it. The */5 tick is the D1
+# keep-warm ping only (worker.ts dispatches on event.cron).
 [triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "*/5 * * * *"]
 
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
 # dev-safe defaults for the secrets.
@@ -132,6 +144,10 @@ migrations_dir = "../../packages/events-db/migrations"
 name = "HUB"
 class_name = "RealtimeHub"
 
+[[env.qa.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 # Service bindings: same-account cross-Worker RPC calls to
 # IdRPC/ListsRPC/MoneyRPC via the typed `entrypoint` fields.
 # Top-level [[services]] blocks (above) make wrangler's local dev
@@ -160,7 +176,7 @@ entrypoint = "AiRPC"
 binding = "AI"
 
 [env.qa.triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "*/5 * * * *"]
 
 [[env.qa.routes]]
 pattern = "events.rallypt.dev"
@@ -184,6 +200,10 @@ migrations_dir = "../../packages/events-db/migrations"
 [[env.prod.durable_objects.bindings]]
 name = "HUB"
 class_name = "RealtimeHub"
+
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 [[env.prod.services]]
 binding = "RPID"
@@ -209,7 +229,7 @@ entrypoint = "AiRPC"
 binding = "AI"
 
 [env.prod.triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "*/5 * * * *"]
 
 [[env.prod.routes]]
 pattern = "events.rallypt.app"

@@ -460,7 +460,11 @@ export function ComposerPage() {
       const scheduled = await scheduleSavedTemplate(res.id, 'strength_template')
       if (scheduled === 'failed') return
       if (andStart) {
-        nav(`/live/strength/new?templateId=${encodeURIComponent(res.id)}`)
+        // fresh=1: the template body is what the athlete JUST typed,
+        // not a stale snapshot — the live page must not arm the
+        // history-prefill override for it (StrengthSessionPage). A
+        // query param so the marker survives a reload mid-hydration.
+        nav(`/live/strength/new?templateId=${encodeURIComponent(res.id)}&fresh=1`)
       } else {
         // Land wherever the workout now lives: the plan if it's on a
         // day, the library if it isn't.

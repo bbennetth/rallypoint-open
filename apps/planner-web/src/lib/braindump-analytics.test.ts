@@ -70,7 +70,7 @@ describe('categoryDistribution', () => {
 })
 
 describe('topThemes', () => {
-  it('dedupes case-insensitively across entries, first casing wins', () => {
+  it('dedupes case-insensitively across entries, dominant casing wins', () => {
     const entries = [
       entry({ key: '1', analysis: analysis({ themes: ['Focus'] }) }),
       entry({ key: '2', analysis: analysis({ themes: ['FOCUS', 'Rest'] }) }),

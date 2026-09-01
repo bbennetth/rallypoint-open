@@ -11,6 +11,7 @@ import type { IdRPC } from '@rallypoint/id-api'
 import type { EventsRPC } from '@rallypoint/events-api'
 import type { AiRPC } from '@rallypoint/ai-api'
 import type { AiTracesRpc } from '@rallypoint/ai'
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
 import { buildLoggerWithFlush, type Logger } from './logger.js'
@@ -28,6 +29,9 @@ import type { RestAlarmService, Services } from './services/types.js'
 //              (wrangler.toml `assets.run_worker_first`).
 //   - RPID   — typed RPC binding to id-api's IdRPC entrypoint (fitness's
 //              catch-up to feat/rpc-bindings).
+//   - RATE_LIMITS — the RateLimitCounter Durable Object namespace (#881):
+//              one DO per token bucket, replacing the per-request D1 write
+//              in the rate limiter.
 //   - string vars/secrets (FITNESS_SESSION_KEY_V1, FITNESS_UI_ORIGIN, …)
 //     that feed parseEnv.
 //
@@ -72,6 +76,9 @@ export interface WorkerEnv {
   // delivery. Absent (tests) → services.restAlarms is null and delivery
   // rides the per-minute cron sweep alone.
   REST_ALARMS?: DurableObjectNamespace
+  // The RateLimitCounter Durable Object namespace (#881) — one DO per
+  // token bucket, replacing the per-request D1 write in the rate limiter.
+  RATE_LIMITS: DurableObjectNamespace
   // Typed RPC binding to ai-api's AiRPC entrypoint — AI trace-corpus
   // ingest + feedback. Absent → scans run untraced.
   AI_TRACES?: Service<AiRPC>
@@ -102,11 +109,16 @@ export function ensureDeps(env: WorkerEnv): Deps {
   }
   const parsed = parseEnv(vars as NodeJS.ProcessEnv)
   const { logger, flushLogs } = buildLoggerWithFlush(parsed)
+  // A real DurableObjectNamespace satisfies the structural
+  // RateLimitCounterNamespace (idFromName + get).
   deps = {
     env: parsed,
     logger,
     flushLogs,
-    repos: buildD1Repos(createDb(env.DB)),
+    repos: buildD1Repos(
+      createDb(env.DB),
+      env.RATE_LIMITS as unknown as RateLimitCounterNamespace,
+    ),
     services: buildServices(parsed, {
       ...(env.RPID ? { rpid: env.RPID } : {}),
       ...(env.AI ? { ai: env.AI } : {}),
@@ -184,3 +196,8 @@ export { FitnessRPC } from './rpc.js'
 // The Durable Object class must be exported from the Worker entry so
 // wrangler can resolve the [[durable_objects.bindings]] class_name.
 export { RestTimerAlarm } from './rest-timer-alarm.js'
+
+// Same for the per-bucket rate-limit counter DO (#881): wrangler binds the
+// RATE_LIMITS namespace to this export ([[durable_objects.bindings]] +
+// [[migrations]] new_sqlite_classes).
+export { RateLimitCounter } from '@rallypoint/rate-limit'

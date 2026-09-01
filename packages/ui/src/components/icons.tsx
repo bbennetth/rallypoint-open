@@ -8,6 +8,7 @@
 // promoted here.
 
 import type { CSSProperties, JSX } from 'react'
+import { BRAND } from '../brand.js'
 
 // Brand compass; needle + bezel dot use the live accent (--acid).
 export function Compass({ size = 26 }: { size?: number }) {
@@ -320,7 +321,7 @@ export function Icon({
   )
 }
 
-// Brand lockup: compass + two-tone "rallypt" wordmark + optional caret. Used as
+// Brand lockup: compass + the two-tone `BRAND.wordmark` split + optional caret. Used as
 // the app-switcher trigger contents. (Distinct from the older minimalist
 // `BrandLockup` wordmark in this package — this is the Ink chrome lockup.)
 export function AppBrandLockup({
@@ -346,7 +347,8 @@ export function AppBrandLockup({
         <Compass size={cw} />
       </span>
       <span className="pl-wordmark" style={{ fontSize: fs }}>
-        rally<b>pt</b>
+        {BRAND.wordmark.primary}
+        <b>{BRAND.wordmark.accent}</b>
       </span>
       {caret && (
         <span style={caretStyle}>

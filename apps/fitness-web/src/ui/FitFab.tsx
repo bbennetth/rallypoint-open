@@ -27,14 +27,17 @@ const MENU: { key: FitStartAction; label: string; icon: IconName; to?: string }[
   { key: 'wod', label: 'Start a WOD', icon: 'stopwatch', to: '/library/wods' },
   // No `to`: seeds a blank live session, then navigates (see pick()).
   { key: 'strength', label: 'Strength session', icon: 'barbell' },
-  { key: 'run', label: 'Log a run', icon: 'run', to: '/run/log' },
+  { key: 'run', label: 'Log cardio', icon: 'run', to: '/run/log' },
   { key: 'meal', label: 'Snap a meal', icon: 'camera' },
   { key: 'board', label: 'Scan a whiteboard', icon: 'file' },
   { key: 'build', label: 'Build a workout', icon: 'pencil', to: '/composer' },
   { key: 'body', label: 'Log body metric', icon: 'heart', to: '/stats/body?log=1' },
 ]
 
-export function FitFab({ onMeal }: { onMeal?: (file: File) => void } = {}) {
+export function FitFab({
+  onMeal,
+  onBody,
+}: { onMeal?: (file: File) => void; onBody?: () => void } = {}) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const nav = useNavigate()
@@ -91,6 +94,13 @@ export function FitFab({ onMeal }: { onMeal?: (file: File) => void } = {}) {
     if (item.key === 'strength') {
       // Blank free session: starts immediately, exercises added live.
       nav(seedFreeStrengthSession(defaultRestS))
+      return
+    }
+    // A host that logs body metrics in place opens its sheet directly
+    // instead of round-tripping through /stats/body — supplied behaviour,
+    // same contract as onMeal above.
+    if (item.key === 'body' && onBody) {
+      onBody()
       return
     }
     if (item.to) nav(item.to)

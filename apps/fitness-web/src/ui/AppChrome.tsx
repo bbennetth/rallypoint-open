@@ -7,8 +7,16 @@ import {
   UserMenu,
   type AppChromeNavItem,
 } from '@rallypoint/ui'
-import { ApiError, bootSucceeded, captureEvent, captureException, useSwUpdatePrompt } from '@rallypoint/web-kit'
+import {
+  ApiError,
+  bootSucceeded,
+  captureEvent,
+  captureException,
+  usePushSync,
+  useSwUpdatePrompt,
+} from '@rallypoint/web-kit'
 import { SESSION_REVOKED_EVENT, signout } from '../lib/api.js'
+import { pushResync } from '../lib/rest-push.js'
 import { setOfflineUser } from '../lib/offline/cache.js'
 import { purgeOfflineUser, useOfflineSync } from '../lib/offline/hooks.js'
 import { useSession, RPID_UI_URL, beginSso } from '../lib/session.js'
@@ -88,6 +96,11 @@ export function AppChrome({ children }: { children: ReactNode }) {
   // flush on user-switch. Safe to mount before userId resolves — the
   // hook no-ops until it does.
   useOfflineSync(userId, onAuthRequired, onOpFailed)
+  // Re-register the Web Push subscription on launch and on tab-visible.
+  // iOS rotates push endpoints behind the app's back; without this the
+  // server's row is reaped on the first 404/410 and rest-timer alerts
+  // die silently until the user re-picks +Notify.
+  usePushSync(userId, pushResync)
 
   async function handleSignout() {
     try {

@@ -1,5 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
-import type { D1Database, ExecutionContext, Fetcher, R2Bucket } from '@cloudflare/workers-types'
+import type {
+  D1Database,
+  DurableObjectNamespace,
+  ExecutionContext,
+  Fetcher,
+  R2Bucket,
+} from '@cloudflare/workers-types'
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
 import { buildApp } from './build-app.js'
 import { parseEnv, type Env } from './env.js'
 import { buildLoggerWithFlush, type Logger } from './logger.js'
@@ -18,6 +25,9 @@ import type { Services } from './services/types.js'
 //               paths; the Worker only handles /api/* + /verify-email
 //               (wrangler.toml `assets.run_worker_first`), so we never
 //               call ASSETS.fetch ourselves.
+//   - RATE_LIMITS — the RateLimitCounter Durable Object namespace (#881):
+//                   one DO per token bucket, replacing the per-request D1
+//                   write in the rate limiter.
 //   - string vars/secrets (ARGON2_PEPPER, SESSION_HMAC_KEY, origins,
 //     ID_OBJECT_STORE_*, …) that feed parseEnv.
 
@@ -26,6 +36,7 @@ export interface WorkerEnv {
   ASSETS?: Fetcher
   // R2 bucket binding for avatar object storage (#409).
   OBJECT_STORE: R2Bucket
+  RATE_LIMITS: DurableObjectNamespace
   [key: string]: unknown
 }
 
@@ -61,7 +72,9 @@ export function ensureDeps(env: WorkerEnv): Deps {
     env: parsed,
     logger,
     flushLogs,
-    repos: buildD1Repos(createDb(env.DB)),
+    // A real DurableObjectNamespace satisfies the structural
+    // RateLimitCounterNamespace (idFromName + get).
+    repos: buildD1Repos(createDb(env.DB), env.RATE_LIMITS as unknown as RateLimitCounterNamespace),
     services: buildServices(parsed, { objectStore: env.OBJECT_STORE }),
     passwordHasher: createPasswordHasher({ pepper: parsed.ARGON2_PEPPER }),
     sessionCache: new SessionCache(),
@@ -105,3 +118,8 @@ export default {
 // fetch handler uses, so the SessionCache LRU is shared between HTTP
 // and RPC paths.
 export { IdRPC } from './rpc.js'
+
+// The per-bucket rate-limit counter DO (#881): wrangler binds the
+// RATE_LIMITS namespace to this export ([[durable_objects.bindings]] +
+// [[migrations]] new_sqlite_classes).
+export { RateLimitCounter } from '@rallypoint/rate-limit'

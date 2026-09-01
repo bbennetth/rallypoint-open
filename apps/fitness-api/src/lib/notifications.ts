@@ -24,6 +24,21 @@ const MAX_ATTEMPTS = 5
 // bug can't park rows in 299).
 export const REST_MAX_LEAD_MS = 30 * 60 * 1000
 
+// The backstop push fires this long AFTER the client's rest deadline. A
+// live tab delivers the alert locally at the deadline and then disarms
+// the backstop; scheduling the server push at exactly the same instant
+// made the disarm race the DO alarm (and lose once claimForSend ran),
+// so the same rest period doubled: one local banner + one push. The
+// grace window lets the disarm win whenever the tab is alive; a
+// suspended/killed tab still gets the push, just slightly late. 20s
+// comfortably covers a throttled background tab firing its timeout a
+// few seconds late plus the disarm's network round-trip, while keeping
+// the backstop timely for a dead tab. Note the disarm cancels the row
+// server-wide: with the grace window a live tab's local alert now
+// reliably (not coin-flip) suppresses the backstop on the user's OTHER
+// devices too — the intended behavior for a rest timer.
+export const REST_PUSH_GRACE_MS = 20_000
+
 /** The queue dedupe key for a rest-timer tag (one pending rest
  *  notification per live session). */
 export function restDedupeKey(tag: string): string {
@@ -76,9 +91,18 @@ export async function deliverNotification(
     ...(notification.body ? { body: notification.body } : {}),
     url: notification.url,
     // Stable OS-level tag: the SW passes it to showNotification so a
-    // server push and a locally-fired rest notification collapse into
-    // one banner instead of doubling.
+    // server push and a locally-fired rest notification share one
+    // banner slot (defense-in-depth; the SW's deadline check below is
+    // the real dedupe).
     tag: notification.dedupeKey,
+    // Rest rows only: the raw client deadline (fireAt is grace-shifted
+    // by REST_PUSH_GRACE_MS). The SW shows this backstop silently when
+    // a banner for the SAME rest period — matched on this value — is
+    // already visible; the tag alone is per-session and would let a
+    // stale banner from an earlier rest mute a later rest's alert.
+    ...(notification.source === 'rest'
+      ? { deadlineMs: notification.fireAt.getTime() - REST_PUSH_GRACE_MS }
+      : {}),
   })
 
   const topic = notificationTopic(notification.dedupeKey)

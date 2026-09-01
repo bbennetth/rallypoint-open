@@ -61,7 +61,7 @@ const baseWorkoutFields = {
   rpe: rpeSchema.optional(),
   notes: z.string().max(5000).optional(),
   // modality-specific extras (WOD def/result, run splits); stored as JSON.
-  payload: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
 }
 
 export const createWorkoutSchema = z.object({
@@ -85,7 +85,7 @@ export const patchWorkoutSchema = z.object({
   location: z.string().max(200).nullish(),
   rpe: rpeSchema.nullish(),
   notes: z.string().max(5000).nullish(),
-  payload: z.record(z.unknown()).nullish(),
+  payload: z.record(z.string(), z.unknown()).nullish(),
   sets: z.array(workoutSetInputSchema).max(200).optional(),
 })
 export type PatchWorkoutInput = z.infer<typeof patchWorkoutSchema>

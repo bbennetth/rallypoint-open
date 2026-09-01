@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { serverKeyMatches, testPushStatusMessage, urlBase64ToUint8Array } from './push.js'
+import {
+  pushHealthStatusMessage,
+  serverKeyMatches,
+  testPushStatusMessage,
+  urlBase64ToUint8Array,
+} from './push.js'
 
 describe('urlBase64ToUint8Array', () => {
   it('decodes a base64url VAPID key to the expected 65-byte point', () => {
@@ -68,5 +73,22 @@ describe('testPushStatusMessage', () => {
     expect(testPushStatusMessage({ ok: true, registered: true, delivered: false })).toBe(
       'Couldn’t reach any device. Try turning notifications off and on again.',
     )
+  })
+})
+
+describe('pushHealthStatusMessage', () => {
+  it('says nothing when the toggle can actually deliver', () => {
+    expect(pushHealthStatusMessage(null)).toBeNull()
+  })
+
+  it('explains an OS-level block and how to recover', () => {
+    expect(pushHealthStatusMessage('denied')).toContain('blocked')
+    expect(pushHealthStatusMessage('default')).toContain('permission')
+  })
+
+  it('explains a heal the browser refused without alarming the user', () => {
+    // The gesture retry usually fixes this on the next tap, so the copy
+    // leads with "reconnecting", not "broken".
+    expect(pushHealthStatusMessage('blocked')).toContain('Reconnecting')
   })
 })

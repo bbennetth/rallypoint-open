@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   NOTHING_SCHEDULED_CTAS,
   computeStreak,
+  doneTemplateCountsOn,
   computeWeekHits,
   dayOffsetFromToday,
   formatTodayEyebrow,
@@ -144,9 +145,7 @@ describe('weekVolumeKg', () => {
 
   it('returns 0 for no workouts or null-valued sets', () => {
     expect(weekVolumeKg([], today)).toBe(0)
-    expect(
-      weekVolumeKg([ws('2026-06-23T17:00:00Z', [{ reps: null, loadKg: 100 }])], today),
-    ).toBe(0)
+    expect(weekVolumeKg([ws('2026-06-23T17:00:00Z', [{ reps: null, loadKg: 100 }])], today)).toBe(0)
   })
 })
 
@@ -156,18 +155,11 @@ describe('computeStreak', () => {
     expect(computeStreak([], today)).toBe(0)
   })
   it('counts back-to-back days including today', () => {
-    const ws = [
-      w('2026-06-25T08:00:00Z'),
-      w('2026-06-24T08:00:00Z'),
-      w('2026-06-23T08:00:00Z'),
-    ]
+    const ws = [w('2026-06-25T08:00:00Z'), w('2026-06-24T08:00:00Z'), w('2026-06-23T08:00:00Z')]
     expect(computeStreak(ws, today)).toBe(3)
   })
   it('falls back to "ends yesterday" when today is a rest day', () => {
-    const ws = [
-      w('2026-06-24T08:00:00Z'),
-      w('2026-06-23T08:00:00Z'),
-    ]
+    const ws = [w('2026-06-24T08:00:00Z'), w('2026-06-23T08:00:00Z')]
     expect(computeStreak(ws, today)).toBe(2)
   })
   it('stops at the first missed day', () => {
@@ -352,7 +344,8 @@ describe('startableFromRow', () => {
       name: 'Fran',
       meta: 'ROUNDS FOR TIME',
       to: '/live/wod/wt_1/run',
-      wodTemplateId: 'wt_1',
+      templateId: 'wt_1',
+      run: null,
     })
   })
 
@@ -367,7 +360,8 @@ describe('startableFromRow', () => {
       name: 'Upper Strength',
       meta: 'STRENGTH',
       to: '/live/strength/new?templateId=wt_2',
-      wodTemplateId: null,
+      templateId: 'wt_2',
+      run: null,
     })
   })
 
@@ -376,6 +370,9 @@ describe('startableFromRow', () => {
     expect(s?.name).toBe('Easy 5k')
     expect(s?.meta).toBe('RUN')
     expect(s?.to).toBe('/run/log?planId=tpl_1&planItemId=it_1&note=Easy+5k')
+    // The structured ref an inline-sheet host uses instead of the route.
+    expect(s?.run).toEqual({ planId: 'tpl_1', planItemId: 'it_1', note: 'Easy 5k' })
+    expect(s?.templateId).toBeNull()
   })
 
   it('names an unlabelled run row', () => {
@@ -401,14 +398,16 @@ describe('resolveTodayTraining', () => {
     name: 'Fran',
     meta: 'FOR TIME',
     to: '/live/wod/wt_1/run',
-    wodTemplateId: 'wt_1',
+    templateId: 'wt_1',
+    run: null,
   }
   const strength: StartableToday = {
     itemId: 'it_str',
     name: 'Upper Strength',
     meta: 'STRENGTH',
     to: '/live/strength/new?templateId=wt_2',
-    wodTemplateId: null,
+    templateId: 'wt_2',
+    run: null,
   }
   const fallback = {
     type: 'strength' as const,
@@ -417,14 +416,64 @@ describe('resolveTodayTraining', () => {
     cta: { label: 'Start strength session', to: '/composer?mode=strength' },
   }
 
-  it('takes the first scheduled session of the day', () => {
-    expect(resolveTodayTraining([wod, strength], null)).toEqual({ kind: 'session', session: wod })
+  it('starts the single scheduled session directly', () => {
+    expect(resolveTodayTraining([wod], null)).toEqual({ kind: 'session', session: wod })
   })
 
-  it('starts a strength session when it is first — the hero is no longer WOD-only', () => {
-    expect(resolveTodayTraining([strength, wod], null)).toEqual({
+  it('offers a choice when several sessions are scheduled and open', () => {
+    expect(resolveTodayTraining([wod, strength], null)).toEqual({
+      kind: 'choice',
+      sessions: [wod, strength],
+    })
+  })
+
+  it('narrows a multi-session day to a direct start once all but one are done', () => {
+    expect(resolveTodayTraining([wod, strength], null, new Map([['wt_1', 1]]))).toEqual({
       kind: 'session',
       session: strength,
+    })
+  })
+
+  it('reads complete once every scheduled session is logged', () => {
+    expect(
+      resolveTodayTraining(
+        [wod, strength],
+        null,
+        new Map([
+          ['wt_1', 1],
+          ['wt_2', 1],
+        ]),
+      ),
+    ).toEqual({ kind: 'complete' })
+    // Complete beats the weekly-rhythm fallback: the day WAS trained.
+    expect(resolveTodayTraining([wod], fallback, new Map([['wt_1', 1]]))).toEqual({
+      kind: 'complete',
+    })
+  })
+
+  it('consumes done counts row-by-row: a template scheduled twice needs two logs', () => {
+    const wodAgain = { ...wod, itemId: 'it_wod_2' }
+    expect(resolveTodayTraining([wod, wodAgain], null, new Map([['wt_1', 1]]))).toEqual({
+      kind: 'session',
+      session: wodAgain,
+    })
+    expect(resolveTodayTraining([wod, wodAgain], null, new Map([['wt_1', 2]]))).toEqual({
+      kind: 'complete',
+    })
+  })
+
+  it('never marks a run row done by template id — run rows self-delete on save', () => {
+    const run: StartableToday = {
+      itemId: 'it_run',
+      name: 'Easy 5k',
+      meta: 'RUN',
+      to: '/run/log?planId=p&planItemId=it_run',
+      templateId: null,
+      run: { planId: 'p', planItemId: 'it_run', note: 'Easy 5k' },
+    }
+    expect(resolveTodayTraining([run], null, new Map([['wt_1', 1]]))).toEqual({
+      kind: 'session',
+      session: run,
     })
   })
 
@@ -452,12 +501,53 @@ describe('resolveTodayTraining', () => {
     })
   })
 
-  it("every empty-day CTA starts something — none of them just navigate to the planner", () => {
+  it('every empty-day CTA starts something — none of them just navigate to the planner', () => {
     expect(NOTHING_SCHEDULED_CTAS.map((c) => c.label)).toEqual([
       'Free strength',
       'Browse WODs',
-      'Log a run',
+      'Log cardio',
     ])
+  })
+})
+
+describe('doneTemplateCountsOn', () => {
+  function wp(performedAt: string, payload: Record<string, unknown> | null): WorkoutDto {
+    return { performedAt, payload } as unknown as WorkoutDto
+  }
+  // Local (no-Z) timestamps: dateKey buckets by the host's local date, so
+  // a zoned timestamp would flip days depending on the test machine's TZ.
+  const NOON = '2026-06-25T12:00:00'
+
+  it("counts template ids of today's workouts only", () => {
+    const done = doneTemplateCountsOn(
+      [
+        wp(NOON, { templateId: 'wt_1' }),
+        wp('2026-06-25T13:00:00', { templateId: 'wt_1' }),
+        wp('2026-06-24T12:00:00', { templateId: 'wt_2' }), // yesterday
+      ],
+      '2026-06-25',
+    )
+    expect([...done]).toEqual([['wt_1', 2]])
+  })
+
+  it('prefers sourceTemplateId — the strength engine stamps benchmarks only there', () => {
+    const done = doneTemplateCountsOn(
+      [wp(NOON, { sourceTemplateId: 'wt_bench', templateId: 'wt_custom' })],
+      '2026-06-25',
+    )
+    expect([...done]).toEqual([['wt_bench', 1]])
+  })
+
+  it('ignores workouts without a template id (free sessions, runs)', () => {
+    const done = doneTemplateCountsOn(
+      [
+        wp(NOON, null),
+        wp(NOON, { weather: {} }),
+        wp(NOON, { templateId: 42 }), // malformed
+      ],
+      '2026-06-25',
+    )
+    expect(done.size).toBe(0)
   })
 })
 
@@ -467,8 +557,10 @@ describe('the hero claim and the Upcoming list agree', () => {
     // that used to fall through to the list is now the hero, so it must
     // not also list below it.
     const rows = [
-      { ...{ itemId: 'it_str', planId: 'p', note: null, run: false },
-        template: { id: 'wt_2', name: 'Upper', kind: 'strength' as const, wodType: null } },
+      {
+        ...{ itemId: 'it_str', planId: 'p', note: null, run: false },
+        template: { id: 'wt_2', name: 'Upper', kind: 'strength' as const, wodType: null },
+      },
     ]
     const today = resolveTodayTraining(rows.map(startableFromRow), null)
     expect(today.kind).toBe('session')
@@ -486,13 +578,28 @@ describe('trainingTileVm', () => {
     name: 'Upper Strength',
     meta: 'STRENGTH',
     to: '/live/strength/new?templateId=wt_2',
-    wodTemplateId: null,
+    templateId: 'wt_2',
+    run: null,
   }
 
   it('names the scheduled session', () => {
     expect(trainingTileVm({ kind: 'session', session })).toEqual({
       value: 'Upper Strength',
       sub: 'STRENGTH',
+    })
+  })
+
+  it('counts the open sessions on a multi-workout day', () => {
+    expect(trainingTileVm({ kind: 'choice', sessions: [session, session] })).toEqual({
+      value: 'Start a workout',
+      sub: '2 SCHEDULED',
+    })
+  })
+
+  it('celebrates a completed day and offers another', () => {
+    expect(trainingTileVm({ kind: 'complete' })).toEqual({
+      value: 'Workout complete',
+      sub: 'TAP TO START ANOTHER',
     })
   })
 

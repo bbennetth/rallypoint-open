@@ -197,7 +197,12 @@
 .wkrow > button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -4px; }
 .wkrow .ico { width: 34px; height: 34px; flex: none; border-radius: var(--radius-md); background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; color: var(--ink-dim); margin-top: 1px; }
 .wkrow .mid { flex: 1; min-width: 0; display: grid; gap: 4px; }
-.wkrow .ti { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+/* min-width: 0 — .mid is a grid, so without it this item's auto minimum
+   keeps long titles from shrinking and they overlap the .score. The
+   title span then ellipsizes into whatever width is left (the .prtag
+   sibling keeps its intrinsic size). */
+.wkrow .ti { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; min-width: 0; }
+.wkrow .ti > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wkrow .ti .prtag { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.08em; color: var(--acid); background: var(--accent-soft); border-radius: var(--radius-badge); padding: 2px 6px; }
 .wkrow .sumline { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-dim); letter-spacing: 0.02em; display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .wkrow .score { font-family: var(--font-display); font-size: 17px; color: var(--ink); white-space: nowrap; align-self: center; padding-right: 12px; }
@@ -467,6 +472,12 @@ button.last:active { color: var(--acid); }
 .rec-line .rec-k { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--acid); }
 .rec-line b { font-family: var(--font-display); font-size: 15px; color: var(--ink); }
 .rec-line .rec-b { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); letter-spacing: 0.02em; }
+/* Accept-the-suggestion pill: right-aligned in the strip; align-self
+   centers it against the baseline-aligned text run. all:unset base per
+   the file's button convention (.live-edit-toggle et al); 28px matches
+   the sibling pills' height. */
+.rec-line .rec-apply { all: unset; box-sizing: border-box; margin-left: auto; align-self: center; display: inline-flex; align-items: center; min-height: 28px; padding: 0 14px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; border: 1px solid var(--acid); border-radius: 999px; color: var(--acid); cursor: pointer; }
+.rec-line .rec-apply:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 /* WOD movement split time */
 .rep-move .dt .split { color: var(--acid); }
 /* 44px = the tap-target floor. The check is the only action square on a
@@ -1083,6 +1094,30 @@ button.last:active { color: var(--acid); }
   color: var(--ink-dim);
 }
 .pp-thumb:focus-visible img { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* Compare-mode selection: accent outline on the thumb + a numbered
+   order badge (1/2) so it's clear which photo goes on which side. */
+.pp-thumb.sel img { outline: 2px solid var(--acid); outline-offset: 2px; }
+/* Keep the keyboard focus ring visible on an already-selected thumb. */
+.pp-thumb.sel:focus-visible img {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.pp-sel-badge {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--acid);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
 .pp-thumb-k {
   font-family: var(--font-mono);
   font-size: 9px;
@@ -1111,6 +1146,49 @@ button.last:active { color: var(--acid); }
   display: block;
 }
 .pp-empty { display: grid; gap: 10px; justify-items: start; }
+/* Compare-mode hint bar (below the header, above the pose chips). */
+.pp-compare-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.pp-compare-hint .fit-startbtn { width: auto; padding: 8px 14px; }
+/* Compare drawer: 2-up photo grid + captions + delta line. */
+.pp-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pp-compare-col { display: grid; gap: 6px; margin: 0; }
+.pp-compare-col img {
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  display: block;
+}
+.pp-compare-col figcaption { display: grid; gap: 2px; text-align: center; }
+.pp-compare-date {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.pp-compare-weight { font-family: var(--font-body); font-weight: 700; font-size: 15px; color: var(--ink); }
+.pp-compare-delta {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.pp-compare-note { color: var(--ink-mute); }
 /* Multi-angle capture slots (ProgressPhotoSheet): one tile per pose,
    tap to fill; wraps on narrow screens (never overflow-scrolls). */
 .pp-slot-grid {
@@ -1152,7 +1230,10 @@ button.last:active { color: var(--acid); }
    food tile is always relevant rather than scheduled. */
 .fit-hero-wrap { display: grid; gap: 10px; margin: 14px 0 18px; }
 .fit-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.fit-hero-tile {
+/* .fit-pad-tile (the /log launch pad, further down) shares the hero tile's
+   language at a reduced scale — the pad block only overrides sizes. */
+.fit-hero-tile,
+.fit-pad-tile {
   display: grid;
   justify-items: start;
   /* Both tiles stretch to the taller one's height (grid default). Without
@@ -1172,9 +1253,12 @@ button.last:active { color: var(--acid); }
   min-width: 0;
   transition: background var(--dur-base) ease-out, transform var(--dur-fast) ease-out;
 }
-.fit-hero-tile:hover { background: var(--surface-2); }
-.fit-hero-tile:active { transform: scale(0.98); }
-.fit-hero-tile .puck {
+.fit-hero-tile:hover,
+.fit-pad-tile:hover { background: var(--surface-2); }
+.fit-hero-tile:active,
+.fit-pad-tile:active { transform: scale(0.98); }
+.fit-hero-tile .puck,
+.fit-pad-tile .puck {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1185,11 +1269,13 @@ button.last:active { color: var(--acid); }
   color: var(--acid);
   margin-bottom: 10px;
 }
-.fit-hero-tile .eyebrow { font-size: 9px; letter-spacing: 0.14em; }
+.fit-hero-tile .eyebrow,
+.fit-pad-tile .eyebrow { font-size: 9px; letter-spacing: 0.14em; }
 /* A long session name ("Upper Strength Accessory") must not blow out the
    narrow column — clamp to two lines rather than wrap the tile taller
    than its twin. */
-.fit-hero-tile .v {
+.fit-hero-tile .v,
+.fit-pad-tile .v {
   font-family: var(--font-display);
   font-size: 19px;
   line-height: 1.15;
@@ -1201,7 +1287,8 @@ button.last:active { color: var(--acid); }
   overflow: hidden;
   overflow-wrap: anywhere;
 }
-.fit-hero-tile .u {
+.fit-hero-tile .u,
+.fit-pad-tile .u {
   font-family: var(--font-mono);
   font-size: 9.5px;
   letter-spacing: 0.06em;
@@ -1267,3 +1354,13 @@ button.last:active { color: var(--acid); }
 .fit-picker-row .nm { font-weight: 600; font-size: 14px; }
 .fit-picker-row .hint { font-size: 11.5px; color: var(--ink-mute); line-height: 1.35; }
 .fit-picker-row .go { display: inline-flex; color: var(--ink-mute); flex: 0 0 auto; }
+
+/* --- /log launch pad: secondary logging tiles, 2×2 ---------------------- */
+/* Same tile language as the hero (shared declarations live on the
+   .fit-hero-tile selectors above via comma extensions); only the scale
+   shrinks here so the hierarchy (hero > pad) stays visually explicit. */
+.fit-pad { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.fit-pad-tile { padding: 11px 12px; }
+.fit-pad-tile .puck { width: 26px; height: 26px; margin-bottom: 8px; }
+.fit-pad-tile .v { font-size: 15px; margin-top: 6px; }
+.fit-pad-tile .u { margin-top: 4px; }

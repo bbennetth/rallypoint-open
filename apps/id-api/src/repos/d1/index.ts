@@ -1,3 +1,4 @@
+import type { RateLimitCounterNamespace } from '@rallypoint/rate-limit'
 import type { Repos, UserAuthRepo } from '../types.js'
 import { type Db, createDb } from './db.js'
 import { D1UserRepo } from './users.js'
@@ -74,13 +75,17 @@ class D1UserAuthRepo implements UserAuthRepo {
   }
 }
 
-export function buildD1Repos(db: Db): Repos {
+// `rateLimitNamespace` is optional so the existing buildD1Repos(db) call
+// sites (every *.d1.test.ts) keep exercising the D1 rate-limit path
+// unchanged; only production ensureDeps passes the RATE_LIMITS DO namespace
+// (#881).
+export function buildD1Repos(db: Db, rateLimitNamespace?: RateLimitCounterNamespace): Repos {
   return {
     users: new D1UserRepo(db),
     authMethods: new D1AuthMethodRepo(db),
     emailVerifications: new D1EmailVerificationRepo(db),
     audit: new D1AuditRepo(db),
-    rateLimit: createRateLimitRepo(db),
+    rateLimit: createRateLimitRepo(db, rateLimitNamespace),
     sessions: new D1SessionRepo(db),
     signinChallenges: new D1SigninChallengeRepo(db),
     passwordResets: new D1PasswordResetRepo(db),

@@ -16,6 +16,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260606.1",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0"
   }

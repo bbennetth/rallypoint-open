@@ -57,9 +57,21 @@ export function PlannerPage() {
       </section>
 
       <section className="shots">
-        <Shot placeholder="Planner — My Day (390×844)" caption="My Day" />
-        <Shot placeholder="Planner — Tasks (390×844)" caption="Tasks" />
-        <Shot placeholder="Planner — Shopping (390×844)" caption="Shopping" />
+        <Shot
+          placeholder="Planner — My Day"
+          src="/screens/planner-my-day.webp"
+          caption="My Day"
+        />
+        <Shot
+          placeholder="Planner — Tasks"
+          src="/screens/planner-tasks.webp"
+          caption="Tasks"
+        />
+        <Shot
+          placeholder="Planner — Shopping"
+          src="/screens/planner-shopping.webp"
+          caption="Shopping"
+        />
       </section>
 
       <section className="feat">

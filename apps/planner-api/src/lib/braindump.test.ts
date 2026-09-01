@@ -12,12 +12,21 @@ import {
   decodeAiAnalysis,
   enrichSystemPrompt,
   summarySystemPrompt,
+  buildEnrichInput,
+  buildSummaryInput,
   AI_ANALYSIS_VERSION,
+  BRAINDUMP_ENRICH_MAX_TOKENS,
+  BRAINDUMP_SUMMARY_MAX_TOKENS,
   MAX_THEMES,
   MAX_ENTITIES,
   MAX_ANALYSIS_SUMMARY,
   MAX_SUGGESTED_TASKS,
   MAX_SUGGESTED_EVENTS,
+  MAX_SUMMARY_HIGHLIGHTS,
+  MAX_SUMMARY_HIGHLIGHT_LEN,
+  MAX_SUMMARY_TEXT,
+  MAX_SUMMARY_MOOD_LEN,
+  BRAINDUMP_CATEGORIES,
   type RawEnrich,
   type RawSummary,
 } from './braindump.js'
@@ -58,6 +67,44 @@ describe('EnrichRequestSchema', () => {
   it('rejects a non-instant clientNow', () => {
     expect(
       EnrichRequestSchema.safeParse({ text: 'hi', clientNow: 'not-a-date', tz: 'UTC' }).success,
+    ).toBe(false)
+  })
+
+  it('accepts a valid knownConcepts array and accepts its omission', () => {
+    expect(
+      EnrichRequestSchema.safeParse({
+        text: 'hi',
+        clientNow: '2026-07-20T14:03:00Z',
+        tz: 'UTC',
+        knownConcepts: ['skin', 'Sam'],
+      }).success,
+    ).toBe(true)
+    expect(
+      EnrichRequestSchema.safeParse({ text: 'hi', clientNow: '2026-07-20T14:03:00Z', tz: 'UTC' })
+        .success,
+    ).toBe(true)
+  })
+
+  it('rejects more than 40 knownConcepts', () => {
+    const knownConcepts = Array.from({ length: 41 }, (_, i) => `concept${i}`)
+    expect(
+      EnrichRequestSchema.safeParse({
+        text: 'hi',
+        clientNow: '2026-07-20T14:03:00Z',
+        tz: 'UTC',
+        knownConcepts,
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects a blank knownConcepts entry', () => {
+    expect(
+      EnrichRequestSchema.safeParse({
+        text: 'hi',
+        clientNow: '2026-07-20T14:03:00Z',
+        tz: 'UTC',
+        knownConcepts: ['skin', '   '],
+      }).success,
     ).toBe(false)
   })
 })
@@ -114,11 +161,89 @@ describe('prompts', () => {
     }
   })
 
+  it('enrichSystemPrompt omits the vocabulary line when no known concepts are given', () => {
+    const p = enrichSystemPrompt('2026-07-20T14:03:00Z', 'America/Chicago')
+    expect(p).not.toContain('Reuse these existing labels')
+    const p2 = enrichSystemPrompt('2026-07-20T14:03:00Z', 'America/Chicago', [])
+    expect(p2).not.toContain('Reuse these existing labels')
+  })
+
+  it('enrichSystemPrompt appends the vocabulary line with the joined labels when known concepts are given', () => {
+    const p = enrichSystemPrompt('2026-07-20T14:03:00Z', 'America/Chicago', ['skin', 'Sam'])
+    expect(p).toContain('Reuse these existing labels verbatim when a theme or entity means the same thing: skin, Sam')
+  })
+
   it('summarySystemPrompt asks for the versioned JSON shape', () => {
     const p = summarySystemPrompt()
     expect(p).toContain('summary')
     expect(p).toContain('highlights')
     expect(p).toContain('moodTrend')
+  })
+
+  // The QA truncation failures came from the model padding highlights into
+  // full sentences and running past the token cap; the prompt now states the
+  // brevity bounds explicitly so it aims for what coercion keeps.
+  it('summarySystemPrompt states the brevity bounds', () => {
+    const p = summarySystemPrompt()
+    expect(p).toContain('3-5 sentences')
+    expect(p).toContain('under 20 words')
+    expect(p).toContain('at most 5 highlights')
+  })
+
+  it('enrichSystemPrompt quotes the coercion bounds for themes, entities, tasks and events', () => {
+    const p = enrichSystemPrompt('2026-07-20T14:03:00Z', 'America/Chicago')
+    expect(p).toContain(`up to ${MAX_THEMES} recurring themes`)
+    expect(p).toContain(`up to\n${MAX_ENTITIES} named entities`)
+    expect(p).toContain(`at most ${MAX_SUGGESTED_TASKS} of each`)
+  })
+})
+
+// max_tokens is a ceiling, not a prefill: it must comfortably hold the
+// LARGEST response coercion can keep, or a verbose-but-valid reply gets cut
+// mid-array and the whole call 422s (`failure: truncated` in QA logs at the
+// old 1024 / 768 caps). 3 chars/token is a conservative English+JSON
+// estimate (the usual figure is ~4), so these floors err on the safe side.
+describe('output token caps', () => {
+  const CHARS_PER_TOKEN = 3
+  const tokensFor = (o: unknown): number => Math.ceil(JSON.stringify(o).length / CHARS_PER_TOKEN)
+
+  it('buildEnrichInput / buildSummaryInput pass the exported caps as max_tokens', () => {
+    const e = buildEnrichInput('hello', '2026-07-20T14:03:00Z', 'America/Chicago')
+    expect(e['max_tokens']).toBe(BRAINDUMP_ENRICH_MAX_TOKENS)
+    const s = buildSummaryInput([{ date: '2026-07-20', category: null, text: 'hello' }])
+    expect(s['max_tokens']).toBe(BRAINDUMP_SUMMARY_MAX_TOKENS)
+  })
+
+  it('the enrich cap holds a response maxed out at every coercion bound', () => {
+    const longest = [...BRAINDUMP_CATEGORIES].sort((a, b) => b.length - a.length)[0]
+    const worst = {
+      category: longest,
+      title: 'T'.repeat(100),
+      themes: Array.from({ length: MAX_THEMES }, () => 't'.repeat(40)),
+      entities: Array.from({ length: MAX_ENTITIES }, () => ({ name: 'n'.repeat(80), kind: 'person' })),
+      summary: 's'.repeat(MAX_ANALYSIS_SUMMARY),
+      tasks: Array.from({ length: MAX_SUGGESTED_TASKS }, () => ({
+        title: 't'.repeat(100),
+        date: '2026-07-21',
+        time: '09:30',
+      })),
+      events: Array.from({ length: MAX_SUGGESTED_EVENTS }, () => ({
+        title: 'e'.repeat(100),
+        date: '2026-07-21',
+        time: '09:30',
+        durationMinutes: 1440,
+      })),
+    }
+    expect(tokensFor(worst)).toBeLessThan(BRAINDUMP_ENRICH_MAX_TOKENS)
+  })
+
+  it('the summary cap holds a response maxed out at every coercion bound', () => {
+    const worst = {
+      summary: 's'.repeat(MAX_SUMMARY_TEXT),
+      highlights: Array.from({ length: MAX_SUMMARY_HIGHLIGHTS }, () => 'h'.repeat(MAX_SUMMARY_HIGHLIGHT_LEN)),
+      moodTrend: 'm'.repeat(MAX_SUMMARY_MOOD_LEN),
+    }
+    expect(tokensFor(worst)).toBeLessThan(BRAINDUMP_SUMMARY_MAX_TOKENS)
   })
 })
 
@@ -235,6 +360,19 @@ describe('coerceEnrichment', () => {
     const e = coerceEnrichment(rawEnrich({ entities }), tz)
     expect(e.entities.filter((x) => x.name.toLowerCase() === 'sam')).toHaveLength(1)
     expect(e.entities.length).toBeLessThanOrEqual(MAX_ENTITIES)
+  })
+
+  it('dedupes entities by name alone across kinds, keeping the first occurrence\'s kind', () => {
+    const e = coerceEnrichment(
+      rawEnrich({
+        entities: [
+          { name: 'Trump', kind: 'person' },
+          { name: 'trump', kind: 'topic' },
+        ],
+      }),
+      tz,
+    )
+    expect(e.entities).toEqual([{ name: 'Trump', kind: 'person' }])
   })
 
   it('falls back an unknown/missing entity kind to topic', () => {
@@ -381,10 +519,10 @@ describe('coerceSummary', () => {
     expect(coerceSummary(rawSummary({ summary: '   ' }))).toBeNull()
   })
 
-  it('trims and caps highlights at 8', () => {
+  it('trims and caps highlights at MAX_SUMMARY_HIGHLIGHTS', () => {
     const highlights = Array.from({ length: 12 }, (_, i) => `  point ${i}  `)
     const s = coerceSummary(rawSummary({ highlights }))
-    expect(s!.highlights.length).toBe(8)
+    expect(s!.highlights.length).toBe(MAX_SUMMARY_HIGHLIGHTS)
     expect(s!.highlights[0]).toBe('point 0')
   })
 

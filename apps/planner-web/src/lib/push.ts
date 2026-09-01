@@ -1,21 +1,32 @@
-import { registerPushSubscription, removePushSubscription } from './api.js'
+import {
+  createPushResync,
+  pushHealthReason,
+  pushSupported,
+  serverKeyMatches,
+  urlBase64ToUint8Array,
+} from '@rallypoint/web-kit'
+import type { PushHealthReason } from '@rallypoint/web-kit'
+import {
+  getSettings,
+  PUSH_NOTIFICATIONS_KEY,
+  registerPushSubscription,
+  removePushSubscription,
+  verifyPushSubscription,
+} from './api.js'
 import type { TestPushResult } from './api.js'
 
 // Browser-side Web Push setup: request permission, subscribe via the
 // PushManager with the VAPID applicationServerKey, and register the
 // subscription with planner-api. The reverse on disable.
+//
+// The self-heal that keeps this alive past day one (iOS rotates push
+// endpoints behind the app's back) lives in @rallypoint/web-kit's
+// push-sync, shared with fitness-web; `pushResync` below is planner's
+// instance of it, mounted by AppChrome via usePushSync.
 
-// Convert a base64url VAPID public key into the Uint8Array the PushManager
-// expects as `applicationServerKey` (a BufferSource = ArrayBuffer-backed view).
-// Pure + unit-tested.
-export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
-  const padding = '='.repeat((4 - (base64Url.length % 4)) % 4)
-  const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/')
-  const raw = atob(base64)
-  const out = new Uint8Array(raw.length)
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
-  return out
-}
+// Re-exported from web-kit so existing importers (and their tests) keep
+// one import site; the implementations are shared with fitness-web.
+export { pushSupported, serverKeyMatches, urlBase64ToUint8Array }
 
 export type EnablePushResult = 'subscribed' | 'denied' | 'unsupported'
 
@@ -27,15 +38,20 @@ export function testPushStatusMessage(result: TestPushResult): string {
   return 'Couldn’t reach any device. Try turning notifications off and on again.'
 }
 
-// True when this browser can do Web Push at all.
-export function pushSupported(): boolean {
-  return (
-    typeof navigator !== 'undefined' &&
-    'serviceWorker' in navigator &&
-    typeof window !== 'undefined' &&
-    'PushManager' in window &&
-    'Notification' in window
-  )
+/** Settings-page copy for a toggle that says ON while notifications
+ *  can't actually arrive. `null` when nothing is wrong. Pure +
+ *  unit-tested. */
+export function pushHealthStatusMessage(reason: PushHealthReason): string | null {
+  switch (reason) {
+    case 'denied':
+      return 'Notifications are blocked — enable them in your device or browser settings, then turn this off and on again.'
+    case 'default':
+      return 'Notifications need permission again — turn this off and on to re-enable them.'
+    case 'blocked':
+      return 'Reconnecting notifications on this device — if reminders stay missing, turn this off and on again.'
+    default:
+      return null
+  }
 }
 
 // Fetch the VAPID public key from planner-api at runtime. Served by the
@@ -53,24 +69,30 @@ async function fetchVapidPublicKey(): Promise<string | null> {
   }
 }
 
-// Compare an existing subscription's applicationServerKey against the
-// server's current VAPID public key. `existing` is
-// subscription.options.applicationServerKey — an ArrayBuffer on Chrome/
-// Firefox, but null on some browsers (Safari). On null we can't prove a
-// mismatch, so treat it as a match: force-cycling a subscription we can't
-// inspect risks breaking a working one, and the server reaps dead
-// subscriptions on send anyway. Pure + unit-tested.
-export function serverKeyMatches(
-  existing: ArrayBuffer | null | undefined,
-  expected: Uint8Array,
-): boolean {
-  if (existing == null) return true
-  const bytes = new Uint8Array(existing)
-  if (bytes.length !== expected.length) return false
-  for (let i = 0; i < bytes.length; i++) {
-    if (bytes[i] !== expected[i]) return false
-  }
-  return true
+// Planner's push self-heal: re-registers (or re-subscribes) whenever the
+// user has notifications on but the server has lost the subscription.
+export const pushResync = createPushResync({
+  isEnabled: async () => {
+    try {
+      const settings = await getSettings('planner')
+      return settings[PUSH_NOTIFICATIONS_KEY] === true
+    } catch {
+      // Offline / API down — don't guess "on" and churn subscriptions.
+      return false
+    }
+  },
+  register: (payload) => registerPushSubscription(payload, 'resync'),
+  verify: verifyPushSubscription,
+  // A stale-KEY replacement 403s at send time rather than 404/410, so the
+  // server-side reap never clears the old row — delete it explicitly.
+  unregister: removePushSubscription,
+  storagePrefix: 'planner',
+})
+
+/** Whether the last heal needed a subscribe the browser refused (WebKit
+ *  requires a user gesture). Surfaced on the settings page. */
+export function pushResyncBlocked(): boolean {
+  return pushResync.isBlocked()
 }
 
 // Ask for permission, subscribe, and register with the backend. Returns
@@ -106,6 +128,9 @@ export async function enablePush(): Promise<EnablePushResult> {
     endpoint: json.endpoint,
     keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
   })
+  // This tap IS a sync: start the throttle window here and clear any
+  // stale "the browser refused" marker from an earlier background heal.
+  pushResync.markSynced()
   return 'subscribed'
 }
 
@@ -118,4 +143,18 @@ export async function disablePush(): Promise<void> {
   const { endpoint } = subscription
   await subscription.unsubscribe().catch(() => undefined)
   await removePushSubscription(endpoint)
+}
+
+/** The settings-page status line for a toggle that reads ON but can't
+ *  deliver. Returns null when healthy (or push isn't supported at all,
+ *  where the toggle is already disabled). */
+export function pushHealthStatus(enabled: boolean): string | null {
+  if (!pushSupported()) return null
+  return pushHealthStatusMessage(
+    pushHealthReason({
+      enabled,
+      permission: Notification.permission,
+      resyncBlocked: pushResyncBlocked(),
+    }),
+  )
 }

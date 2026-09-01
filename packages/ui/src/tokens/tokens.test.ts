@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
+import { BRAND } from '../brand.js'
 
 const UI_SRC = resolve(import.meta.dirname, '..')
 const THEME_CSS = readFileSync(resolve(UI_SRC, 'theme.css'), 'utf-8')
@@ -87,6 +88,15 @@ describe('tokens/colors.css — chassis + accents + derived washes', () => {
     expect(TOKENS.colors).toMatch(/--edge-highlight:/)
     expect(TOKENS.colors).toMatch(/--shadow-card:\s*0 2px 10px rgba\(11, 27, 43, 0\.08\)/)
     expect(TOKENS.colors).toMatch(/--shadow-panel:\s*0 4px 16px rgba\(11, 27, 43, 0\.1\)/)
+  })
+
+  it('BRAND.colors.acid/bg match the default (dark chassis / blue accent) theme values, so they cannot drift', () => {
+    const acidMatch = TOKENS.colors.match(/:root,\s*\[data-color='blue'\]\s*\{\s*--acid:\s*(#[0-9a-fA-F]{6})/)
+    const bgMatch = TOKENS.colors.match(/:root,\s*\[data-mode='dark'\][^}]*--bg:\s*(#[0-9a-fA-F]{6})/)
+    expect(acidMatch, '--acid default rule not found').not.toBeNull()
+    expect(bgMatch, '--bg default rule not found').not.toBeNull()
+    expect(BRAND.colors.acid.toLowerCase()).toBe(acidMatch![1].toLowerCase())
+    expect(BRAND.colors.bg.toLowerCase()).toBe(bgMatch![1].toLowerCase())
   })
 
   it('light-mode shadow overrides out-specify the spacing.css :root base', () => {

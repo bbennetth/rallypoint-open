@@ -26,6 +26,7 @@ import {
 } from '../lib/stats-view.js'
 import type { StatsRange } from '../lib/stats-view.js'
 import { buildPrRowVms, buildVolumeBarVms, buildWeeklyBarVms, weeklyVolumeRange } from '../lib/insights-view.js'
+import { computeStreak, trainingsThisWeek, weekRange, weekVolumeKg } from '../lib/today-view.js'
 import { useWeightUnit } from '../lib/units.js'
 
 function errMessage(err: unknown): string {
@@ -54,6 +55,29 @@ export function TrainingView() {
   // insights reconcile the offline engine runs after a save, so no
   // manual refetch is needed here.
   const workoutsQ = useCachedQuery(useMemo(() => workoutsQuery({ from, to }), [from, to]))
+  // This-week tiles (moved here from /log when it became the launch pad):
+  // current streak / sessions / volume, from a dedicated read so the
+  // range seg above doesn't re-window them. The window reaches a year
+  // back — trainingsThisWeek/weekVolumeKg clamp to the Mon→Sun week
+  // internally, but computeStreak counts whatever it's handed, and a
+  // week-scoped fetch would cap a real streak at the days since Monday
+  // (the /log tiles had that latent bug; fixed in the move). Like the
+  // ranges, `today` is captured per mount (no midnight-rollover tick —
+  // Stats is a short-lived view).
+  const { today, streakFrom, weekTo } = useMemo(() => {
+    const d = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    const { end } = weekRange(iso)
+    const back = new Date(d)
+    back.setDate(back.getDate() - 365)
+    const backIso = `${back.getFullYear()}-${pad(back.getMonth() + 1)}-${pad(back.getDate())}`
+    return { today: iso, streakFrom: backIso, weekTo: end }
+  }, [])
+  const weekWorkoutsQ = useCachedQuery(
+    useMemo(() => workoutsQuery({ from: streakFrom, to: weekTo }), [streakFrom, weekTo]),
+  )
+  const weekWorkouts = weekWorkoutsQ.data ?? []
   const volumeQ = useCachedQuery(useMemo(() => volumeInsightsQuery(from, to), [from, to]))
   // The weekly chart is fixed at the trailing 8 local weeks, independent
   // of the seg (the design's "Last 8 weeks" chart doesn't re-window).
@@ -84,6 +108,10 @@ export function TrainingView() {
 
   const stats = aggregateTrainingStats(workouts)
   const totalVolume = splitTonnage(formatTonnage(stats.tonnageKg, unit))
+  const weekStreak = computeStreak(weekWorkouts, today)
+  const weekTrained = trainingsThisWeek(weekWorkouts, today)
+  // Value/unit split so a long total can't wrap the narrow third column.
+  const weekVolume = splitTonnage(formatTonnage(weekVolumeKg(weekWorkouts, today), unit))
   const weeklyBars = buildWeeklyBarVms(weeklyQ.data?.weeks ?? [])
   const groupVms = buildVolumeBarVms(volume?.groups ?? [])
   // The group max also scales the per-muscle drill-down bars so a
@@ -129,6 +157,33 @@ export function TrainingView() {
       </header>
 
       {error && <Banner tone="error">{error}</Banner>}
+
+      {/* This-week tiles, moved from the /log dashboard. Not gated on the
+          `loading` union — they read their own query and paint from cache
+          independently of the range-scoped reads below. */}
+      <section style={{ display: 'grid', gap: 8 }}>
+        <div className="sec-rule">
+          <div className="eyebrow">THIS WEEK</div>
+          <div className="line" />
+        </div>
+        <div className="fit-stats">
+          <div className="fit-stat">
+            <div className="k">Streak</div>
+            <div className="v">{weekStreak}</div>
+            <div className="u">{weekStreak === 1 ? 'day' : 'days'}</div>
+          </div>
+          <div className="fit-stat">
+            <div className="k">This week</div>
+            <div className="v">{weekTrained}</div>
+            <div className="u">of 5</div>
+          </div>
+          <div className="fit-stat">
+            <div className="k">Volume</div>
+            <div className="v">{weekVolume.value}</div>
+            <div className="u">{weekVolume.unit} this week</div>
+          </div>
+        </div>
+      </section>
 
       {/* 2×2 per the B·F3 frame (grid2 is TrainingView-only — Body/Food
           and the live pages keep the 3-across base grid). */}

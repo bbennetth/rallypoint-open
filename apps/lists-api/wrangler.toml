@@ -36,10 +36,30 @@ new_classes = ["RealtimeHub"]
 name = "HUB"
 class_name = "RealtimeHub"
 
+# RateLimitCounter Durable Object (#881) — one SQLite-backed DO per token
+# bucket, replacing the per-request D1 write in the rate limiter. DO
+# migrations are append-only: this is a NEW tag, never edit v1.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitCounter"]
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
+
 # Local-dev / top-level config (used by `wrangler dev`). parseEnv fills
 # dev-safe defaults for the secrets.
 [vars]
 NODE_ENV = "development"
+
+# Hourly recurrence sweep (worker.ts `scheduled`): marks superseded open
+# series occurrences 'skipped' so a series never shows more than one
+# active instance. Hourly is plenty — supersession only changes at UTC
+# midnight. The */5 tick is the D1 keep-warm ping only (worker.ts
+# dispatches on event.cron). Restated per env below (crons do not inherit
+# into named envs).
+[triggers]
+crons = ["5 * * * *", "*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -65,6 +85,9 @@ entrypoint = "IdRPC"
 [env.qa]
 vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", LISTS_UI_ORIGIN = "https://lists.rallypt.dev", RPID_API_URL = "https://id.rallypt.dev", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "qa" }
 
+[env.qa.triggers]
+crons = ["5 * * * *", "*/5 * * * *"]
+
 [[env.qa.d1_databases]]
 binding = "DB"
 database_name = "rp-lists-qa"
@@ -75,6 +98,10 @@ migrations_dir = "../../packages/lists-db/migrations"
 [[env.qa.durable_objects.bindings]]
 name = "HUB"
 class_name = "RealtimeHub"
+
+[[env.qa.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 # Service binding: same-account cross-Worker calls to id-api dispatch
 # in-process via this binding (the CF edge drops same-account loopback
@@ -95,6 +122,9 @@ custom_domain = true
 [env.prod]
 vars = { NODE_ENV = "production", TRUSTED_PROXY_HEADER = "cf-connecting-ip", LISTS_UI_ORIGIN = "https://lists.rallypt.app", RPID_API_URL = "https://id.rallypt.app", POSTHOG_KEY = "phc_pXfCBfcjuzNTkDuvouacPuiJjKxb5f9VM2FjUcBLA4bA", DEPLOY_ENV = "prod" }
 
+[env.prod.triggers]
+crons = ["5 * * * *", "*/5 * * * *"]
+
 [[env.prod.d1_databases]]
 binding = "DB"
 database_name = "rp-lists-prod"
@@ -105,6 +135,10 @@ migrations_dir = "../../packages/lists-db/migrations"
 [[env.prod.durable_objects.bindings]]
 name = "HUB"
 class_name = "RealtimeHub"
+
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITS"
+class_name = "RateLimitCounter"
 
 [[env.prod.services]]
 binding = "RPID"

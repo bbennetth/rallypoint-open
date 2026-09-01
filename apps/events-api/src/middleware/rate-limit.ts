@@ -1,6 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import { createRateLimit, createApplyPerUserRateLimit } from '@rallypoint/api-kit'
-import type { RateLimitPolicy } from '@rallypoint/api-kit'
+import type { IpRateLimitPolicy } from '@rallypoint/api-kit'
 import type { HonoApp } from '../context.js'
 import { errors } from '../errors.js'
 
@@ -9,7 +9,10 @@ import { errors } from '../errors.js'
 // default (this middleware); per-user is applied in-route via
 // applyPerUserRateLimit() once the session userId is known.
 
-export type { RateLimitPolicy }
+// This middleware is the per-IP path (per-user/per-email buckets go through
+// the apply* helpers below), so the shared IP-narrowed policy applies:
+// omitting perIp would silently no-op the bucket instead of failing to build.
+export type RateLimitPolicy = IpRateLimitPolicy
 
 const config = {
   saltEnvKey: 'EVENTS_SESSION_KEY_V1',

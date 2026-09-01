@@ -27,3 +27,22 @@ export {
   analyticsPersonProps,
 } from './analytics.js'
 export type { AnalyticsIdentity } from './analytics.js'
+export {
+  createPushResync,
+  pushHealthReason,
+  pushSupported,
+  resyncAction,
+  serverKeyMatches,
+  shouldSyncPush,
+  urlBase64ToUint8Array,
+  PUSH_SYNC_MIN_INTERVAL_MS,
+} from './push-sync.js'
+export type {
+  PushHealthReason,
+  PushResync,
+  PushResyncAdapter,
+  PushSubscriptionPayload,
+  PushSyncResult,
+  ResyncAction,
+} from './push-sync.js'
+export { usePushSync } from './use-push-sync.js'

@@ -82,6 +82,29 @@ describe('composeMyDay', () => {
     expect(out.tasks.find((t) => t.id === 'undated')).toBeUndefined()
   })
 
+  it('never rolls a system-skipped occurrence forward', () => {
+    const out = composeMyDay({
+      date: '2026-06-03',
+      timezone: 'UTC',
+      window: WINDOW,
+      tasks: [
+        // Superseded by a newer occurrence: the recurrence sweep marked it
+        // skipped (completed=true, completedAt=null, status='skipped').
+        task({
+          id: 'yesterday-skipped',
+          seriesId: 'lse_pills',
+          dueDate: '2026-06-02T09:00:00.000Z',
+          completed: true,
+          status: 'skipped',
+        }),
+        task({ id: 'today-pill', seriesId: 'lse_pills', dueDate: '2026-06-03T09:00:00.000Z' }),
+      ],
+      events: [],
+      userEvents: [],
+    })
+    expect(out.tasks.map((t) => t.id)).toEqual(['today-pill'])
+  })
+
   it('treats the window as half-open [start, end)', () => {
     const out = composeMyDay({
       date: '2026-06-03',

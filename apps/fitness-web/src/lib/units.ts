@@ -49,6 +49,28 @@ export function formatLoad(kg: number, unit: WeightUnit): string {
   return `${kgToDisplay(kg, unit)} ${unit}`
 }
 
+/** The plate-friendly step weight SUGGESTIONS snap to, per display unit:
+ *  whole 5s in lb, 2.5s in kg. The recommender itself rounds in kg
+ *  (weight-rec.ts), which lands on odd lb numbers (99, 94); snapping at
+ *  the display edge keeps the strip gym-loadable in either unit. */
+export const LOAD_INCREMENT: Record<WeightUnit, number> = { lb: 5, kg: 2.5 }
+
+/** Snap a stored-kg load to the display unit's suggestion increment.
+ *  Returns BOTH the display number and the storage kg that round-trips
+ *  to it, so applying a suggestion writes exactly what the strip shows.
+ *  Converts at 2 dp before snapping so the whole-lb display rounding
+ *  can't pre-bias the snap. Floors at ONE increment, never 0 — a 0
+ *  suggestion would apply as loadKg 0, which the save paths read as
+ *  deliberate bodyweight. */
+export function snapLoadToIncrement(
+  kg: number,
+  unit: WeightUnit,
+): { display: number; kg: number } {
+  const inc = LOAD_INCREMENT[unit]
+  const display = Math.max(inc, Math.round(kgToDisplay(kg, unit, 2) / inc) * inc)
+  return { display, kg: displayToKg(display, unit) }
+}
+
 /** Tonnage totals. kg keeps the existing style ("850 kg", "1.2 t");
  *  lb compacts at 10k ("8,500 lb", "12.5k lb"). */
 export function formatTonnage(kg: number, unit: WeightUnit): string {

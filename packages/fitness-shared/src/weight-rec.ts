@@ -57,7 +57,16 @@ export interface WeightRecOptions {
 
 export interface WeightRecommendation {
   kg: number
+  /** Human-readable basis line — kg-denominated. UIs rendering in
+   *  another unit should rebuild the line from the structured fields
+   *  below instead of showing this string verbatim. */
   basis: string
+  /** The anchoring recent top-set load (kg) — `basis`'s "last N". */
+  lastKg: number
+  /** The progression bump reflected in `basis`'s "+N" (kg), or null
+   *  when target reps didn't drop below the last set's. Note `kg` is a
+   *  blend of `lastKg + bumpKg` and the 1RM curve, not their sum. */
+  bumpKg: number | null
   /** True when the load was trimmed for accumulated weekly volume. */
   fatigued: boolean
 }
@@ -92,9 +101,10 @@ export function recommendLoad(
   if (fatigued) kg *= 0.95
   kg = roundToPlate(kg)
 
+  const bumpKg = targetReps < lastReps ? ROUND_TO_KG : null
   let basis = `last ${lastKg}`
-  if (targetReps < lastReps) basis += ` +${ROUND_TO_KG}`
+  if (bumpKg != null) basis += ` +${bumpKg}`
   if (fatigued) basis += ' · muscle loaded'
 
-  return { kg, basis, fatigued }
+  return { kg, basis, lastKg, bumpKg, fatigued }
 }

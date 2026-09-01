@@ -7,9 +7,10 @@ import {
   UserMenu,
   isEmbeddedShell,
 } from '@rallypoint/ui'
-import { bootSucceeded, useSwUpdatePrompt } from '@rallypoint/web-kit'
+import { bootSucceeded, usePushSync, useSwUpdatePrompt } from '@rallypoint/web-kit'
 import { triggerCachedQueryRefetch } from '@rallypoint/offline-kit'
 import { SESSION_REVOKED_EVENT, signout } from '../lib/api.js'
+import { pushResync } from '../lib/push.js'
 import { SW_DATA_REFRESH_MESSAGE } from '../lib/sw-messages.js'
 import { useSession, RPID_UI_URL, beginSso } from '../lib/session.js'
 import { setOfflineUser } from '../lib/offline/cache.js'
@@ -67,6 +68,11 @@ export function AppChrome({ children }: { children: ReactNode }) {
   // SW background-sync, and a flush on user-switch. Safe to mount before
   // userId resolves — the hook no-ops until it does.
   useOfflineSync(userId, onAuthRequired, onOpFailed)
+  // Re-register the Web Push subscription on launch and on tab-visible.
+  // iOS rotates push endpoints behind the app's back; without this the
+  // server's row is reaped on the first 404/410 and reminders die
+  // silently until the user toggles notifications off and on.
+  usePushSync(userId, pushResync)
   // The SW broadcasts on push receipt (something changed server-side) —
   // revalidate every mounted cached query so the surface is fresh before
   // the user even taps the notification.

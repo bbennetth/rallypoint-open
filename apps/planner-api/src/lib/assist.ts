@@ -96,6 +96,12 @@ export const AssistSuggestionSchema = z.object({
   // food only: one entry per food eaten, TOTAL macros for its amount.
   items: z.array(AssistFoodItemSchema).max(20).nullable(),
   confidence: z.enum(ASSIST_CONFIDENCE),
+  // Set when the confidence is low BECAUSE a date was lost or looks wrong.
+  // Only the server knows that: the client can't tell a date-driven downgrade
+  // from a model that was simply unsure about the category, since a
+  // backwards-resolved date arrives WITH a startAt — just the wrong one. It
+  // decides which field the edit card asks the user to check.
+  dateUncertain: z.boolean(),
 })
 export type AssistSuggestion = z.infer<typeof AssistSuggestionSchema>
 
@@ -111,6 +117,12 @@ export interface AssistResponse extends AssistSuggestion {
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 const HM_RE = /^\d{2}:\d{2}$/
 
+// How many local days an event may sit behind the capture before it reads as
+// a date the model resolved backwards ("Oct 23rd" → last October, "next
+// Monday" → last Monday) rather than a deliberate back-log. Today and
+// yesterday are legitimate — logging last night's gig this morning is normal.
+const STALE_START_DAYS = 1
+
 // Deliberately terse — prefill tokens are pure latency on Workers AI, so the
 // category definitions are one-liners and the output shape is shown once.
 export function assistSystemPrompt(clientNow: string, tz: string): string {
@@ -122,6 +134,9 @@ Categories: task (a to-do, e.g. "call the dentist"), shopping (to buy),
 event (attend at a date/time), food (something the user ate or drank),
 diary (a feeling/mood — set mood 1-5, 1=very negative 5=very positive),
 note (info to keep that fits none of the above).
+Pull every date/time out of the text into date/time; title is what remains —
+the thing itself, never the raw capture ("Madeon at 7pm Oct 23rd" -> title
+"Madeon"). A date with no year means its next future occurrence.
 Respond with ONLY this JSON:
 {"category":"task|shopping|event|food|note|diary","title":"short title",
 "notes":"extra detail or null","date":"YYYY-MM-DD or null",
@@ -243,6 +258,48 @@ function dayStartInstant(date: string, tz: string): Date | null {
   return wallClockToInstant(date, '00:00', tz)
 }
 
+// A model date/time field as the model actually emitted it, or null when it
+// carries no value. The prompt asks for explicit nulls, but runtimes surface
+// "absent" as blanks and the literal string "null" often enough that treating
+// those as a DROPPED value (below) would flag half the notes as suspect.
+function rawDateField(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const t = value.trim()
+  return t === '' || t.toLowerCase() === 'null' ? null : t
+}
+
+// The local calendar day an instant falls on, or null when it isn't a real
+// instant (coerceSuggestion promises never to throw, and Intl rejects an
+// invalid Date).
+function localDay(instant: string, tz: string): string | null {
+  const t = Date.parse(instant)
+  if (Number.isNaN(t)) return null
+  try {
+    return localAnchor(new Date(t).toISOString(), tz).date
+  } catch {
+    return null
+  }
+}
+
+// Whole days from one plain YYYY-MM-DD to another. Both are read as UTC
+// midnights, so a DST transition in between can't skew the count.
+function daysBetween(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000)
+}
+
+// True when a start sits far enough behind the capture to look backwards-
+// resolved. Measured in LOCAL calendar days rather than elapsed hours: an
+// hours-based window has to be padded past the longest DST day (a fall-back
+// day runs 25 hours), and that padding blinds it to dates that landed only a
+// day or two back. Days sidestep DST entirely, so the threshold can stay
+// tight. Unjudgeable input fails open — never flag what we can't measure.
+function isStaleStart(startAt: string, clientNow: string, tz: string): boolean {
+  const start = localDay(startAt, tz)
+  const today = localDay(clientNow, tz)
+  if (start === null || today === null) return false
+  return daysBetween(start, today) > STALE_START_DAYS
+}
+
 // Clamp one raw food item into the bounded shape, or drop it (null) when it
 // has no usable name or macros. Grams default from a rough kcal density
 // (~1.5 kcal/g mixed food) when the model omits them, so the diary row
@@ -276,14 +333,28 @@ function coerceFoodItem(raw: {
 // resolving dates/times against the client's zone. Pure and total: never
 // throws for in-range raw input (garbage dates degrade to null, unknown
 // categories fall back to 'note').
-export function coerceSuggestion(raw: RawModel, tz: string): AssistSuggestion {
+//
+// Lost scheduling downgrades `confidence` to 'low' rather than degrading
+// silently, because the client AUTO-SAVES anything above low. The failure this
+// guards is "Madeon at 7pm Oct 23rd" saved as an untimed event titled with the
+// whole capture: a suggestion that dropped a date the user clearly stated is
+// worse than no suggestion, so it goes to the edit card for confirmation.
+export function coerceSuggestion(raw: RawModel, tz: string, clientNow: string): AssistSuggestion {
   let category = normalizeCategory(raw.category)
   const title = clampTitle(raw.title)
   const notes = normalizeNotes(raw.notes)
   let confidence = normalizeConfidence(raw.confidence)
 
-  const date = typeof raw.date === 'string' && YMD_RE.test(raw.date) ? raw.date : null
-  const time = typeof raw.time === 'string' && HM_RE.test(raw.time) ? raw.time : null
+  const rawDate = rawDateField(raw.date)
+  const rawTime = rawDateField(raw.time)
+  const date = rawDate !== null && YMD_RE.test(rawDate) ? rawDate : null
+  const time = rawTime !== null && HM_RE.test(rawTime) ? rawTime : null
+  // The model reached for a date/time and emitted something unreadable, so a
+  // stated "when" is about to vanish. Only worth flagging on the categories
+  // that carry one: a shopping row keeps no date either way, and making the
+  // user confirm a stray field the edit card won't even show is pure friction.
+  const unreadableWhen =
+    (rawDate !== null && date === null) || (rawTime !== null && time === null)
 
   let startAt: string | null = null
   let endAt: string | null = null
@@ -291,6 +362,7 @@ export function coerceSuggestion(raw: RawModel, tz: string): AssistSuggestion {
   let dueDate: string | null = null
   let mood: number | null = null
   let items: AssistFoodItem[] | null = null
+  let dateUncertain = false
 
   if (category === 'food') {
     const coerced = (raw.items ?? [])
@@ -324,6 +396,10 @@ export function coerceSuggestion(raw: RawModel, tz: string): AssistSuggestion {
     } else {
       allDay = true
     }
+    // An event is a thing you attend at a time. No resolvable start means the
+    // model either found no date or lost it; a start well behind the capture
+    // means it resolved one backwards. Either way the user confirms.
+    dateUncertain = unreadableWhen || startAt === null || isStaleStart(startAt, clientNow, tz)
   } else if (category === 'task' || category === 'diary') {
     if (date && time) {
       const inst = wallClockToInstant(date, time, tz)
@@ -332,8 +408,11 @@ export function coerceSuggestion(raw: RawModel, tz: string): AssistSuggestion {
       dueDate = date
     }
     if (category === 'diary') mood = clampMood(raw.mood)
+    // A stated due date that didn't survive parsing — unlike an event, a
+    // task with no date at all is perfectly normal, so only the loss flags.
+    dateUncertain = unreadableWhen
   }
-  // note / shopping carry no date fields.
+  // note / shopping carry no date fields, so a stray unreadable one is moot.
 
   return AssistSuggestionSchema.parse({
     category,
@@ -345,6 +424,9 @@ export function coerceSuggestion(raw: RawModel, tz: string): AssistSuggestion {
     dueDate,
     mood,
     items,
-    confidence,
+    // A lost "when" is the one degradation the client must not auto-save
+    // through, so it always outranks whatever the model claimed.
+    confidence: dateUncertain ? 'low' : confidence,
+    dateUncertain,
   })
 }

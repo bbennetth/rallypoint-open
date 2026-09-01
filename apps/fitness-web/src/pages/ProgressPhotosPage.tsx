@@ -23,6 +23,7 @@ import {
   listProgressPhotos,
   progressPhotoImageUrl,
 } from '../lib/api.js'
+import { ProgressCompare } from '../ui/ProgressCompare.js'
 import { ProgressPhotoDetail } from '../ui/ProgressPhotoDetail.js'
 import { ProgressPhotoSheet } from '../ui/ProgressPhotoSheet.js'
 
@@ -60,6 +61,9 @@ export function ProgressPhotosPage() {
     set: ProgressPhotoSet<ProgressPhotoDto>
     initialPhotoId: string
   } | null>(null)
+  const [compareMode, setCompareMode] = useState(false)
+  const [compareSelection, setCompareSelection] = useState<ProgressPhotoDto[]>([])
+  const [comparePair, setComparePair] = useState<[ProgressPhotoDto, ProgressPhotoDto] | null>(null)
   // Monotonic request generation: a pose-filter flip (or refetch) bumps
   // it so an in-flight load-more that resolves late can't append rows
   // from the previous filter.
@@ -97,6 +101,33 @@ export function ProgressPhotosPage() {
       .then(setPoses)
       .catch(() => undefined) // filter chips degrade to the curated three
   }, [])
+
+  // Once two photos are picked, open the compare drawer. Closing it (or
+  // "Change photos") clears the selection so a fresh pick re-fires this.
+  useEffect(() => {
+    if (compareSelection.length === 2) {
+      setComparePair([compareSelection[0]!, compareSelection[1]!])
+    }
+  }, [compareSelection])
+
+  function enterCompareMode() {
+    setCompareMode(true)
+    setCompareSelection([])
+  }
+
+  function cancelCompareMode() {
+    setCompareMode(false)
+    setCompareSelection([])
+    setComparePair(null)
+  }
+
+  function toggleCompareSelection(photo: ProgressPhotoDto) {
+    setCompareSelection((cur) => {
+      if (cur.some((p) => p.id === photo.id)) return cur.filter((p) => p.id !== photo.id)
+      if (cur.length >= 2) return cur
+      return [...cur, photo]
+    })
+  }
 
   async function loadMore() {
     if (!cursor || loadingMore) return
@@ -148,11 +179,27 @@ export function ProgressPhotosPage() {
             </Link>
             <h1>Progress pictures</h1>
           </div>
-          <button type="button" className="fit-startbtn ghost" onClick={() => setSheetOpen(true)}>
-            + Add photo
-          </button>
+          <div className="btn-row" style={{ width: 'auto' }}>
+            {!compareMode && photos && photos.length >= 2 && (
+              <button type="button" className="fit-startbtn ghost" onClick={enterCompareMode}>
+                Compare
+              </button>
+            )}
+            <button type="button" className="fit-startbtn ghost" onClick={() => setSheetOpen(true)}>
+              + Add photo
+            </button>
+          </div>
         </div>
       </header>
+
+      {compareMode && (
+        <div className="pp-compare-hint" role="status" aria-live="polite">
+          <span>{compareSelection.length} of 2 selected</span>
+          <button type="button" className="fit-startbtn ghost" onClick={cancelCompareMode}>
+            Cancel
+          </button>
+        </div>
+      )}
 
       <div className="day-chips" role="radiogroup" aria-label="Filter by pose">
         <button
@@ -203,19 +250,33 @@ export function ProgressPhotosPage() {
               <div className="pp-grid">
                 {groupPhotosBySet(g.photos).map((set) => {
                   const primary = primaryPhotoOfSet(set.photos)
+                  const isSelected = compareSelection.some((p) => p.id === primary.id)
+                  // Badge numbers are chronological by takenAt (older = 1,
+                  // newer = 2), not tap order — matches the drawer's
+                  // older-left/newer-right layout regardless of pick order.
+                  const badgeNumber = isSelected
+                    ? [...compareSelection].sort((a, b) => a.takenAt.localeCompare(b.takenAt))
+                        .findIndex((p) => p.id === primary.id) + 1
+                    : 0
                   return (
                     <button
                       key={set.setKey}
                       type="button"
-                      className="pp-thumb"
-                      onClick={() => setSelected({ set, initialPhotoId: primary.id })}
-                      aria-label={`Open progress pictures — ${poseLabel(primary.pose)}${set.photos.length > 1 ? `, ${set.photos.length} angles` : ''}`}
+                      className={`pp-thumb${isSelected ? ' sel' : ''}`}
+                      aria-pressed={compareMode ? isSelected : undefined}
+                      onClick={() =>
+                        compareMode
+                          ? toggleCompareSelection(primary)
+                          : setSelected({ set, initialPhotoId: primary.id })
+                      }
+                      aria-label={`${compareMode ? 'Select' : 'Open'} progress pictures — ${poseLabel(primary.pose)}${set.photos.length > 1 ? `, ${set.photos.length} angles` : ''}`}
                     >
                       <span className="pp-thumb-imgwrap">
                         <img src={progressPhotoImageUrl(primary.id)} alt="" loading="lazy" />
                         {set.photos.length > 1 && (
                           <span className="pp-badge">{set.photos.length} angles</span>
                         )}
+                        {isSelected && <span className="pp-sel-badge">{badgeNumber}</span>}
                       </span>
                       <span className="pp-thumb-k">{poseLabel(primary.pose)}</span>
                     </button>
@@ -253,6 +314,18 @@ export function ProgressPhotosPage() {
           onDeleted={() => refetch(poseFilter)}
         />
       )}
+      <ProgressCompare
+        open={comparePair !== null}
+        photos={comparePair}
+        onClose={() => {
+          setComparePair(null)
+          setCompareSelection([])
+        }}
+        onChangePhotos={() => {
+          setComparePair(null)
+          setCompareSelection([])
+        }}
+      />
     </div>
   )
 }

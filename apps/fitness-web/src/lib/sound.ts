@@ -6,13 +6,22 @@
 
 let ctx: AudioContext | null = null
 
+// iOS parks a context in the non-standard 'interrupted' state after a
+// screen lock, a phone call, or another app taking the audio session —
+// exactly the states a rest timer runs through. It is not in the
+// AudioContextState union, and treating it as un-resumable is why beeps
+// could stay silent for the rest of a session once the phone had locked.
+export function needsResume(state: AudioContextState): boolean {
+  return state === 'suspended' || (state as string) === 'interrupted'
+}
+
 /** Create/resume the shared AudioContext. MUST be called from a user
  *  gesture at least once (iOS suspends contexts created outside one).
  *  Safe to call repeatedly. */
 export function unlockAudio(): void {
   try {
     ctx ??= new AudioContext()
-    if (ctx.state === 'suspended') void ctx.resume()
+    if (needsResume(ctx.state)) void ctx.resume()
   } catch {
     // No WebAudio (very old browser) — beeps silently no-op.
     ctx = null
@@ -25,7 +34,7 @@ export function unlockAudio(): void {
  *  (that only sticks inside a user gesture). */
 export function resumeAudio(): void {
   try {
-    if (ctx && ctx.state === 'suspended') void ctx.resume()
+    if (ctx && needsResume(ctx.state)) void ctx.resume()
   } catch {
     /* ignore — beeps just stay silent */
   }

@@ -35,6 +35,7 @@ import { applySettingsPatch, mergeItemPatch } from './offline/merge.js'
 import { warmCacheIfStale, type WarmerDeps } from './offline/cache-warmer.js'
 import { purgeOfflineUser } from './offline/hooks.js'
 import type { CachedQuery } from './offline/use-cached-query.js'
+import { AI_ANALYSIS_FIELD_LABEL, findAnalysisField } from './braindump-helpers.js'
 
 export { ApiError }
 export type { SessionProfile }
@@ -189,15 +190,32 @@ export async function exchangeSso(code: string, state: string): Promise<void> {
 
 // --- push notifications --------------------------------------------
 
-export interface PushSubscriptionPayload {
-  endpoint: string
-  keys: { p256dh: string; auth: string }
-}
+// The canonical shape lives with the shared push self-heal, which builds
+// these payloads; re-exported so callers keep importing it from here.
+export type { PushSubscriptionPayload } from '@rallypoint/web-kit'
+import type { PushSubscriptionPayload } from '@rallypoint/web-kit'
 
 // Register (or refresh) the browser's Web Push subscription with planner-api.
-export async function registerPushSubscription(sub: PushSubscriptionPayload): Promise<void> {
+// `source` separates a deliberate opt-in from the background self-heal, so
+// the heal's effect is visible in analytics without a second event name.
+export async function registerPushSubscription(
+  sub: PushSubscriptionPayload,
+  source: 'enable' | 'resync' = 'enable',
+): Promise<void> {
   await request<void>('POST', '/api/v1/ui/push/subscription', sub)
-  captureEvent('push_subscription_registered')
+  captureEvent('push_subscription_registered', { source })
+}
+
+// Does planner-api still hold a row for this endpoint? See the route
+// comment in planner-api/src/routes/push.ts — a `false` here is the
+// client's evidence that the subscription was reaped and must be cycled.
+export async function verifyPushSubscription(endpoint: string): Promise<boolean> {
+  const res = await request<{ registered: boolean }>(
+    'POST',
+    '/api/v1/ui/push/subscription/verify',
+    { endpoint },
+  )
+  return res.registered
 }
 
 // Remove the browser's Web Push subscription (notifications turned off).
@@ -260,6 +278,12 @@ export interface AssistSuggestion {
   /** food only: the items to log, else null */
   items: AssistFoodItem[] | null
   confidence: AssistConfidence
+  /**
+   * Set when the confidence is low BECAUSE a date was lost or looks wrong
+   * (rather than the model being unsure about the category). A backwards-
+   * resolved date arrives WITH a startAt, so the fields alone can't say.
+   */
+  dateUncertain: boolean
   /** Trace ids for the feedback echo. */
   traceId: string
   responseId: string
@@ -464,6 +488,19 @@ export async function deleteFieldDef(listId: string, fieldId: string): Promise<v
     'DELETE',
     `/api/v1/ui/lists/${encodeURIComponent(listId)}/fields/${encodeURIComponent(fieldId)}`,
   )
+}
+
+// Resolve-or-create the "AI Analysis" text field on an arbitrary list (used
+// to analyze legacy diary entries in place). braindump-helpers.ts only
+// `import type`s DTO shapes from this module — that's erased at compile
+// time, so pulling its runtime AI_ANALYSIS_FIELD_LABEL/findAnalysisField
+// back in here is a type-only cycle, not a real one (a real runtime cycle
+// would explode immediately on import).
+export async function ensureAnalysisField(listId: string): Promise<FieldDefDto> {
+  const defs = await listFieldDefs(listId)
+  const existing = findAnalysisField(defs)
+  if (existing) return existing
+  return createFieldDef(listId, { label: AI_ANALYSIS_FIELD_LABEL, fieldType: 'text' })
 }
 
 // Wire shape of a recurring series (passed through from the Lists SDK).
@@ -1389,6 +1426,52 @@ async function remoteUpdateDiaryEntry(
   return dto
 }
 
+// Save an AI-analysis blob onto an arbitrary list item's custom fields,
+// bypassing updateDiaryEntry deliberately: analyzing a legacy diary entry is
+// online-only (enrichBraindump already is), so this skips the offline
+// outbox op and the optimistic cache mutation — the caller refetches once
+// the save resolves. Callers must pass ONLY the analysis field's own key
+// (e.g. `{ [def.id]: encoded }`), never the full customFields map spread —
+// the lists API merges patch keys over the stored map server-side (see
+// apps/lists-api/src/services/rpc-core.ts), so re-sending the whole map
+// risks reverting a concurrent edit from a stale client cache, or 400ing on
+// a field def that's since been deleted.
+export async function saveEntryAnalysis(
+  listId: string,
+  itemId: string,
+  customFields: Record<string, unknown>,
+): Promise<void> {
+  await request<DiaryEntryDto>(
+    'PATCH',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items/${encodeURIComponent(itemId)}`,
+    { customFields },
+  )
+}
+
+// Create a list item directly against the server, bypassing the offline
+// outbox and optimistic cache mutation — deliberately, like
+// saveEntryAnalysis above: online-only, caller refetches once the create
+// resolves. Needed wherever a create must be server-confirmed before a
+// dependent step runs (e.g. converting a note into a braindump entry, where
+// deleteNote must not fire until the replacement entry actually exists) —
+// createDiaryEntry's outbox path would return a synthetic tmp-id row and
+// let the caller race ahead of the real save.
+// Pass `input.ref` as the server-side idempotency key (same role as the
+// outbox's tmpId): a retry after a lost response re-resolves to the
+// already-created row instead of duplicating it. Deliberately no cache
+// write and no analytics event (unlike createDiaryEntry) — the caller
+// refetches.
+export async function createEntryDirect(
+  listId: string,
+  input: DiaryEntryInput,
+): Promise<DiaryEntryDto> {
+  return request<DiaryEntryDto>(
+    'POST',
+    `/api/v1/ui/lists/${encodeURIComponent(listId)}/items`,
+    input,
+  )
+}
+
 export async function deleteDiaryEntry(listId: string, itemId: string): Promise<void> {
   if (!(await tryEnqueue({ type: 'diary:delete', listId, itemId }))) {
     return remoteDeleteDiaryEntry(listId, itemId)
@@ -1488,10 +1571,16 @@ export interface BraindumpEnrichment {
   responseId: string
 }
 
+export interface EnrichBraindumpInput extends AssistRequestInput {
+  /** Existing theme/entity labels so the model reuses them instead of
+   * inventing near-duplicates ("skin" vs "skin issues"). */
+  knownConcepts?: string[]
+}
+
 // Analyze one dump. Throws ApiError (422 = unusable model output — the entry
 // stays saved un-analyzed, retryable via the per-entry Analyze affordance;
 // 503 = AI unavailable). Online-only, like parseAssist.
-export async function enrichBraindump(input: AssistRequestInput): Promise<BraindumpEnrichment> {
+export async function enrichBraindump(input: EnrichBraindumpInput): Promise<BraindumpEnrichment> {
   return request<BraindumpEnrichment>('POST', '/api/v1/ui/braindump/enrich', input)
 }
 
